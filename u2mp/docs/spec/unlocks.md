@@ -521,12 +521,14 @@ them that point into our net-patch9 copy stay valid because that copy is never f
 3. Allocate 0x10 + 0x18 * sections. NULL: return. Zero the first 0x10 bytes. Copy the section array
    to block + 0x10.
 4. For each copied section whose id is 0x681022f5 (hero) or 0x4252add5 (villain): n = s32 at +8,
-   items = ptr at +0x10; skip when n <= 0, n > 200 or items NULL. The skins to add are the 9.1
-   entries of that side (in table order) whose id is not the u32 at +8 of any of the n items. None:
-   skip. Allocate 0x50 * (n + k). NULL: skip (the section keeps the game's array). Copy the n
-   items. Each added item: a copy of the game's last item (index n-1), then +4 = 10, +8 = id (u32),
-   +0x18 = 0 (u64), +0x40 = ptr to the entry's static package string (u64), +0x48 = id (u64). Set
-   the section's count to n + k and its array ptr to the new array.
+   items = ptr at +0x10; skip when n <= 0, n > 200 or items NULL. The skins to add are the merged
+   table's records of that side (in table order) whose id is not the u32 at +8 of any of the n
+   items. None: skip. Allocate 0x50 * (n + k). NULL: skip (the section keeps the game's array).
+   Copy the n items. Each added item: a copy of the game's last item (index n-1), then +0 = an
+   unused purchase bit (the fixed bits of 9.1a, else the first free bit from 160 to 287), +4 = 10,
+   +8 = id (u32), +0x18 = 0 (u64), +0x38 = 1 (game-owned content), +0x40 = ptr to the entry's
+   static package string (u64), +0x48 = id (u64). Insert the item after its 9.1a anchor when it
+   has one, else at the end. Set the section's count to n + k and its array ptr to the new array.
 5. Header: s32 sections at +0, ptr (block + 0x10) at +8. This block becomes the store copy (the
    previous copy, if any, is dropped without freeing).
 6. Log `unlocks: MP store copied with %d added skin item(s) (hero / villain lists)` with the number
@@ -696,6 +698,21 @@ a record in net-patch9's skin table, so 6.3 step 8 appends nothing for them with
 only the store copy (6.4) uses their ids. Entries 3, 4 and 5 are campaign costumes; their pictures
 are a close twin's.
 
+### 9.1a Store row placements
+
+The store copy (6.4) gives these packages their own row, purchase bit and position. Other missing
+skins get the first free bit from 160 and are appended.
+
+| package | after | purchase bit |
+|---|---|---|
+| `mp-hero-nd` | `mp-hero-red` | 137 |
+| `mp-hero-pirate-nd` | `mp-hero-pirate` | 138 |
+| `mp-hero-lazarevic-fat` | `mp-hero-pinkerton` | 122 |
+| `mp-hero-flynn-frosty` | `mp-hero-lazarevic-fat` | 128 |
+| `mp-hero-frosty` | `mp-hero-rika` | 125 |
+| `costume-hero-lazarevic-healed` | `mp-hero-lazarevic` | 15 |
+| `costume-hero-skeleton-sir-francis` | `mp-hero-skeleton-marco` | 14 |
+
 ### 9.2 Baseball Shirt Drake record (1 entry)
 
 Fields: +0 = 1, +4 = 0 (hero), +8 = static host string `mp-hero-red`, +0x10 id 0x76474d48 =
@@ -774,7 +791,7 @@ Refresh:
     actor sources (PS4 path containing CUSA02320, other host path, missing file, substring dedup,
     400-character cap); main allocation failure (no table, no log).
 22. Store copy: no store; sections 0 / 33; hero / villain sections with all ids present (no new
-    array); with missing ids (k items appended from the last item); n 0 / 201; array allocation
+    array); with missing ids (k items inserted after their anchors, own bit and +0x38 = 1); n 0 / 201; array allocation
     failure; header allocation failure; store already ours.
 23. Boosters: missing; n 0 / 64; records outside the copy; id 0; slot 2; one None id missing;
     valid -> list filled (records with +0x18 zero skipped; at most 63).

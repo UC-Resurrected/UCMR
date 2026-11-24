@@ -63,6 +63,22 @@ struct Text {
     uint32_t id;
     const char *text[kColumns];
 };
+
+constexpr Text own_localized(uint32_t id, const char *en, const char *fr, const char *it, const char *de,
+                             const char *es, const char *el, const char *cs, const char *tr) {
+    Text t{id, {}};
+    for (int i = 0; i < kColumns; ++i) t.text[i] = en;
+    t.text[1] = fr;
+    t.text[2] = it;
+    t.text[3] = de;
+    t.text[4] = es;
+    t.text[16] = es;
+    t.text[18] = el;
+    t.text[19] = cs;
+    t.text[20] = tr;
+    return t;
+}
+
 const Text kOwn[] = {
     // ---- Profile panel k23 (0x59ddb0) stat labels
     {0xf67d9ad2u, {"Competitive Wins", "Victoires en compétition", "Vittorie competitive", "Kompetitiv-Siege",
@@ -381,6 +397,23 @@ const Text kOwn[] = {
      "Donitsi-Lazarević", "Smultring-Lazarević", "Kakälskaren Lazarević", "肥胖的拉札雷維奇", "Лазаревич-пончик",
      "Pączkowy Lazarević", "Lazarević enrosquillado", "Lazarević Gorducho", "Lazarević με Ντόνατ",
      "Kobliha Lazarević", "Çörekçi Lazarević"}},
+    own_localized(0xa5e10001u, "Doughnut Lazarević", "Lazarević obèse", "Lazarević ciambella", "Donut-Lazarević",
+                  "Rosquilla Lazarević", "Lazarević με Ντόνατ", "Kobliha Lazarević", "Çörekçi Lazarević"),
+    own_localized(0xa5e10002u, "Winter Flynn", "Flynn d'hiver", "Flynn invernale", "Winter-Flynn",
+                  "Flynn de invierno", "Χειμερινός Flynn", "Zimní Flynn", "Kışlık Flynn"),
+    own_localized(0xa5e10003u, "ND Prasako", "Prasako ND", "Prasako ND", "ND-Prasako", "Prasako ND",
+                  "Πρασάκο ND", "Prasako ND", "ND Prasako"),
+    own_localized(0x7039261fu, "Dragan", "Dragan", "Dragan", "Dragan", "Dragan", "Dragan", "Dragan", "Dragan"),
+    own_localized(0xf88dbbbdu, "Sir Francis Drake", "Sir Francis Drake", "Sir Francis Drake", "Sir Francis Drake",
+                  "Sir Francis Drake", "Sir Francis Drake", "Sir Francis Drake", "Sir Francis Drake"),
+    own_localized(0x158d9966u, "Winter Flynn", "Flynn d'hiver", "Flynn invernale", "Winter-Flynn",
+                  "Flynn de invierno", "Χειμερινός Flynn", "Zimní Flynn", "Kışlık Flynn"),
+    own_localized(0x8246cbf7u, "ND Pirate", "Pirate ND", "Pirata ND", "ND-Pirat", "Pirata ND",
+                  "Πειρατής ND", "Pirát ND", "ND Korsanı"),
+    own_localized(0xe2ce50dfu, "Zoran Lazarević", "Zoran Lazarević", "Zoran Lazarević", "Zoran Lazarević",
+                  "Zoran Lazarević", "Zoran Lazarević", "Zoran Lazarević", "Zoran Lazarević"),
+    own_localized(0xcabc423fu, "Harry Flynn", "Harry Flynn", "Harry Flynn", "Harry Flynn", "Harry Flynn",
+                  "Harry Flynn", "Harry Flynn", "Harry Flynn"),
     {0x006d7d58u, {"Heist Chloe", "Chloe cambrioleuse", "Chloe ladra", "Chloe als Diebin", "Chloe ladrona",
      "Kup-Chloe", "Assalto Chloe", "Chloe als rover", "強盗犯クロエ", "강도 클로에", "Ryöstäjä-Chloe", "Kupp-Chloe",
      "Kupp-Chloe", "竊盜克洛伊", "Хлоя-грабительница", "Włamywaczka Chloe", nullptr, "Chloe assaltante",

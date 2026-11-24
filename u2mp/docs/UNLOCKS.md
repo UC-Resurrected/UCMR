@@ -183,11 +183,12 @@ problem is in the actor file or its drawing.
 
 The hero / villain lists (cond 40/41, `0x6595a0`, reset op `0x6597b7`) walk only the MP store sections `681022f5`
 (heroes) and `4252add5` (villains) and show an item when a skin record has its id; the record's side is not read.
-unlocks.cpp now binds a copy of `92c6db02` whose two skin sections carry an item (a sibling as template, no
-condition) for each skin that had none, and appends their records after Baseball Shirt Drake:
-Zoran Lazarević (`mp-hero-lazarevic`) and Prakoso (`mp-hero-pirate`) (records without items: net-patch9 swapped
-their ids with the ND / Doughnut twins), the campaign costumes Lazarević - Healed (`costume-hero-lazarevic-healed`,
-villain), Drake - Dirty and Beat-up (`hero-dirty-beatup`, hero), Sir Francis Drake
-(`costume-hero-skeleton-sir-francis`, hero: a guess, as Marco Polo), and the GOTY MP skins ND Drake and Santa
-Drake. Every other campaign costume (store.bin `855a9c58`) already has an MP twin in the lists. The campaign packages
-share the MP skeleton (LOD0 only); not yet spawned in a match. The table order changed: every PC needs this build.
+unlocks.cpp binds a copy of `92c6db02` whose two skin sections carry an item for every skin table record that has
+none: each item copies the last original row for its price/rank/texts, gets its own unused purchase bit and
+game-owned content mask (`+0x38 = 1`), and is inserted after its character's row. The five requested skins are
+`mp-hero-nd` (hero, after `mp-hero-red`), `mp-hero-pirate-nd` (villain, after `mp-hero-pirate`),
+`mp-hero-lazarevic-fat` (villain, after `mp-hero-pinkerton`), `mp-hero-flynn-frosty` (villain, after
+`mp-hero-lazarevic-fat`) and `mp-hero-frosty` (hero, after `mp-hero-rika`). The campaign costumes Lazarević - Healed
+and Sir Francis Drake, Drake - Dirty and Beat-up, and the remaining GOTY skins use the same path. The campaign
+packages share the MP skeleton (LOD0 only); not yet spawned in a match. The table order changed: every PC needs
+this build.
