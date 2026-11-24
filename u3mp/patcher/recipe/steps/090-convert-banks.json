@@ -1,0 +1,37 @@
+{
+ "id": "convert-banks",
+ "title": "overlay-r3: 124 PS3 sound banks converted to the PS4 SCREAM format, samples in their own codec (u3fix.exe sound-banks, sound-banks/convert_banks.cpp)",
+ "kind": "script",
+ "job": "sound-banks",
+ "family": "overlay-r3/sound1/banks",
+ "needs": [
+  "ps3_disc",
+  "ps3_update"
+ ],
+ "commands": [
+  [
+   "u3fix.exe",
+   "sound-banks",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--job",
+   "{{JOB}}",
+   "--ps3-disc",
+   "{{PS3_DISC}}",
+   "--ps3-update",
+   "{{PS3_UPDATE}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-r3/u3data/build/main/sound1/banks/ps4/*.bnk"
+ ],
+ "must_write": false,
+ "log_lines": 4,
+ "reference_check": false,
+ "status": "reproducible",
+ "applied": "2026-10-27 15:51 (cloud b34.tar/glob.tar); converter rewritten 2026-11-05; samples kept in their own codec 2026-11-15",
+ "notes": "Rewrites PS3 SBlk v4/v5 big-endian banks to SBlk v13 (rules re-derived 2026-11-05; envelope table adsr_env.json and its nearest-pair fallback are the original 2026-10-27 converter's). Since 1.21.0 every sample keeps its own codec with the PS4 sample header of that codec, as the retail PS4 banks have them: PS-ADPCM frames copied (the PS3 leading zero frame and what follows the end frame left out), MP3 kept as MP3 (0x10-byte header, then the PS3 0x80-byte MP3 header as little-endian words and the MPEG data), PCM16 byte-swapped; a grain with flag 0x40 loops. Samples start 16-byte aligned. No re-encoding and no ffmpeg: before 1.21.0 MP3 and PCM16 samples were decoded with ffmpeg and re-encoded to PS-ADPCM, which garbled many sounds, and without ffmpeg the 95 banks with MP3 samples were skipped. The reference sha256 of every bank is in banks_list.json; a bank at its reference is left alone. The Uncharted 2 import converts its banks with the same code (u2import, converter version 2). C++ (u3fix.exe sound-banks), no Python.",
+ "recipe_version_added": "1.0.0",
+ "recipe_version_changed": "1.22.0"
+}

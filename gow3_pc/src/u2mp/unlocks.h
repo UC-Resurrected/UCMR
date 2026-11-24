@@ -1,0 +1,32 @@
+// u2mp unlocks: every multiplayer unlockable reported unlocked / owned, and the GOTY skin and booster
+// tables the PS4 net.bin lacks. See unlocks.cpp and u2mp/docs/UNLOCKS.md.
+#pragma once
+#include <cstdint>
+
+namespace u2mp {
+
+// Hooks the unlock-condition check (0xa4bb40) and the co-op weapon upgrade level (0xa4d280).
+void install_unlocks(int &installed);
+
+// Binds the GOTY skin (5a4731d2) and booster (916e03b0) tables from net-patch9 over the PS4 stubs (plus
+// net-npc-info, character attributes, speakers, material parameters and default settings: UNLOCKS.md 3.1)
+// and lists every booster in 0x113a788. Idempotent and cheap once done; only acts while NET_SM > 1 (call it
+// whenever the multiplayer menus are up: progression.cpp does, from 0x64e810).
+void unlocks_refresh();
+
+// Text of a skin name id that no text bank has (the GOTY DLC skins whose names came from the PS3 DLC
+// banks): a label made from the skin's actor package name. NULL for other ids. For the TextDb miss path.
+const char *unlocks_text(uint32_t id);
+
+// CRC of the skin table's ids in order (0 until the tables are bound): the PCs of a match must agree,
+// since the player data message sends skins by position (session.cpp compares it at join).
+uint32_t unlocks_skin_fingerprint();
+
+// The local player's chosen hero and villain actor packages, NULL until a choice is applied.
+const char *unlocks_local_skin();
+const char *unlocks_local_villain();
+
+// Re-applies each net slot's character index and the local slot's art to the 10-entry per-slot table.
+void unlocks_apply_slot_skins();
+
+}  // namespace u2mp

@@ -1,0 +1,33 @@
+{
+ "id": "music-streams",
+ "title": "overlay-r3 sound1/streams/music: the 81 PS3 music streams the PS4 game lacks (multiplayer win / lose / game-over / level-up stingers, MP edits and remixes, Power Play, co-op endings), byte copies (u3fix.exe music-streams, music-streams/copy_music.cpp)",
+ "kind": "script",
+ "job": "music-streams",
+ "family": "overlay-r3/sound1/streams",
+ "needs": [
+  "ps4",
+  "ps3_disc"
+ ],
+ "commands": [
+  [
+   "u3fix.exe",
+   "music-streams",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--ps4",
+   "{{PS4}}",
+   "--ps3-disc",
+   "{{PS3_DISC}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-r3/u3data/build/main/sound1/streams/music/*.xvag"
+ ],
+ "must_write": false,
+ "reference_check": false,
+ "status": "reproducible",
+ "applied": "2026-11-15 (tested on a copy: 81 files, 259.3 MB, byte-identical to the disc's music.psarc entries)",
+ "notes": "The game opened sound1/streams/music/mp_win2.xvag, mp_win3.xvag, 135_gameoverstinger_02/04.xvag, 363_londoncombat_mp_remix.xvag, 654_searchingforsully_mams.xvag and borneoendigc.xvag in the owner's matches and found none (boot.log). Rule: every .xvag of the disc's build/main/sound1/streams/music.psarc whose name the PS4 u3data music folder lacks; PS4 has no version of them. PS3 XVAG as the speech / sfx copy steps bring over (big-endian header, MPEG). Idempotent.",
+ "recipe_version_added": "1.21.0"
+}

@@ -1,0 +1,32 @@
+@AGENTS.md
+
+C++ ABOVE EVERYTHING ELSE: write everything in C++. No new C, no Python, ever; existing C and Python get ported to C++
+when you touch them. Another language only where C++ is really impossible or clearly not practical (third-party
+libraries such as BearSSL, a few lines of assembly for the game's calling conventions, QML layout, short shell /
+PowerShell / CMake glue); if in doubt, ask the owner first (see AGENTS.md, "Language: C++ above everything else").
+
+Claude Code: the hook in `.claude/settings.json` refuses any write or edit of a Python file here.
+Do not work around it; write the change in C++ instead.
+
+Keep ONLY the latest version of anything versioned (see AGENTS.md, "Versions"): never copy a folder to make a new
+version, `git mv` the old one and change its files. Older versions live in git history only.
+
+Keep it simple, but always legal (reimplement game code from a description, never rewrite it 1:1) and only
+simplify when the result does 100% of what the original does; if a simpler way would break anything, don't (see
+AGENTS.md, "Keep it simple, but legal and exact").
+
+Port assets from the PS3 only when PS4 has none: if PS4 has the asset anywhere (campaign included, e.g.
+baseball-shirt / red shirt Drake as a campaign skin), use PS4's, with its better textures and a smaller import
+(see AGENTS.md, "Assets: PS4 first").
+
+Always on, every session (see AGENTS.md, "Agent tools: context-mode and caveman lite, always on"):
+- context-mode: run any step that counts, filters or searches more than about 20 lines (logs, build output,
+  disassembly, big files) through the context-mode connector's `ctx_execute` and print only the answer.
+- Caveman lite: replies are short and direct, in complete sentences, with every technical fact kept exact. Chat only:
+  code, comments, commits, PRs and docs stay normal prose.
+
+Helper source (`u3mp/helper-source/`), in short: a contributor syncs their fork, edits only that folder, and opens a
+pull request; the maintainer merges it, then builds and ships the next helper version. So: never make or rename a helper
+version, never touch the generated block at the end of `u3_lan_profiles.c`, write only between the contributor markers,
+and port only the rows assigned to you (see AGENTS.md, "Helper source: several people at once", and CONTRIBUTING.md,
+section 7).

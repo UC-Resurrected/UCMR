@@ -1,0 +1,86 @@
+# u2mp — Uncharted 2 multiplayer in the PC port
+
+Bringing back Uncharted 2: Among Thieves multiplayer, which Bluepoint stripped from the PS4
+Collection. Same approach as [u3mp](../u3mp/README.md): replicate the PS3 game, porting what the PS4
+build left as stubs or dead code, with the PS3 executable as the map.
+
+Started from scratch on 7 November 2026: earlier third-party Uncharted 2 multiplayer and co-op code
+was removed from this repository (tag `backup/before-sparks-removal` keeps the state before).
+
+> **No game files are included.** Everything here is source, scripts and notes. Files derived from
+> the game are made on the player's PC from their own copies and stay out of git.
+
+**Targets:** PS4 Collection **CUSA02320**, Uncharted 2 executable **1.02** (`big2-ps4_Shipping.elf`,
+SHA-256 `5047b693…`). PS3 reference: **NPUA80698** (PSN, 1.10, EBOOT SHA-256 `fdac6628…`); the DLC map
+packs come from a BCUS98123 install (see docs/ASSET-INVENTORY.md).
+
+## Status (9 November 2026)
+
+Every multiplayer function the PS4 build left as a stub is restored in C++ (77 of 85; the other 8
+are empty on PS3 too, or were the PSN connection handshake, which the session layer replaces), and
+the removed layers (transport, packet layer, sessions, NetInit) are rebuilt. **None of it has run in
+the game yet**; the host unit tests pass.
+
+| Part | Where | State |
+|---|---|---|
+| Multiplayer in the main menu (with and without saves) | `patcher/importer/overlay.cpp` | checked in game (layout) |
+| Module: build check, hooks | `gow3_pc/src/u2mp/install.cpp` | built |
+| Network core: UDP, acks, reliable/unreliable, 10 peers | `net.cpp` | unit test passes |
+| Game packet layer (PS3 header/acks, the game's own pack/unpack) | `gamenet.cpp` | built |
+| Sessions: party, lobby roster, start match, follow, leave, kick, NET_SM | `session.cpp` | built |
+| 14 net event types PS4 emptied (Read/Write, NpcSpawn Apply) | `events.cpp` | unit test passes |
+| Co-op / net script natives | `natives.cpp` | built |
+| Progression (money, rank, stats, leaderboards) kept on the PC | `progression*.cpp` | unit test passes |
+| Cinema (recording, list, playback) | `cinema*.cpp` | unit test passes |
+| NPC damage in co-op, player/party options, PSN-only buttons | `remaining.cpp` | built |
+| Menus: profile name, party status, playlists, friends / players met | `menus.cpp` | built ([docs/MENUS.md](docs/MENUS.md)) |
+| DLC maps listed only when imported | `dlc.cpp` | built ([docs/DLC.md](docs/DLC.md)) |
+| Voice chat (Opus, push-to-talk or open mic, mute per player) | `voice.cpp` | unit test passes |
+| Asset import from the PS3 copy, PS4 first: skins (34 from PS4 campaign costumes), props and animated actors, the Fort, DLC maps, sounds, music, texts | `patcher/importer/` (`u2import.exe`) | full run 1,621 ok, 0 failed ([docs/IMPORT.md](docs/IMPORT.md)) |
+
+## How it runs
+
+- Launcher, Multiplayer tab while Uncharted 2 is chosen: the import (PS3 folder, RPCS3 game data, IMPORT) writes the
+  "U2 Multiplayer" folder, laid out like "U3 Multiplayer" and by default next to it: `state.json`, `import.log`,
+  `image/` (the menu overlay), `recipe/work` (the converted files), `recipe/scratch`, `recipe/_recipe`, `tools/`.
+  Once an import has finished, Uncharted 2 starts with multiplayer: the launcher makes the menu overlay into
+  `image/` and sets `UNCHARTED_U2MP_OVERLAY` (image; recipe/work) and `UNCHARTED_U2MP=1`.
+- `tools/probe_uncharted.py` lays the overlay over /app0 for Uncharted 2; the runtime calls
+  `u2mp_install` after linking the image, before protecting it.
+- In game: Multiplayer starts the party (host, or join the address). The party leader picks
+  Custom Game or Matchmaking (a random game of the chosen type), then Start Match: the members
+  follow the leader into the match. Results return everyone to the lobby.
+- Files on the PC: `<user>/u2mp/progression.bin`, `<user>/u2mp/cinema/*.u2cinema`.
+- Switches: `UNCHARTED_U2MP_PORT`, `UNCHARTED_U2MP_CINEMA=0`, `UNCHARTED_U2MP_PROGRESSION=<file>`.
+- The release package ships `u2mp/patcher` and this README (`tools/package_windows.sh`); the C++ is in
+  the runtime executable.
+
+## Docs
+
+| File | What |
+|---|---|
+| `docs/PS3-110-MAP.md` | The PS3 1.10 multiplayer code |
+| `docs/FUNCTIONS-FRONTEND-NET.md`, `docs/FUNCTIONS-MATCH-GAMEPLAY.md` (+ .tsv) | Every function, PS3 1.10 against PS4 1.02 |
+| `docs/TRANSPORT-INTERFACE.md` | Where the transport plugs in (message layers, events, BitStream) |
+| `docs/SESSION-INTERFACE.md` | Sessions, NET_SM, pages, match start |
+| `docs/CINEMA.md` | Cinema |
+| `docs/ASSET-INVENTORY.md` | Multiplayer assets on PS4 and PS3 |
+
+## Layout
+
+| Folder | What |
+|---|---|
+| `patcher/importer/` | What the launcher runs on the player's PC: `u2import.exe` (the asset import and the menu overlay). |
+| `tools/` | Research scripts (PS3/PS4 disassembly, function matching, inventories). |
+| `docs/` | Findings. |
+| `../gow3_pc/src/u2mp/` | The C++ module; tests in `../gow3_pc/tests/test_u2mp_*.cpp` (`ninja -C out/gpu u2mp-net-test u2mp-events-test u2mp-progression-test u2mp-cinema-test`). |
+
+Code that runs inside the game is **C++**, built into the runtime (`gow3_pc`); the C runtime calls it
+through `extern "C"` entry points. The launcher-side steps before the game starts (asset import, menu overlay) are
+C++ too (`u2import.exe`).
+
+## Next
+
+1. Bug-fixing round in game ([docs/TEST-LOG.md](docs/TEST-LOG.md)): the crash after the match task starts
+   (0x64100f), then a full match on one PC, then two PCs.
+2. chloe-ponytail; DLC map cards in net.pak; LAN game browser; host migration.

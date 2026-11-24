@@ -1,0 +1,36 @@
+# Never in the repository: anything from a game or a player, and what the builds make.
+/game/
+/user/
+/reference/
+/dist/
+*.pkg
+/analysis/
+/gow3_pc/out/
+/.ccache/
+/Uncharted.lnk
+__pycache__/
+*.pyc
+
+# Research output derived from the game (disassembly, extracted files): never committed.
+/work/
+/ps3cache/
+# u2mp research tools stay local (Documents/Uncharted_Collection_MP/u2mp-tools)
+/u2mp/tools/
+
+# never commit a compiled helper or its local build folders (private; older ones held game values)
+u3mp/patcher/build/*/profile-helper.bin
+u3mp/patcher/build/*/link.json
+
+# launcher/native build output (tools/package_windows.sh builds it)
+launcher/native/build/
+launcher/native/uncharted_native.dll
+launcher/native/apply_update.exe
+launcher/native/pythonw_bridge.exe
+launcher/native/game_starter.exe
+# fetched and built tools (tools/fetch_aa_files.sh, tools/build_ffmpeg.sh)
+downloads/
+u2mp/bin/
+u3mp/bin/
+
+# each install keeps its own settings file in its folder (GitHub #47)
+/launcher.json

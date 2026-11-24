@@ -1,0 +1,484 @@
+# Uncharted 2 multiplayer: the PS3 -> PS4 asset import
+
+`u2import.exe` (C++, sources in `u2mp/patcher/importer`) builds, on the player's PC, an overlay with every
+multiplayer asset the PS4 Collection lacks. It takes them from the player's own PS3 copy and converts them to the PS4
+format. Nothing game-derived is in the repo or the release. The import list (`u2mp/docs/import-list.tsv`) holds only
+names, sizes and SHA-1 hashes. The import never runs the game.
+
+Rule: **if the PS4 game has an asset (skin, map, picture, sound ...), the PS4 one is kept**. Every import-list row is
+checked against the PS4 game first (file present; for music: the PS4 music settings name it; for speech: the PS4
+speech archive of that language has the line).
+
+## Running it
+
+The launcher runs it (`u2mp\bin\u2import.exe` of the package). By hand:
+
+```
+u2import --ps4 "<CUSA02320 folder>" --ps3 "<NPUA80698 folder>"
+         [--ps3-dlc "<RPCS3 dev_hdd0/game/BCUS98123/USRDIR>"] --out "<overlay folder>"
+         [--ps3-data "<RPCS3 dev_hdd0/game/<id>DATA2>"] [--groups A,B,C,D,E]
+         [--speech-langs english,french,sam-spanish,brazilian] [--dlc-ruins | --no-dlc-ruins]
+         [--drop-navmesh] [--validate] [--force] [--only REGEX] [--ps3-elf EBOOT.elf] [--objdump PATH] [--ffmpeg PATH]
+u2import --overlay <game folder> <overlay folder> [--update <update folder>]   the menu overlay (the launcher)
+u2import --shipped-id                                                          the import's fingerprint (the launcher)
+```
+
+Maintainer commands of the same program (the import never runs them):
+
+```
+u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>
+u2import --dc learn|test <ps3 base> <ps4 game> <schema.json> [net-patch9.bin]
+u2import --dc convert <schema.json> <ps3 module.bin> <out.bin>   |   u2import --dc info <module.bin>
+u2import --hk-tables --ps3-elf <EBOOT.elf> --ps4 <game folder> --out <u2hkclasses.json> [--objdump <path>]
+u2import --twin-build <ps3 mp skin.pak> <ps3 twin.pak> <ps4 twin.pak> <out.pak>
+u2import --psarc list <file.psarc>   |   u2import --psarc extractall <file.psarc> <folder>
+```
+
+* PS3 sources: the GOTY release NPUA80698 1.10 (base archives + `all-patches.psarc`) for game data, the map packs
+  (`dlc-map1/2.psarc`) from the BCUS98123 install, and the server-only spawn paks / `net-patch9.bin` from a
+  `*DATA2` folder (see "What the game needs to see the new content"). For a row the import takes the import-list source first, then a GOTY or
+  map-pack copy, and a BCUS title update (`dlc-patch2/3/5/7`) only when nothing else has the file; every input is
+  checked by SHA-1. The 23 group A/B/E rows that the inventory took from `dlc-patch2` (Fort, Pinkerton, Rika,
+  `ruins-multi.bnk`) point at their byte-identical GOTY `all-patches.psarc` copies since 2026-11-08
+  (`the-fort-multi.txt`: the GOTY copy differs only in CRLF line ends). Two inputs still come from `dlc-patch7`
+  because no GOTY file has them: see "Known gaps" 10.
+
+* Output: `<out>` is the "U2 Multiplayer" folder, laid out like Uncharted 3's "U3 Multiplayer" (the launcher puts it
+  next to that one unless the player chooses another place):
+  * `recipe/work/u2data/build/main/...`: only the converted files plus `pak22_ps4.txt` and
+    `sound1/config/ps4/banks.txt` when something was added to them (the folder the game lays over /app0);
+  * `state.json` (per item: status, source, output relative to `recipe/work`, SHA-1 of the input, converter
+    version) and `import.log`;
+  * `recipe/scratch/` (caches: extracted PS3 paks, the retail material survey, level plans, the SHA-1 memo; it can
+    be deleted);
+  * `recipe/_recipe/`: the import list and the importer fingerprint of the last finished import;
+  * `image/`: the menu overlay (`u2import --overlay`, made by the launcher before each start);
+  * `tools/`: tool files of the import.
+* Progress: `@U2MP {json}` lines (`phase` item/done).
+* Resumable: an item whose input SHA-1, converter version (`CONV_VERSION`) and output size are unchanged is
+  skipped. Failed and unsupported items are tried again on every run.
+* Inputs are verified by the SHA-1 in the import list. A mismatch is reported as `missing`, unless
+  `--no-verify` is given.
+* Needs ffmpeg for sound banks with MP3 samples (`--ffmpeg`, the package's `u3mp/bin`, msys64, PATH) and GNU objdump
+  for the Havok class tables (`--objdump`, `u3mp/bin`, msys64, PATH). Nothing else: no Python.
+* `--validate` re-runs the converters on files both platforms have and compares the results with retail PS4
+  (`<out>/recipe/scratch/validate/validation.json` and `state.json`).
+
+Item statuses in `state.json`: `ok` (converted and installed), `ps4` (the PS4 game has it), `skipped`
+(not needed: language without a PS4 counterpart, music the PS4 settings do not use, group F), `missing`
+(not in the given PS3 folders, or SHA-1 differs), `unsupported` (no converter for its content yet, listed
+below), `failed` (a converter or check raised; see import.log).
+
+## Files
+
+`u2mp/patcher/importer` (the part names in the rest of this document, such as `u2actor` or `u2twin`, are the names
+the converters had when they were Python modules; the table says where each is now):
+
+| file | what | part |
+|---|---|---|
+| `u2import.cpp` | driver: arguments, the steps, the import list, PS4-first check, conversion per type, state | |
+| `sources.cpp` | PS3 archive / DLC index (precedence dlc-patch7 > 5 > 3 > 2 > patch > dlc-map2 > dlc-map1 > base), PS4 index | sources |
+| `sound.cpp` | XVAG (PS-ADPCM) PS3 -> PS4; sound banks via the U3 SBlk converter (`u3mp/patcher/tools/fixes/sound-banks`) | xvag, u2bank |
+| `registry.cpp` | pak22_ps4.txt / banks.txt | registry |
+| `texts.cpp` | text banks: the PS4 bank plus the PS3 strings it lacks (DLC map titles) | u2text |
+| `levels.cpp` | level paks: stage (geometry) and data (-ingame10 / -npc) | u2level |
+| `stage.cpp` | stage paks on the U3 stage converter; LIGHT_TABLE_1, COLLISION_DATA_HAVOK_BG version 3 and WATER_DATA version 3 in the U2 layout | u2light, u2coll, u2water |
+| `stagecheck.cpp` | the check of every converted stage pak | stagecheck |
+| `actor.cpp`, `actor.hpp` | skins and props: U2 item names on the U3 actor converter, kinds, template choice | u2actor |
+| `actorparts.cpp` | U2 ARTGROUP_DATA / PACKAGE_ITEM_LOOKUP / LEVEL_PATS_1 / SOUND_BANK_TABLE, prop skeleton ids, login order | u2actorparts |
+| `actors.cpp` | the actor27 rows: kinds, PS4 prop twins, templates, the loader check | u2actor |
+| `havok.cpp` | the Havok class tables built on the player's PC (work/u2hkclasses.json) | u2hkgen, u2havok |
+| `twin.cpp` | skins built from the PS4 campaign actor (twin) + the converted MP parts; `--validate-twins` | u2twin |
+| `netimg.cpp` | the PS3 menu images the PS4 net.pak lacks (`pak22/ps4/net-u2mp.pak`) | u2netimg |
+| `netpatch.cpp` | `dc1/ps4/net-patch9.bin` on the U3 DC converter | u2dc |
+| `overlay.cpp` | the menu overlay (main menu with a Multiplayer button) | u2mp_overlay |
+| `validate.cpp` | `--validate`: the reference-pair checks | validate |
+| `devtools.cpp` | the maintainer commands (`--dc`, `--hk-tables`, `--twin-build`, `--psarc`) | |
+
+The U3 converters (`u3mp/patcher/tools/fixes/dctools`) do the rest with their Uncharted 2 differences switched on by
+`u3::g_u2`: the U2 cook path, stage login order and items (`ps4stage`), level materials (`stageplan`), VIS_INFO_1
+version 7 (`visinfo`), region scripts, FEATURE_DB_2 and NAV_MESH_1 (`ps4ingame`), ANIM channels (`anim`), the D-block
+packfile of JOINT_HIERARCHY (`skel`), the Havok 6.1 -> 2011 changes (`hkconvert`), the U2 DC module header (`dcconv`).
+`u3import.exe` never sets `g_u2`.
+
+The import was first written in Python and moved to C++ on 2026-11-14. Every output of a full GOTY import, the
+`--validate` report and the twin validation are byte-identical to the Python versions' (except the 3 sound banks the
+last Python run could no longer convert).
+
+## Format differences found (U2 pak22 / actor27 vs U3 pak23 / actor33)
+
+The container is the same: 0x0a79 paks, PS3 big-endian with 32-bit pointers, PS4 little-endian with 64-bit
+pointers, and the same page and fixup tables (`ndpak` reads both). What differs:
+
+| area | U2 (PS3 -> PS4) | U3 | where |
+|---|---|---|---|
+| texture cook path (PS4) | `d:/dev/CP9/Data/U2/CookData/ND/build/texture2/` | `.../U3/...` | u2paktools |
+| skin geometry items (PS3) | `FOREGROUND_SECTION` -> 0x20 LOD record {ptr prototype, ptr, 0, 2}; prototypes listed by unnamed `PM_COLLECTION_2` {1, ptr} items | `FOREGROUND_SECTION_2` -> prototype; `PM_FG_PROTOTYPES` | u2actor |
+| skin streams (PS4) | also slot 12 (2nd UV, half2) and slot 4 (vertex colour, half4) | slots 0-3 | u2actor |
+| skin submesh flags (PS4) | 0 on every submesh | 0x10000 except the last LOD | u2actor |
+| LIGHT_TABLE_1 | header 0x40 -> 0x68: +0 ptr flags; u32 +4..+0x20 -> +8..+0x24; 7 pointer slots +0x24..+0x3c -> 8-byte slots +0x30..+0x60; records 0x3c (all words swapped), local lights 0xf0 | 0x60 -> 0xa0, record word +0x30 raw | u2light |
+| VIS_INFO_1 | version 7 = U3 version 9 without the H table (header 0xa0 -> 0xd0) | version 9 | u2vis |
+| level data paks | `-ingame10` | `-ingame12` | u2paktools.INGAME |
+| region scripts | two {sid, ptr lambda} entries; lambda {ptr body, sid}; body {code*, consts*, hash, tag}; PS4 replaces the lambda sid, the body tag and a trailing tag word in the code with padding | one entry; lambda {code*, consts*, ...} with the code at +20 | u2ingame |
+| FEATURE_DB_2 | 2 arrays (elements 0x40 and 0x34) + 2 trees; PS3 0x1c -> PS4 0x40 | 3 arrays (0x40, 0x38, 0x28) + 3 trees | u2ingame |
+| stage login order (PS4) | small items, EFFECT_TABLE, TEXTURE_TABLE, LEVEL_OFFSET_1, VIS_INFO_1, GEOMETRY_1, LIGHT_TABLE_1, collision | ... GEOMETRY_1, VIS_INFO_1, ..., ATTACHED_FG_MAPPING, ..., TAG_FLOAT | u2paktools._STAGE_EDITS |
+| stage extra items | no ATTACHED_FG_MAPPING, no TAG_FLOAT | both | u2paktools._STAGE_EDITS |
+| level materials (PS4) | mostly their own shaders (`blend-color-bump-specular.fx`, `color-bump-diffuse.fx` ...); prime-shader is used by characters | prime-shader | u2paktools._MKPLAN_EDITS |
+| NAV_MESH_1 | no 'NavM' header: header 0x80 -> 0xa0, polys 0x50 -> 0x60, portals 0x10 -> 0x18, info 0x50 -> 0x54; PS4 order header, verts, name, polys, info, bytes, portals | NavM v3 | u2nav |
+| COLLISION_DATA_HAVOK_BG | version 3: Havok-6 era extended mesh (subparts of float3 vertices + u16 indices, per-triangle u8 material index, ND materials, MOPP, welding) widened to 64-bit pointers, all blocks inline in the item (header 0x70, subpart 0x40 -> 0x90 with a Havok 2011 identity transform, stridingType +1, materials {a, b} -> {a, 1.0f, b}, vertices / indices / MOPP code / welding 128-aligned, item data 128-aligned in its page) | version 6 -> Havok hkcdStaticMeshTree | u2coll |
+| WATER_DATA | version 3: objects 0x70 -> 0x88, mesh vertices 40 B with their own byte orders (3 words differ from U3) | version 5, objects 0xf0 -> 0x108 | u2water |
+| big paks | fixup directory entries {page, offset, count}: 'page' = 0x80000-byte chunk of the header block (more than 65536 fixups); PS4 writes one table | same | u2paktools (ndpak edit) |
+| text banks | PS4 networking banks lack 233 PS3 strings, among them the DLC map titles | | u2text |
+| sound banks | SBlk v4 (as U3) -> v13 | same | U3 bnkconv |
+| XVAG | PS4 keeps 4 PS-ADPCM music tracks: header little-endian, version 2, fmat +8 bytes {1, channels}, word 4 = interleave, data in per-channel blocks | U3 PS4 reads PS3 XVAGs as they are | xvag |
+
+Texture formats (DXT1/5 -> BC1/3, PS4 8x8 tiling, streamed low mips) and the shader / material ids work the same as in
+U3. Converted paks keep their textures in the pak (no texturedict1 stream). Retail U2 PS4 paks keep only low mips
+in the pak, so converted paks are larger than retail.
+
+## Conversion per asset type
+
+| type | how | checked against |
+|---|---|---|
+| streams / music (`.xvag`) | `xvag` (sound.cpp): container rewrite, ADPCM frames kept, no re-encode | 146/148/149/150_JungleExplore: byte-identical with the retail interleave |
+| speech (`pnk-*`, `rka-*`) | `xvag` -> `sound1/speech/<ps4 language>/<line>.xvag` (loose). PS3 english/french -> same; spanish -> sam-spanish; portuguese -> brazilian (NPUA80698 is the North American release); the other 6 PS3 languages have no PS4 counterpart | the format as above (the PS4 speech lines are ATRAC9, no PS-ADPCM pair) |
+| music | only tracks the PS4 `dc1/ps4/music-settings.bin` names and the PS4 folder lacks, written loose to `sound1/music/<name the settings use>.xvag`: 23 = MP_Win1-3 / MP_Lose1-3 (the match-end stingers), 15 `*_Coop1/2/3`, and PS3 407/428 `BrutalComboMambo_LOOP1/2ALTSTART`, which the PS4 settings name as 336/338 but PS4 does not ship. A PS3 track is matched by its name, else by its title after the track number (`music_name` in u2import.cpp; PS4 renumbered the tracks). The PS3 873/892/901 `*_Coop3` are on PS4 renumbered as 620/610/609 and stay PS4 (skipped). The settings hold no other name that neither PS4 nor the overlay has; there is no music list to register (the game opens the track by name) | as above |
+| sound banks | U3 `bnkconv` (SBlk v4 -> v13, samples keep their PS3 codec: PS-ADPCM, MP3 or PCM16, stored like the retail PS4 banks) -> `sound1/banks/ps4/`; new names appended to `sound1/config/ps4/banks.txt` | banks both have: same header counts, different samples (retail U2 PS4 banks were rebuilt from source) |
+| skins (`mp-hero-*`) | with a PS4 campaign twin: `u2twin` (below: the PS4 mesh and materials, MP parts converted). Otherwise `u2actor`: U3 `ps4actor` geometry and texture conversion; materials, effects and joint table from a retail PS4 mp-hero with the same skeleton (all MP heroes use skeleton 0x27e57f43) that shares the most material names | twin builds: the 15 retail pairs (below); the 16 retail skins converted with another template: see Validation |
+| props, anims, Havok actors | `u2actor.convert_prop` (section "Props and animated actors"): props through the skin path plus skeleton, anims, collision, sound banks; animation paks and loose ragdolls on their own | the actor27 reference pairs, below |
+| level background paks | `u2level` stage: mkplan (materials by name from retail U2 paks, otherwise the closest retail background material) -> fxextract -> ps4stage (+ u2light, u2vis, u2coll, u2water) -> stagecheck + U2 login order + u2coll.check_ps4 | sky/wide pairs, collision and water pairs: see Validation |
+| level data paks (`-ingame10`, `-npc-ingame10`, `*-npc`) | `u2ingame` (U3 ps4ingame + U2 scripts / FEATURE_DB_2 + u2nav) | 6 retail pairs block by block; nav meshes: 4 pairs |
+| text banks | `u2text.complete`: `text1/ps4/<lang>.networking` and `.common` = the PS4 bank (from `core.psarc`) completed: ids it lacks or has only as the placeholder `_` from the GOTY bank of that language (every GOTY archive, newest first), then sam-spanish from spanish and brazilian from portuguese; English always written. A real PS4 string is never changed. The game reads `core.psarc`; the runtime answers misses and placeholders from these banks, its own texts, then English (texts.cpp, TEXTS.md) | |
+| registry | `pak22_ps4.txt` = retail file + appended levels from the PS3 per-level `.txt` (only for levels whose package converted; package/actor/bank lines kept when the file exists on PS4 or in the overlay; the 8 MP `package-ts texturedict1/...` lines added). A level the PS4 registry already defines keeps its PS4 entry; the log and `state.json` say whether the PS3 entry reads the same. The 7 such levels (`the-fort-multi`, `ruins-multi`, `ice-cave-multi`, `gompa/shambhala/village/warzone-multi-npc`) have exactly the PS3 (patch / map pack) lines, so "7 not added" is correct and nothing is lost | every package / actor / sound-bank line of the 112 MP and co-op levels of the result resolves to a PS4 or overlay file (bank names also in banks.txt), apart from `sniper-towers-multi-ingame` and `train-wreck-multi-tdm-ingame`, which no PS3 or PS4 copy has |
+
+## Props and animated actors (`u2actor` + `u2actorparts`, `u2anim`, `u2skel`, `u2actorcoll`, `u2havok`)
+
+The 55 actors the skin path left out: Fort / DLC-map / Train Wreck props with their own skeleton, animations,
+collision or sound banks, 5 animation-only paks (`anim-mp-*`, `taps-mp-*`) and `mp-hero-chloe-ponytail` (a loose
+ragdoll). `u2actor.kind()` sorts a PS3 actor pak into skin / prop / anim / havok; `convert_prop()` builds it.
+
+**PS4 first.** Every prop was searched in the PS4 game under another name (64-byte blocks of the PS3 MP pak against
+the PS3 copies of all 1285 PS4 actors, then item and texture lists). Twins (`u2actor.PROP_TWINS`) are converted
+with the PS4 twin as template, so the twin's material records (shader, parameters) and remastered textures are used;
+mesh, skeleton, anims, collision and sound banks come from the PS3 MP pak because every MP version adds or lacks
+items (LODs, the sound bank `phys-metal-kitchen`, anims):
+`debris-hi-pot-a/-b/-hang-a/-hang-b/-n-lid` (debris-wz-pot-*), `multiplayer-generator(-explode)` (dig-generator*),
+`mi-24-heli-mp-lod0` (mi-24-heli-lod0), `mi-24-heli-missle-mp` (mi-24-heli-missle), `mp-wrk-crash-boxcar`
+(wrk-box-car-02), `mp-wrk-explode-tanker` (wrk-exploding-tanker-b). The other 44 have no PS4 twin (the facility,
+highrise, museum, fort and ruins MP props and the MP animation sets are not in the PS4 game) and are converted from
+PS3; their materials come from the retail actor that shares most material names / folders (usually none: the PS3
+textures on the closest retail material, as for level materials).
+
+What differs from U3 / the skin path (all found on the PS3/PS4 actor27 pairs):
+
+| item | U2 PS3 -> PS4 | pairs, result |
+|---|---|---|
+| ANIM | U3 clip (ICE -> OrbisAnim, `anim.convert_clip`) and header; the float channels sit in an ANIM_RAWCHANNELS item on PS3 and inside the ANIM on PS4: {n, f32 rate, ptr entry[n]}, entry {sid, ptr D}, D = two keys {quat, scale, trans} (0x58), ptr samples, u16 {stride, ?, ?, count}, samples f32 (`u2anim`) | 11,114 ANIMs: 5,585 byte-identical, 5,529 identical apart from the 8 uninitialised bytes of the clip tail pad |
+| animation paks | `anim.convert_pak` with the U2 ANIM reader and the U2 artgroup / lookup | 132 pairs: same items and sizes |
+| JOINT_HIERARCHY | U3 `skel`; props with a ragdoll keep a Havok packfile behind the D block (PS3 D +0x4c, PS4 +0x90; wrapper {size, 1, 0...} PS3 0x10 / PS4 0x20 with the 8 magic bytes) (`u2skel`) | 949 pairs: 861 identical apart from uninitialised pad bytes, 68 ragdolls differ only in the packfile floats below, 20 not reachable (character bases with another skeleton blob variant; not needed) |
+| FG skeleton | FOREGROUND_SECTION_2 +8 = PS3 FG +8, +0xc = skeleton blob +4, joint table = the JH joint sids | 937 / 944 pairs |
+| COLLISION_DATA_FOREGROUND | {0x1001, n, parts}; part as U3; hk block {size, 1, trailer} + packfile (PS4 header 0x30, +0x2c = magic word); trailer 3 x {elements, count}, element records 0x40 / **0x34** (U3 0x38) (`u2actorcoll`) | 660 items: 659 byte-identical (1: an uninitialised word in the retail packfile) |
+| COLLISION_HAVOK_JOINTED | {0x2001, 0, 0, 0} + the D-block wrapper + packfile | 3 pairs: same layout and sizes, packfile floats as below |
+| Havok packfiles | Havok-6.1.0-r1 (PS3) -> hk_2011.3.0-r1 (PS4): U3 `hkconvert` with 6.1 / 2011 class tables (`u2hkgen`, below) and the 6.1 -> 2011 changes (`u2havok.transform_61`): motion type enum (6.1 has the stabilized types), hkMotionState dampings as hkHalf + timeFactor / gravityFactor 1.0, quality type 2 -> 1, hkaBone inline, hkaSkeletonMapperData -> hkaSkeletonMapper, hkVariant -> pointer, mesh subparts typeAndFlags / INT8 index type / transform, mesh materials, setupStabilization / ball-socket atoms; strings unaligned, local fixups in target order | 2,000 packfiles: 1,925 byte-identical; 68 ragdolls equal apart from sub-ULP floats (retail recomputed the mapper / convex-transform quaternions); 7 differ (5 a retail-rebuilt fuel-tank skeleton, 2 uninitialised words) |
+| ARTGROUP_DATA | U2 layout: name block with attach lists (sid, f32, k-1 pairs), bucket table inline (U3: separate table, no name block); keys sid('geo.'+name) for FG sections, linear probing in entry order (`u2actorparts`) | 1,124 pairs: 1,109 byte-identical (pointer slots aside); 15 character bases |
+| PACKAGE_ITEM_LOOKUP | {ptr name, 0, n, {sid, aa, ptr}[n] inline, name} (U3: a pointer to the entries) | as retail |
+| LEVEL_PATS_1 | the PS3 u64 byte-swapped (U3 writes 0) | 400 pairs |
+| SOUND_BANK_TABLE | {n, aa, ptr name[n]} + names | as retail |
+| names | `Prototype0_<art>`, `<art>_Prototype0_Submesh0` ('-' -> '_') | as retail |
+| login order | ARTGROUP_DATA / LEVEL_PATS_1, SOUND_BANK_TABLE, EFFECT_TABLE, TEXTURE_TABLE, GEOMETRY_1, JOINT_HIERARCHY, ANIM*, FG*, collision, PACKAGE_ITEM_LOOKUP, tags | retail props |
+| not on PS4 | SKELETON_FLIPDATA, ANIM_RAWCHANNELS (in ANIM), COLLISION_DATA_BACKGROUND, the ragdoll `mesh.collision.*` PM_COLLECTION_2 (its packfile is the D-block one) | all pairs |
+
+The artgroup / lookup / LEVEL_PATS / name layouts apply to the skins too (the earlier skins had the U3 artgroup and
+lookup, which the U2 PS4 runtime reads differently; `u2twin.rekey_artgroup` finds nothing to change on them now).
+actor27 items carry `ACTOR_VERSION` in state.json, so a resumed import rebuilds them once.
+
+**Havok class tables** (U3 precedent: derived from the executables, so never shipped). `u2hkgen` builds them on the
+player's PC the first time an actor needs them and writes `<out>/work/u2hkclasses.json`: Havok 6.1 layouts from the
+hkClass constructor calls and hkClassMember arrays of the decrypted PS3 `EBOOT.elf` (`--ps3-elf`, default
+`<PS3 USRDIR>/EBOOT.elf`); Havok 2011.3 layouts from the PS4
+`big2-ps4_Shipping.elf` in the `--ps4` folder (fake-signed SELF unwrapped, SCE RELA relocations applied, text
+disassembled with GNU objdump: `--objdump`, u3mp/bin, msys64 or PATH); the five 2011 classes whose member tables the
+executable builds at run time (hkpExtendedMeshShape + triangle subpart, hkpMoppCode, hkaSkeletonMapperData,
+hkpBallSocketConstraintAtom) from member declarations laid out with the C rules and checked on the player's retail PS4
+packfiles; the PS4 class signatures from those packfiles. The repo holds only the generator (no offsets or sizes).
+On this PC the generated tables equal the ones the validation above used, class for class (3.5 minutes, objdump
+most of it). Without the EBOOT.elf, the PS4 executable or objdump the actors with collision / ragdolls are reported
+`unsupported` ("Havok tables missing (...)"); the rest still convert.
+
+Checks on the 55: every prop passes ps4check; the animation paks and the ponytail parse. Not verified in game.
+
+## Skins from the PS4 campaign (`u2twin`, twin.cpp)
+
+Rule: PS4 assets first. Most MP skins are, on PS3, a campaign character (`costume-hero-*`, `hero-heist`,
+`hero-parka`, `lieutenant` ...) that the PS4 Collection also ships, remastered. The import builds such a skin from
+the PS4 campaign actor (its "twin") and converts from PS3 only what the PS4 game lacks.
+
+What an MP skin has that its campaign twin does not (PS3 pairs, all 49 skins; confirmed on the 15 retail PS4
+pairs):
+
+| part | MP skin | campaign twin |
+|---|---|---|
+| LOD0 mesh | the twin's mesh (often re-exported: other vertex order, other quantisation, sometimes other materials on some submeshes) | the mesh |
+| lower LODs | `<name>-lod1/2/3`: FOREGROUND_SECTION(_2) + prototype each (PS3 also `mesh.collision.<name>-lodN` PM_COLLECTION_2, dropped on PS4 for both) | none |
+| tags | 3 TAG_FLOAT `lod_distance` (6/15/20, some 5/16/20 or 6/15/30), one `vis_sphere` + `vis_joint_index` per LOD | one `vis_sphere` + `vis_joint_index` |
+| ARTGROUP_DATA | two keys per LOD: `geo.<fg name>` and `mesh.collision.<fg name>` | 2 keys |
+| everything else | same item types, skeleton 0x27e57f43, same effects; no other hit / collision data | |
+
+Retail PS4 `mp-hero-X` against PS4 `costume-hero-X`: LOD0 = the campaign mesh (same submeshes, index buffers,
+positions, UVs; normals/tangents within 0.0015 = half-float rounding of a separate cook; a few submeshes with 2-8
+more seam vertices), material records identical (name, shader, parameters, bindings), texture descriptors identical
+(the in-pak low mips differ only in tile padding).
+
+Build (`u2twin.build`): the PS3 skin is converted by `u2actor` with the PS4 twin as template (LOD1-3, FG sections,
+tags, artgroup). Then, in that pak:
+* every LOD0 submesh whose PS3 blocks equal a twin submesh (same triangles and skinning, positions within 1 mm,
+  UVs within 0.002, or the same triangle surface in another vertex order) gets the twin's PS4 buffers (vertex
+  streams, index buffer, skinning): the remastered mesh. Other submeshes stay converted.
+* every material the twin has by name, else by the same material path with a PS4 variant (`/mp` or `/heist*`
+  against `:default`, `:lod0`, `:fma` ...), gets the twin's record (and its textures; twin textures the converter
+  did not carry over, e.g. `default-mask.tga/<hash>.ndb.error`, are copied with their GEOMETRY_1 texture entries).
+  Materials the twin has no counterpart for (re-textures such as chloe-heist, skeleton glow) stay converted from PS3.
+* a PS3-only skin with no material name match (the DLC characters) takes each PS3 material's own textures from its
+  `MATERIAL_TABLE_1`, and a donor PS4 material chosen by the texture kinds and the material's part (skin, cloth,
+  metal, eyes ...). The PS3 character suffixes `_c` / `_n` / `_s` (and Killzone's `_clr` / `_nmt` / `_spc`) are
+  colour, normal and spec.
+* the artgroup keys of the FG sections are `sid('geo.' + name)` as retail and PS3 have them. The converter wrote
+  `sid(name)` until the u2actor artgroup rework; `fix_artgroup` / `rekey_artgroup` (also run on skins that go the PS3
+  way) re-key only when such keys are present, so they are a no-op with the current converter.
+The twin's buffers go to new pages; the converter's replaced LOD0 buffers stay in the pak unreferenced (larger file).
+A skin goes the PS3 way when it has no PS4 twin (`u2twin.TWINS`, names only), the twin shares no LOD0 submesh, or
+the twin build fails (logged, `PS3 (<why>)`).
+
+Validation (`u2import --validate-twins ...`: the 15 retail PS4 skins that have a PS4 twin,
+built from their PS3 files and compared with retail):
+
+| result | |
+|---|---|
+| built as twin | 15/15 (143 of 178 LOD0 submeshes from PS4) |
+| swapped submesh = retail (index buffer, positions within 1 mm) | 120/143; the rest are retail's own seam splits (eddie, elena, roman, udf, chloe-variation 1-2 each, red, sullivan-winter 1) and sullivan-blue / -red (9 + 3), whose retail cook orders the vertices differently |
+| materials | every twin material record identical to retail (14/14 divesuit, 18/18 eddie ...); MP-only materials converted |
+| FG sections, LOD distances, tags, artgroup keys | equal to retail 15/15 |
+| LOD1-3 submesh / index counts | equal to retail 13/15 (chloe-variation and pirate differ by one strip) |
+| ps4check | clean 15/15 |
+
+Import (group A): a skin with a PS4 twin is built by `u2twin`, else converted from PS3 as before;
+the log says which (`twin costume-hero-x: 14/15 LOD0 submeshes from PS4 (88% of triangles), 13/15 materials from
+PS4` or `PS3 (<why>); template ...`). `SKIN_VERSION` in the driver redoes skins built by an older rule on resume.
+Test run (2026-11-07, `--only mp-hero`, 49 skins):
+* **twin 34**: mp-hero, chloe, chloe-heist, chloe-winter, dead-explorer, doughnut, elena-reporter, elena-winter, flynn,
+  flynn-frosty, flynn-heist, flynn-winter, frosty, heist, jeff, lazarevic, lieutenant, nd, nd-frosty, parka,
+  pirate-nd, rescuer, schafer, skeleton-1, skeleton-ghengis, skeleton-marco, sol-med-b-1a, -1a-v2, -1b, -2a, -2b,
+  -3a, sullivan, year-1. 27 of them take 85-100% of the LOD0 triangles from PS4, elena-reporter 56%; mp-hero,
+  year-1, frosty, elena-winter, dead-explorer, pirate-nd take 25-40% (the rest of their mesh is MP-only).
+* **PS3 14** (no PS4 twin with the same mesh): infamous-cole, -cole-evil, -zeke, killzone-infantry, -sev, lazarevic-fat,
+  pinkerton, resistance-hale, -hybrid, rika, u1-merc-brsr-1a, -brsr-2a, -grdr-1a, u1-shotgun-1a.
+* chloe-ponytail (an attachment with Havok jointed collision, no mesh section) is converted as a prop-path actor ("Props and animated actors"). Failed 0.
+* `--only` runs no longer rewrite `pak22_ps4.txt` when they include no level rows (they used to delete it).
+
+## What the game needs to see the new content
+
+* **Levels**: an entry in `build/main/pak22_ps4.txt` (the registry is read whole). The PS4 executable also has
+  `%s/build/main/pak%d/ps4/%s.txt`, but no per-level `.txt` exists on PS4, so the import extends the registry.
+  Existing PS4 entries are never changed. Retail already defines `ruins-multi`, with the DLC actor list,
+  and `the-fort-multi`.
+* **Actors (skins, props)**: the pak file in `actor27/ps4/` is enough when a level or the net code asks for
+  it by name. The skins are listed in the PS4 `dc1/ps4/net.bin` hero table (58 names, 43 of them PS3-only). The
+  dc data needs no change.
+* **Sound banks**: the `.bnk` in `sound1/banks/ps4/` and its name in `sound1/config/ps4/banks.txt`.
+  The executable never reads `.sbf`.
+* **Music / streams**: loose files; music by the names `music-settings.bin` uses.
+* **Speech**: the PS4 game mounts `sound1/speech/<lang>_ps4.psarc` and opens
+  `build/main/sound1/speech/<lang>/<line>.xvag`. The import writes the lines loose at that path. Whether the
+  file layer finds loose files next to the mounted archive is **not verified** (the game was not run). If it
+  does not, the archive has to be rebuilt with the lines added.
+* **DLC maps in menus / playlists**: the PS4 dc (`net.bin` map table and `*net-games*`, `part-*-multi`) already
+  has the DLC maps and the PS4 executable lists them without any entitlement check (u2mp/docs/DLC.md). The runtime
+  (`gow3_pc/src/u2mp/dlc.cpp`) hides a map pack from the custom game list and matchmaking unless the import produced
+  its level paks and registry entries. Map pack 1 = facility-multi + ruins-multi-wide, map pack 2 =
+  highrise-multi-2, museum-multi, museum-multi-eva.
+* **DLC map titles and the MP menu texts PS4 dropped**: missing from the PS4 networking text banks; the import
+  writes merged banks (`text1/ps4/<lang>.<category>`, read by the runtime's TextDb fallback, remaining.cpp). No GOTY
+  bank has these 233 networking ids (GOTY took them from the PS3 server), so they come from the BCUS `dlc-patch7`
+  bank; `state.json` `text_title_update` records that.
+* **Menu images PS4 dropped** (Leaderboards / Trophies buttons, the DLC map photos, PS3-only skin portraits ...):
+  `pak22/ps4/net-u2mp.pak` (`u2netimg`, MENUS.md section 8), from the GOTY `all-patches.psarc` `net.pak`: 99
+  materials. The BCUS `dlc-patch7` net.pak has 8 more (year-one / desert Drake icons and photos, siege / wt test map
+  photos); none of them is named by the PS4 dc, the PS4 executable, the GOTY dc or the GOTY net-patch9, so the
+  GOTY copy is used (since 2026-11-08; earlier runs had 107).
+* **Multiplayer spawners** (`<map>-pak-ingame10.pak`, registered as level `<map>-pak`) and **net-patch9.bin**
+  (the server live-data DC module): from the server download (`--dns`), else a PS3 `*DATA2` folder: `--ps3-data`
+  itself when it is one, else the GOTY `NPUA80698DATA2`, and only when that has none another release's (sorted). The
+  folder name order never puts BCES/BCUS before the GOTY: net-patch9 sets the skin table order every PC of a match
+  must share. The import log names the folder (`net-patch9: from ...`, `net spawn paks: from ...`). The spawn paks were downloaded from the PS3 server and are byte-identical in BCUS98123DATA2 and
+  BCES00757DATA2 (version-independent server data); GOTY's own data folder has none because the server is off.
+  12 converted, `stage-multi-pak-ingame10` stays PS4.
+* **DLC Ruins**: map pack 1 ships another `ruins-multi` (78 MB main pak, DLC `-ingame10` with the heli and plank
+  bridge) than the PS4 one under the same name; the PS4 `ruins-multi` / `-ingame10` are the base-game version
+  (390 KB data pak, no DLC props; the PS4 registry entry nevertheless lists the DLC actors, as the PS3 map pack 1
+  `.txt` does). The import keeps the PS4 one (rule: PS4 first) unless `--dlc-ruins`. It always adds the map pack
+  pieces PS4 lacks: `ruins-multi-wide`, `sky-ruins-multi`, `ruins-multi-npc` (+ -ingame10), the DLC props and
+  `ruins-multi.bnk`; the PS4 net.bin (like the GOTY one) names them for the Ruins map. See "Known gaps" 11.
+
+## Validation (reference pairs, 2026-11-07, `--validate`)
+
+| check | result |
+|---|---|
+| XVAG: 4 PS-ADPCM music tracks | 4/4 byte-identical |
+| LIGHT_TABLE_1: village-multi-wide, gompa-multi-wide, dig-multi, stage-multi | 4/4 byte-identical (pointers as offsets) |
+| VIS_INFO_1: village-multi-wide, sham-multi-wide | 2/2 byte-identical |
+| data paks: sky-village-multi, gompa/village-multi-npc, stage, treasure, dig -ingame10 | SPAWNER_GROUP, FEATURE_DB_2, SPLINE_TABLE, LEVEL_INFO_1, TAG_INT: every block matches. REGION_TREE: dig 74/74; stage 38/39 (one 0x3f/0x42 opcode); treasure 285/292 |
+| 16 retail skins, each converted with another retail skin as template | ps4check clean 16/16; prototypes equal 16/16; 619 of 635 submeshes have the same index count and material. Vertex counts are 1-3% below retail, because Bluepoint split more seams. mp-hero-pirate has 36 submeshes vs 32; mp-hero-red matches 35 of 46 |
+| stage paks: sky-village-multi, village-multi-wide, gompa-multi-wide | stagecheck clean, same item types and U2 login order, identical index totals; materials: gompa 8/9 by name, village 1/6 (others fallback) |
+| COLLISION_DATA_HAVOK_BG: dig, stage, sham-wide, village, treasure, gompa, warzone, shambhala, ice-cave, train-wreck, sniper-towers | 20/20 items byte-identical (pointers as offsets); u2coll.check_ps4 clean on retail and converted. Also identical inside full converted paks (dig-multi, village-multi through u2level) |
+| WATER_DATA: village, treasure, gompa, warzone, shambhala | 5/5 byte-identical except the material sid (set from the PS4 material the stage picks) and 4 exporter garbage words per object |
+| NAV_MESH_1: gompa, village, shambhala, warzone -ingame10 | 47/52 byte-identical; 5 differ only in the last word of 0x18-byte portal records that retail leaves uninitialised |
+| big paks (fixups beyond 512 KiB): village, treasure, facility, museum, highrise ... PS3 | read, ndpak.validate clean |
+| 40 sound banks both have | 40/40 same structure (sound / grain / name counts). The samples differ because retail was rebuilt from source |
+
+## Test run (the copies on this PC, `scratch/u2mp/import-test`)
+
+Groups A-E, 3,768 rows, with `--ps3-dlc` (so the map pack 1 Ruins replaces the PS4 one). First run about 13 minutes
+(bank MP3 re-encoding); the DLC main maps add 3-6 minutes each (facility-multi 327 s, ruins-multi 360 s,
+highrise-multi-2 233 s, museum-multi 241 s, museum-multi-eva 180 s). Result of 2026-11-07 (run + resume):
+* **ok 1,621**, ps4 8, skipped 2,139, **unsupported 0, failed 0, missing 0**; status `imported`. The overlay is 825 MB.
+  * all 28 level paks of groups B-D: facility-multi, highrise-multi-2, museum-multi, museum-multi-eva, ruins-multi
+    (map pack 1), their -wide / sky / -ingame10 / -npc-ingame10 paks, the Fort pieces
+  * skins, props, banks, streams, music, DLC voices as before (see the actor section)
+* `pak22_ps4.txt`: 19 levels appended (facility-multi, -npc, -wide, highrise-multi-2, -wide, highrise-multi-npc,
+  museum-multi, -eva, -npc, -wide, ruins-multi-npc, -wide, sky-facility/fort/museum/ruins-multi, the-fort-multi-npc,
+  -wide, -wide-2); the retail part is byte-identical. `banks.txt`: 6 banks appended.
+* `text1/ps4/{2,3,6,7}.networking`: 233 PS3 strings added each (the 4 PS4 languages whose PS3 bank comes from
+  dlc-patch7; the others have no newer PS3 bank than the base one, which adds nothing).
+* ps4 8: the 4 base `*-multi-npc` paks and their -ingame10 stay PS4.
+
+What this means for play: the five DLC maps now have every level pak, registry entry and title, and the runtime
+offers them (dlc.cpp). Not tried in game. Level materials without a retail twin use the closest retail material
+(facility-multi: 150 of 170).
+
+Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python import of then):
+* **ok 1,635, ps4 11, skipped 2,139, unsupported 0, failed 0, missing 0**; every step ok; status `imported`.
+  3,770 import-list rows (ok 1,621, ps4 10, skipped 2,139) plus the step items: 12 spawn paks (ok) and
+  `stage-multi-pak-ingame10` (ps4), `net-u2mp.pak`, `net-patch9.bin`.
+* Inputs (state.json `src`, converted files and the 26 per-level registry `.txt`): GOTY all-patches, GOTY base,
+  dlc-map1, dlc-map2 and PS3 game data (spawn paks, net-patch9) only. No item comes from a BCUS title update any
+  more; only the 4 networking text banks still take 233 ids from dlc-patch7 (above).
+* New: `sound1/music/336_BrutalComboMambo_LOOP1ALTSTART.xvag` and `338_..._LOOP2ALTSTART.xvag` (PS3 407 / 428),
+  which `music-settings.bin` names and PS4 lacks; now every track name in the PS4 music settings has a file.
+* `pak22_ps4.txt`: 33 levels added (the 19 above, `net-u2mp`, the 13 `<map>-pak` spawn levels); 7 not added, each
+  "the PS4 registry already defines it (same lines as the PS3 entry)".
+* The skips, checked one by one: 2,136 = 356 Pinkerton / Rika lines x 6 PS3 speech languages the PS4 game has no
+  archive for (dutch, german, italian, japanese, polish, russian); 3 = the PS3 `*_Coop3` tracks PS4 ships renumbered
+  (620/610/609; same length, ATRAC9). The 4 PS4 languages get all 356 lines each.
+* Coverage checks on the result: every PS3 actor, bank and stream file that PS4 lacks is in the overlay (apart from
+  `sce-ndi-logos.xvag`); the only PS3 level paks neither has are group F and `post-56` (not MP). Every actor the
+  PS4 dc names (by id or name, 216) exists on PS4 or in the overlay. `dc1/net-beta.bin` (PS4 lacks it; the PS4
+  executable's DC module list names it) is not imported: its 68 symbols are a subset of the GOTY `net.bin`'s
+  (the multiplayer beta's settings), so loading it would only shadow net.bin values.
+
+## Known gaps (as of this version)
+
+1. **Background collision, nav meshes, water, big fixup tables**: converted (u2coll, u2nav, u2water, ndpak edit),
+   checked against retail pairs only. The PS4 game's own collision/nav loaders were not traced; u2coll.check_ps4
+   checks pointers, ranges, alignment and index bounds. Retail main maps log in VIS_INFO_1 after LIGHT_TABLE_1 (wide
+   paks before GEOMETRY_1); converted paks use the wide-pak order.
+2. **DLC map cards**: imported as `net-u2mp.pak` (the DLC map photos and the other menu images PS4 dropped),
+   served by the runtime next to the retail net.pak (MENUS.md section 8). Not verified in game.
+3. **Text banks and speech as loose files** over `core.psarc` / the speech archives: not verified in game.
+4. **Props and animated actors**: converted (section above). Open: the 44 props without a PS4 twin get the closest
+   retail material record (often none shares a name), so their shaders may differ from PS3; the ARTGROUP /
+   LEVEL_PATS login order varies in retail and follows PS3. Not verified in game.
+5. **Level materials without a retail twin**: these get the closest retail background material (path,
+   texture roles), not their own shader. They may look different in game.
+6. **Region script opcodes**: retail re-encodes some `LoadStatic` (0x3f) instructions as 0x42 and keeps
+   others. The rule is unknown, so the import keeps 0x3f (1 of 2 in stage-multi; 7 of 292 blocks differ in
+   treasure-multi). Spawners, splines and feature db match retail exactly.
+7. **Speech as loose files**: not verified in game (see above).
+8. **Sound banks** are converted from the PS3 samples. Retail U2 PS4 banks were rebuilt from source,
+   so imported banks sound like the PS3 ones.
+9. Not imported on purpose: group F (siege-v1/wt-v1 test levels, `lost-city-storm.bnk`, `*.networking.crypt`).
+   The PS4 game does not reference them. Also not imported: `dc1/net-beta.bin` (see the test run).
+10. **BCUS title-update data**: the user's rule is GOTY NPUA80698 1.10 for game data (map packs and the server
+    spawn paks excepted). The only input still taken from a BCUS title update is the 233 networking text ids
+    (DLC map titles, the MP menu texts of MENUS.md section 4) from `dlc-patch7`: no GOTY file has them. Without
+    them the DLC map names and those menu labels stay blank. Needs the user's decision.
+11. **Ruins version mix**: by default the PS4 (base-game) `ruins-multi` main and data paks are kept, while the map
+    pack 1 `ruins-multi-wide`, `sky-ruins-multi`, `ruins-multi-npc` and the server spawn pak
+    `ruins-multi-pak-ingame10` are added. On PS3 these pieces only ever ran with the map pack 1 main pak
+    (`--dlc-ruins`). Whether the DLC backdrop, NPC data and spawners fit the base-game layout is not verified;
+    if not, either `--dlc-ruins` becomes the default again or the DLC ruins pieces are left out (then dlc.cpp, which
+    takes `ruins-multi-wide` as the map pack 1 marker, needs another marker).
+
+## GOTY-only default (user decision, 8 November 2026)
+
+The import ships only what the GOTY copy (NPUA80698) contains, so players need no extra DLC folders. The
+launcher passes no `--ps3-dlc`, and the default groups are `A,C,D,E`. Group B (the Fort's missing pieces) is off
+until the Fort has been tested with the PS4 files alone. Groups C and D need the map packs, which GOTY does not
+have, so they report `missing (needs dlc-map1/2)`. The server spawn paks (BCUS98123DATA2) stay: every map needs
+them.
+
+Fresh run 2026-11-08 into `scratch/u2mp/import-goty` with `--ps3` = the RPCS3 GOTY install
+(`dev_hdd0/game/NPUA80698`, so `NPUA80698DATA2` next to it is found for net-patch9; the spawn paks came from
+`BCES00757DATA2`): **ok 1,514, ps4 11, skipped 2,139, missing 101** (36 map pack 1 and 65 map pack 2 files),
+failed 0. With a standalone GOTY copy outside `dev_hdd0/game`, pass `--ps3-data` or neither net-patch9 nor
+the spawn paks are found. All validate checks match retail. The text banks gain 1 string
+(none from a BCUS title update). So the 26 MENUS.md section 4 ids (profile stat labels, Leaderboards, Trophies,
+stats ticker, leaderboard footer, daily players, Clan Tag, quit penalty, DLC notes) are missing again: GOTY got
+them from the PS3 server. The game shows its fallback for them.
+
+Update 2026-11-09 (texts, TEXTS.md): the step took only the newest GOTY bank (all-patches), and "Leaderboards"
+(47a936dc) is only in the GOTY base `text1.psarc`: every GOTY archive is merged now. The BCUS title update path is
+gone (GOTY only). The 25 other section 4 ids, and every other id no bank has, are the runtime's own texts in all
+22 languages (texts.cpp); sam-spanish / brazilian get the spanish / portuguese PS4 texts for their 497 placeholders.
+
+Update 2026-11-09: group B is on again (default `A,B,C,D,E`). Test run 39 showed the Fort hangs in LoadLevels
+without `sky-fort-multi` and `the-fort-multi-wide`, and GOTY has all the Fort pieces. GOTY's `ruins-multi.pak`
+(32.8 MB) is the base map, byte-identical in size to the BCUS base disc. The flooded map pack Ruins (78 MB,
+`dlc-map1.psarc`) is not in GOTY, so it is not shipped. Run: ok 1,534, ps4 11, skipped 2,139, missing 101 (map
+packs only), failed 0.
+
+### Audit of what MP / co-op still lacks (2026-11-09, test run 41 + GOTY data)
+
+Import changes:
+* Map pack rows (groups C, D) without `--ps3-dlc` are now `skipped` ("map pack not given: GOTY-only import"),
+  not `missing`, so a GOTY-only import ends `imported` instead of `partial`.
+* The registry step rebuilds the `<map>-pak` spawn levels and `net-u2mp` from the step records. Before, a resumed
+  import that skipped the unchanged net-images / net-spawn-paks steps but redid the registry wrote a
+  `pak22_ps4.txt` without those 14 levels (seen while testing this change; run 41's registry was complete).
+* The retail PS4 `ruins-multi` entry lists the 4 map pack 1 props (`mp-ruins-heli-blade`, `plankbridge-break-lod0`,
+  `plankbridge-colblocker`, `railing-destructible`). GOTY's Ruins is the base map, and neither its `.txt` nor its
+  data names them. Without the map pack no file provides them, so the overlay registry leaves those 4 `actor`
+  lines out (`registry.prune_actors`: only actor lines of MP / co-op levels whose pak exists nowhere; logged as
+  "dropped from ruins-multi (PS4 entry)").
+
+Result in `scratch/u2mp/import-goty` (`--ps3` = RPCS3 `dev_hdd0/game/NPUA80698`, no `--ps3-dlc`): **ok 1,534,
+ps4 11, skipped 2,240 (2,139 as before + 101 map pack rows), missing 0, failed 0**; status `imported`. The registry
+adds 18 levels (the Fort's 4, 13 `<map>-pak`, `net-u2mp`); `banks.txt` gains `fort-multi.bnk`, `ruins-multi.bnk`.
+Every package / actor / bank line of the 84 MP and co-op levels resolves, except `sniper-towers-multi-ingame` and
+`train-wreck-multi-tdm-ingame`, which no copy has.
+
+Run 41's "-> not found" opens:
+* `sound1/banks/ps4/metal-shield.bnk` (23), `glass.bnk` (2): per-surface sound banks (the PS4 set is
+  `metal-bright.bnk`, `tile.bnk`, `ice.bnk` ...), asked for when a riot shield / glass surface is involved. Neither
+  exists in GOTY, the BCUS copy or PS4, and neither PS3 nor PS4 `banks.txt` names them. The surface sounds
+  themselves are in banks the game has (`bullet-hit-metal-shield` in `hud.bnk`; `bull30-hit-glass`, `fiat-glass-*`
+  in `hud.bnk` / `car-destruction.bnk`). Nothing to import or map; the open is a harmless retail probe.
+* `effect1/*.bin`, `lut0/default-color-gray.dds`: the PS4 game has no `effect1` or `lut0` folder at all.
+* `bpdata1/*.json` (MP levels, menu, hud, net, particle): PS4 has 208 json files, all for campaign levels and
+  `menu-temple`; none for any MP level, including the base maps it ships. Normal.
+* `sound1/config/banks.txt`: the PS3 path, tried before `sound1/config/ps4/banks.txt`.
+
+What GOTY MP / co-op has, checked against PS4 + the overlay (the PS4 copy kept wherever it exists):
+| area | result |
+|---|---|
+| HUD (`hud.pak`) | all 138 GOTY materials are in the PS4 hud.pak |
+| menus (`menu.pak`) | all 9 in PS4 |
+| net.pak (kill feed / scoreboard icons, medals, gametypes, loading screen, map photos, player icons) | 251 PS4; the 96 GOTY ones PS4 lacks (+3 preferred mode buttons) are `net-u2mp.pak`. None has a PS4 twin: their GOTY texels equal no PS3 texture of any material PS4 keeps in net / hud / menu / particle (only shared frames / masks). Loading screen (`loading-screen/coins, money, edge, title-back`), coop icons, flag icons, territory / treasure icons: PS4 |
+| `rank-badges/default` (run 41 "image bda0f568 missing") | PS4 has it as `rank-badges:default`; the runtime finds it by PS3 name once net.pak is loaded. The 24 misses are draws before the net package was ready |
+| particles (`particle.pak`) | 314 PS4 of 321; the 7 missing (electricity-flipbook / -02, helghast-flare, fire08-hard-fog, rain-fall, rain-04, a stray `cgfxshader`) are named only by the GOTY `part-multi-character` / `part-ruins-multi` / `rain-snow` modules; the PS4 part modules (dc2) do not name them (Bluepoint replaced those effects), except `rain-04` in the campaign `rain-snow` |
+| medal / XP / HUD sounds (`hud.bnk`) | the 481 sound names of the GOTY bank are all in the PS4 hud.bnk |
+| other MP / co-op banks | same sound names as GOTY |
+| music cues | every track name in `music-settings.bin` has a file (PS4 or overlay: win / lose stingers, co-op) |
+| announcer / MP vox | every GOTY English line is in the PS4 speech archive except the 356 Pinkerton / Rika lines (imported) and 13 campaign / trailer lines |
+| per-mode actors (capture-chest, capture-idol-gold, territory-marker, riot-shield, propane-tank ...) | PS4; every actor any PS4 dc module names (454) exists on PS4 or in the overlay |
+| dc modules | PS4 has every MP / co-op module; `net-patch9` imported; `net-beta` not needed |
+| text: tips, tutorial, mode texts | PS4 networking banks hold every GOTY networking id; common / subtitles: 1 id each that only GOTY has (`Warzone Treasure 1`; the subtitle "Oh, what a shame.") |

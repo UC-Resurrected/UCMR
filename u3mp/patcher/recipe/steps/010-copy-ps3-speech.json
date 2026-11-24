@@ -1,0 +1,18 @@
+{
+ "id": "copy-ps3-speech",
+ "title": "overlay-r3 sound1/streams/speech: 11716 PS3 multiplayer and co-op voice lines, in every speech language of the PS4 copy",
+ "kind": "copy-list",
+ "list": "copy-ps3-speech.tsv",
+ "family": "overlay-r3/sound1/streams",
+ "needs": [
+  "ps3_disc",
+  "ps4"
+ ],
+ "speech": true,
+ "speech_languages": "ps4",
+ "status": "reproducible",
+ "applied": "2026-10-27 (pre-session seed), 2026-11-01 apply_vo (83 Fort lines)",
+ "notes": "11637 entries of build/main/sound1/streams/speech/english-mp.psarc and 79 of goty-speech-english.psarc, byte copies (PS3 XVAG, big-endian flag, read by the PS4 parser) into speech/english/ (the reference manifest). Since 1.32.2 the same 11716 files also go to speech/<lang>/ for every other speech language the PS4 copy offers (u3data/build/main/sound1/streams/speech/<lang>_ps4.psarc: french, brazilian, sam-spanish), from the disc's <lang>-mp.psarc and goty-speech-<lang>.psarc; where the PS3 copy lacks that language or line (the BCES01670 disc has no brazilian-mp / sam-spanish-mp) the English file stands in. Before, a player whose game language was not English had no multiplayer or co-op adventure speech at all. --speech-langs adds further languages the same way (not part of the reference manifest).",
+ "recipe_version_added": "1.0.0",
+ "recipe_version_changed": "1.32.2"
+}

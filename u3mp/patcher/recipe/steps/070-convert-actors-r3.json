@@ -1,0 +1,46 @@
+{
+ "id": "convert-actors-r3",
+ "title": "Converted actor paks of overlay-port / -r2 / -r3 / -mp + overlay-mp net.pak, rebuilt with the latest converter (u3fix.exe actors, actor33/build_actors.cpp, jobs.tsv)",
+ "kind": "script",
+ "job": "actor33",
+ "with_jobs": [
+  "dctools"
+ ],
+ "family": "overlay-*/actor33 + overlay-mp/pak23 net.pak",
+ "needs": [
+  "ps4",
+  "ps3_disc",
+  "ps3_update",
+  "ps3_data2"
+ ],
+ "commands": [
+  [
+   "u3fix.exe",
+   "actors",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--job",
+   "{{JOB}}",
+   "--ps4",
+   "{{PS4}}",
+   "--ps3-disc",
+   "{{PS3_DISC}}",
+   "--ps3-update",
+   "{{PS3_UPDATE}}",
+   "--ps3-data2",
+   "{{PS3_DATA2}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-*/u3data/build/main/actor33/ps4/*.pak",
+  "work/overlay-mp/u3data/build/main/pak23/ps4/net.pak"
+ ],
+ "must_write": false,
+ "reference_check": false,
+ "status": "reproducible",
+ "applied": "2026-10-26 .. 10-30 (cloud: mpbatch/assetbatch/lightbatch -> ps4actor, anim.py, wpnmods.py, convert_net.py), 2026-11-01 (Lab boxes, maps-batch build_paks)",
+ "notes": "jobs.tsv = one row per overlay pak (converter toolset, PS3 source, retail template, mode, texture cap, env, post passes), found 2026-11-05 by reconverting every pak and comparing sha256 (scratch/actor-rebuild/search.py). Only byte-identical builds are installed (status identical/base); since 2026-11-06 every actor33 file of overlay-port / -r2 / -mp and every non-session overlay-r3 file has a row (GAPS.md section actor33). Toolsets: toolsets/SOURCES.txt. Needs actors-hk-tables for own-skeleton props. Since 2026-11-13 every method is C++ (dctools/ps4actor.cpp, anim.cpp, ps4mats.cpp, fgcoll / hkconvert / skel.cpp), byte-identical to the Python toolset on all 1044 rows; no Python needed. 1.25.0 (PS3 textures as on PS3): PS3 textures keep every mip unless a retail texture dictionary streams them (the cap column), a PS3 cut-out map gets a template material with a cut-out slot (another retail template on the same skeleton when the job's has none), slots without a PS3 texture get neutral flat textures instead of the template's, two cooks of one texture: the material's, the larger; every PS3 material of a shared template slot gets its own material; the Outdoor Jacket A keeps its PS3 normals and its own colour map (the outdoor-jacket step is gone). 930 of 1044 rows changed.",
+ "recipe_version_added": "1.0.0",
+ "recipe_version_changed": "1.30.0"
+}

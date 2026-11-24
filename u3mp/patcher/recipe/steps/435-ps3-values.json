@@ -1,0 +1,39 @@
+{
+ "id": "ps3-values",
+ "title": "The helper's PS3-only values (taunt and civilian package names, multi-all actors, weapon panel origin, stat ids, the PS3 room cookies of the match and party sessions, the PS3 net game table paired with the PC net.bin) from the player's own PS3 1.19 files, SHA-256 checked, into work/ps3-values/u3-ps3-values.bin; the launcher copies it into the game's /data (u3import.exe --ps3-values, importer/ps3values.cpp)",
+ "kind": "script",
+ "job": "dctools",
+ "family": "helper-data",
+ "needs": [],
+ "commands": [
+  [
+   "u3import.exe",
+   "--ps3-values",
+   "--out",
+   "{{WORK}}/ps3-values/u3-ps3-values.bin",
+   "--disc",
+   "{{PS3_DISC}}",
+   "--update",
+   "{{PS3_UPDATE}}",
+   "--data2",
+   "{{PS3_DATA2}}",
+   "--pc-net",
+   "{{WORK}}/overlay-r3/u3data/build/main/dc1/ps4/net.bin"
+  ]
+ ],
+ "ok_codes": [
+  0,
+  3
+ ],
+ "writes": [
+  "work/ps3-values/u3-ps3-values.bin"
+ ],
+ "must_write": false,
+ "reference_check": false,
+ "status": "reproducible",
+ "format": 2,
+ "applied": "2026-11-23",
+ "notes": "Reads dlc-patch18.psarc (net.bin, pak23.txt), hud-settings.bin (patch18, patch13, goty-patch or disc) and the decrypted 1.19 EBOOT.elf (RECIPE_PS3_ELF, the EBOOT the import found); the kept PS3 copies work too. Every record is checked by SHA-256 of the bytes it comes from; a missing or different source leaves its record out and exits 3, so the step runs again at the next import. The code is in importer/ps3values.cpp, which the step fingerprint does not cover: bump \"format\" when that file changes what it writes (the job dctools is the reader it uses). File format and facts: importer/ps3values.cpp. The launcher copies the file to <user dir>\\data\\u3-ps3-values.bin before every game start (core.cpp u3_ps3_values); the helper reads /data/u3-ps3-values.bin once at start (since v7.244: the room cookies, kind 8). 1.32.0 (format 2): kind 9, the net game table: per PC net.bin net game index (the netgame-order output, --pc-net) the PS3 index of the same net game in the player's DATA2 net18.bin and that record's LoadLevel float, for a net18.bin the import accepts (net18-versions.json or a local remap); the helper (v7.245 on) sends PS3 players their own index and float.",
+ "recipe_version_added": "1.31.0",
+ "recipe_version_changed": "1.32.0"
+}

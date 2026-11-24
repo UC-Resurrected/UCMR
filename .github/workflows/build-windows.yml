@@ -1,0 +1,181 @@
+# The Windows build: the game runtime and the launcher with MSYS2 CLANG64, then the player package (no game files).
+# Every push and pull request builds it; a pushed tag vX.Y.Z also publishes the package as that release, with the
+# tag's annotation as the notes (tools/release.sh puts them there).
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # publishing a tag's release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      # ccache reuses compiled objects in the launcher, the runtime and the importers. A new commit gets a new
+      # immutable cache entry (restore-keys picks the newest older one), so a stale cache can never win.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+    steps:
+      # The sources keep their LF line endings (the runtime's patches are applied with git apply), and long paths
+      # are allowed: some FidelityFX shader paths pass 260 characters inside the long checkout folder.
+      - name: Prepare git
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --system core.longpaths true
+
+      - name: Check out (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Compiled objects shared by every C++ program in the package. The key is per commit, so a commit never
+      # overwrites another commit's cache; a new commit restores the newest older entry and ccache itself decides,
+      # from the compiler and the preprocessed source, which objects are still valid.
+      - name: Restore the compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: windows-clang64-ccache-v1-${{ github.sha }}
+          restore-keys: |
+            windows-clang64-ccache-v1-
+
+      - name: MSYS2 CLANG64
+        uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: CLANG64
+          # No `update: true`: that ran two full `pacman -Syuu` system upgrades before installing anything,
+          # which was most of the 3-minute setup. The latest base release is already a consistent snapshot,
+          # and without a sync pacman installs the packages from that snapshot's own database.
+          # cache: true (the default) keeps pacman's downloaded packages between runs.
+          cache: true
+          # ucrt64 binutils: GNU objdump for the Uncharted 3 import's Havok tables
+          install: git patch curl make mingw-w64-ucrt-x86_64-binutils
+          pacboy: >-
+            toolchain:p cmake:p ninja:p ccache:p pkgconf:p python:p nasm:p
+            vulkan-headers:p vulkan-loader:p vulkan-memory-allocator:p glslang:p
+            spirv-tools:p spirv-headers:p spirv-cross:p
+            sdl3:p fmt:p boost:p robin-map:p xxhash:p zydis:p opus:p
+            qt6-base:p qt6-declarative:p
+
+      # The small FFmpeg is built only when tools/build_ffmpeg.sh changes (that script reuses a finished build).
+      - name: Reuse the small FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: downloads/ffmpeg-8.1.1-min
+          key: ffmpeg-min-${{ hashFiles('tools/build_ffmpeg.sh') }}
+
+      - name: Compiler cache before the build
+        run: |
+          ccache --version
+          ccache --show-stats
+
+      - name: Runtime
+        run: |
+          git config --global --add safe.directory '*'
+          export MSYS2_ROOT=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
+          # the runtime links the small FFmpeg (the decoders the port uses) instead of MSYS2's full one
+          small_ffmpeg_pc=$(tools/build_ffmpeg.sh) || exit 1
+          export PKG_CONFIG_PATH=$small_ffmpeg_pc
+          gow3_pc/build.sh
+
+      # DLAA (the DLSS SDK's files, the bridge built with the runner's MSVC): optional, the
+      # package then offers TAA and FSR 3.1 only.
+      - name: Anti-aliasing files
+        continue-on-error: true
+        run: |
+          export MSYS2_ROOT=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
+          tools/fetch_aa_files.sh
+
+      # The private package files (another repository, two secrets): a release needs them, other builds go on
+      # without them.
+      # Its apply.cpp (C++) puts them in and writes recipe/CONTENT_ID.
+      - name: Private package files
+        env:
+          EXTRA_REPO: ${{ vars.PACKAGE_EXTRA_REPO || secrets.PACKAGE_EXTRA_REPO }}   # the repository name: a variable (or the older secret)
+          EXTRA_TOKEN: ${{ secrets.PACKAGE_EXTRA_TOKEN }}
+        run: |
+          if [[ -z $EXTRA_REPO || -z $EXTRA_TOKEN ]]; then
+            [[ $IS_RELEASE == true ]] && { echo "::error::the private package files are not set up"; exit 1; }
+            echo "no private package files: building without them"
+            echo "PACKAGE_WITHOUT_HELPER=1" >> "$GITHUB_ENV"   # tools/package_windows.sh: a test package without the helper
+            exit 0
+          fi
+          files="$(cygpath -u "$RUNNER_TEMP")/private-files"
+          git clone -q --depth 1 "https://x-access-token:${EXTRA_TOKEN}@github.com/${EXTRA_REPO}.git" "$files" > /dev/null 2>&1 ||
+            { echo "::error::the private package files could not be fetched"; exit 1; }
+          ccache clang++ -std=c++20 -O2 -municode -static "$files/apply.cpp" -lbcrypt -o "$files/apply.exe" > /dev/null 2>&1 ||
+            { echo "::error::the private package files' apply program did not build"; exit 1; }
+          "$files/apply.exe" "$(cygpath -w "$GITHUB_WORKSPACE")"
+          rm -rf "$files"
+
+      - name: Package
+        run: |
+          export MSYS2_ROOT=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
+          tools/package_windows.sh
+
+      - name: Compiler cache after the build
+        if: always()
+        run: ccache --show-stats || true
+
+      # A pull request from the owner or a collaborator (or a run started by hand): the package as a download on the
+      # run's page for testing, kept 7 days. Other people's pull requests build but upload nothing. The trigger stays
+      # pull_request, so code from a fork never gets the private package files' secrets; such a package has no
+      # multiplayer helper: unzip it over an install that has the same helper build.
+      - name: Package for testing
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+        uses: actions/upload-artifact@v4
+        with:
+          name: UCMR_windows-pr${{ github.event.pull_request.number || github.run_number }}
+          path: dist/UCMR_windows.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      # A release: the tag has to equal tools/VERSION (the launcher's updates compare the two). 0.x releases say
+      # "beta" in their title but are full releases, so the repository page shows them as the latest; GitHub
+      # records the zip's SHA-256, which the launcher checks before installing.
+      - name: Release
+        if: env.IS_RELEASE == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = (Get-Content tools/VERSION -Raw).Trim()
+          if ($env:TAG -ne "v$version") { throw "The tag $env:TAG is not tools/VERSION ($version)" }
+          git fetch -q --force origin "refs/tags/$($env:TAG):refs/tags/$($env:TAG)"
+          $notes = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          $text = (git for-each-ref "refs/tags/$env:TAG" --format="%(contents)") -join "`n"
+          if (-not $text.Trim()) { throw "The tag $env:TAG has no release notes (an annotated tag made by tools/release.sh)" }
+          Set-Content -Path $notes -Value $text -Encoding utf8
+          $title = "UCMR $version"
+          if ($version.StartsWith("0.")) { $title += " (beta)" }
+          # the same zip under its old name too: launchers up to 0.10.155 only look for Uncharted-windows.zip
+          Copy-Item dist/UCMR_windows.zip dist/Uncharted-windows.zip
+          gh release create $env:TAG dist/UCMR_windows.zip dist/Uncharted-windows.zip --verify-tag --title $title --notes-file $notes --latest
+
+      - name: Keep the runtime's build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: gow3_pc/out/gpu-build.log
+          if-no-files-found: ignore
+          retention-days: 3

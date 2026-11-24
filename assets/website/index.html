@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A setup guide for importing Uncharted 2 multiplayer files into the unofficial PC launcher.">
+  <title>Multiplayer Setup | UCMR</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead__veil"></div>
+    <div class="masthead__content shell">
+      <p class="eyebrow">Unofficial PC port · Setup guide</p>
+      <h1>UNCHARTED</h1>
+      <p class="collection">THE NATHAN DRAKE COLLECTION</p>
+      <div class="title-rule"></div>
+      <p class="guide-kicker">MULTIPLAYER IMPORT</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="readiness shell" aria-label="Setup progress">
+      <div><span class="readiness__label">YOUR ROUTE TO MULTIPLAYER</span><strong id="readiness-copy">Start the import steps below</strong></div>
+      <ol class="milestones" aria-label="Progress steps">
+        <li data-step="game"><span>01</span> Game folder</li>
+        <li data-step="data"><span>02</span> Game data</li>
+        <li data-step="eboot"><span>03</span> EBOOT</li>
+        <li data-step="import"><span>04</span> Import</li>
+        <li data-step="account"><span>05</span> Sign in</li>
+      </ol>
+    </section>
+
+    <section class="shell intro-grid">
+      <div>
+        <p class="section-tag">UNCHARTED 2: AMONG THIEVES</p>
+        <h2>Bring your own game data. Then play online.</h2>
+      </div>
+      <p class="lede">This guide walks through the files the launcher needs for multiplayer, then the RPCN connection used to sign in. Complete the steps in order.</p>
+    </section>
+
+    <section class="shell guide-layout">
+      <aside class="side-note">
+        <div class="side-note__mark">MP</div>
+        <h3>Before you begin</h3>
+        <p>You need a legally owned copy of Uncharted 2, its decrypted game executable, and an RPCS3 installation with game data.</p>
+        <p class="muted">The guide does not provide game files, keys, or account credentials.</p>
+      </aside>
+
+      <div class="steps">
+        <article class="step" id="game">
+          <div class="step__number">01</div>
+          <div class="step__body"><p class="section-tag">GAME SOURCE</p><h3>Select your PS3 game folder</h3><p>Choose the folder for your own Uncharted 2 Game of the Year copy. It should contain <code>USRDIR</code>; choosing <code>USRDIR</code> itself also works.</p><div class="path"><span>Example path</span><code>D:/PS3 Games/Uncharted 2 - Among Thieves GOTY [NPUA80698]</code></div><label class="complete"><input type="checkbox" data-completes="game"><span>I found my PS3 game folder</span></label></div>
+        </article>
+
+        <article class="step" id="data">
+          <div class="step__number">02</div>
+          <div class="step__body"><p class="section-tag">RPCS3 DATA</p><h3>Locate the game data folder</h3><p>In your RPCS3 installation, select <code>dev_hdd0/game</code>. This folder contains the installed data used when Uncharted 2 goes online.</p><div class="path"><span>Typical location</span><code>RPCS3/dev_hdd0/game</code></div><label class="complete"><input type="checkbox" data-completes="data"><span>I found my RPCS3 game data folder</span></label></div>
+        </article>
+
+        <article class="step" id="eboot">
+          <div class="step__number">03</div>
+          <div class="step__body"><p class="section-tag">EXECUTABLE</p><h3>Choose the decrypted EBOOT</h3><p>Select the decrypted <code>EBOOT.elf</code> from your own game copy. It is normally inside the game’s <code>USRDIR</code> directory.</p><div class="path"><span>Expected file</span><code>.../NPUA80698/USRDIR/EBOOT.elf</code></div><label class="complete"><input type="checkbox" data-completes="eboot"><span>I have the decrypted EBOOT.elf</span></label></div>
+        </article>
+
+        <article class="step" id="import">
+          <div class="step__number">04</div>
+          <div class="step__body"><p class="section-tag">LAUNCHER</p><h3>Import the multiplayer files</h3><p>Open the launcher’s <strong>Multiplayer</strong> section. Add the game folder, RPCS3 game-data folder, and EBOOT path from the previous steps. Choose an output location, then run <strong>RE-IMPORT / UPDATE</strong>.</p><div class="callout"><span class="callout__bar"></span><p>Wait for the import to finish before launching. The launcher will show that the game has been imported when it is ready.</p></div><label class="complete"><input type="checkbox" data-completes="import"><span>The import finished successfully</span></label></div>
+        </article>
+
+        <article class="step" id="account">
+          <div class="step__number">05</div>
+          <div class="step__body"><p class="section-tag">RPCN ONLINE PLAY</p><h3>Connect your account</h3><p>In the launcher, enter the community server DNS supplied by the server you use. Select or add your RPCN account, then confirm both DNS and account status show green.</p><div class="server-card"><span class="server-card__dot" aria-hidden="true"></span><div><span class="server-card__label">READY CHECK</span><strong>DNS reachable · RPCN account signed in</strong></div></div><label class="complete"><input type="checkbox" data-completes="account"><span>DNS and RPCN account are ready</span></label></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="gallery shell" aria-label="Multiplayer preview">
+      <img src="../uncharted-gallery.png" alt="Uncharted 2 and Uncharted 3 multiplayer menus">
+      <div class="gallery__caption"><p class="section-tag">READY TO PLAY</p><h2>Launch into multiplayer</h2><p>Once all five checks are complete, select Play in the launcher. During play, use Insert or R3 + L2 to open the in-game menu.</p></div>
+    </section>
+  </main>
+
+  <footer><div class="shell"><span>UCMR</span><span>Unofficial PC port · Multiplayer setup guide</span></div></footer>
+  <script src="script.js"></script>
+</body>
+</html>

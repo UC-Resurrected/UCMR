@@ -1,0 +1,40 @@
+{
+ "id": "audio-defs",
+ "title": "overlay audio.bin completed with the PS3 1.19 sound definitions, ambient environments and environment links the PS4 module lacks (map sound regions: waterfalls, rain, sea, fires, room tones), modules.bin audio size word (u3fix.exe audio-defs, audio-defs/audio_defs.cpp)",
+ "kind": "script",
+ "job": "audio-defs",
+ "family": "overlay-r3/dc1",
+ "needs": [
+  "ps4",
+  "ps3_disc",
+  "ps3_update"
+ ],
+ "commands": [
+  [
+   "u3fix.exe",
+   "audio-defs",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--ps4",
+   "{{PS4}}",
+   "--ps3-disc",
+   "{{PS3_DISC}}",
+   "--ps3-update",
+   "{{PS3_UPDATE}}",
+   "--ps3-data2",
+   "{{PS3_DATA2}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-r3/u3data/build/main/dc1/ps4/audio.bin",
+  "work/overlay-r3/u3data/build/main/dc1/ps4/modules.bin"
+ ],
+ "must_write": false,
+ "reference_check": false,
+ "status": "reproducible",
+ "applied": "2026-11-15 (tested on a copy: 162 symbols added, every old symbol graph-identical to the retail module)",
+ "notes": "The PS4 audio.bin is the PS3 disc version (15 478 symbols); PS3 1.19 has 15 642. Map sound regions (region field A = {2, f18aaf1b, sound definition}) and environment tags (36cca78a / e601ddf1 / 12b1cfdb) of the MP and co-op maps name 65 sound definitions and 23 environments only 1.19 has, so those regions were silent (Cave waterfalls, Fort and co-op Fort rain / sea / rooms, Gompa, Graveyard, London, Oasis, Ruins, Shambhala, Temple, Train Wreck, Village, Warzone, Yemen, Airstrip, Borneo). Adds every missing symbol of the types sound definition (ee0bff2f), environment (9940c6c4) and environment link (454bba11) in the PS4 layout; the 2 missing reverb presets (8a21e5fa) are left out (PS4 re-authored every preset, no exact form). Layout rules checked with --verify on all 15 337 disc / PS4 pairs: every field position and byte order exact; the only differences are PS4 value edits (1 033 sounds with one distance 16 -> 8 / 20 -> 10, 19 sounds changed record kind, 3 environments with a cleared reference). Runs after booster-table (the last other modules.bin editor) and before world-levels; idempotent; backups in work/backup-audio-defs.",
+ "recipe_version_added": "1.21.0",
+ "recipe_version_changed": "1.22.0"
+}

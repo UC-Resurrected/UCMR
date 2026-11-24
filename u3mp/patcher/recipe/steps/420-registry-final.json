@@ -1,0 +1,45 @@
+{
+ "id": "registry-final",
+ "title": "pak23_ps4.txt of the four overlays, final 2026-11-03 state, from line provenance recipes (u3fix.exe registry-final, pak23-registry/apply_registry.cpp)",
+ "kind": "script",
+ "job": "pak23-registry",
+ "with_jobs": [
+  "dctools"
+ ],
+ "family": "pak23_ps4.txt",
+ "needs": [
+  "ps4",
+  "ps3_update"
+ ],
+ "commands": [
+  [
+   "u3fix.exe",
+   "registry-final",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--job",
+   "{{JOB}}",
+   "--ps4",
+   "{{PS4}}",
+   "--ps3-update",
+   "{{PS3_UPDATE}}",
+   "--ps3-dlcmaps",
+   "{{PS3_DLCMAPS}}",
+   "--ps3-disc",
+   "{{PS3_DISC}}",
+   "--ps3-data2",
+   "{{PS3_DATA2}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-*/u3data/build/main/pak23_ps4.txt",
+  "work/backup-pak23-registry/*/pak23_ps4.txt"
+ ],
+ "must_write": false,
+ "status": "reproducible",
+ "applied": "2026-10-26 .. 11-03 (mkregistry, lab_reg, apply_maps, apply_air_emblem, build_map_levels, apply_shade_npc_paks)",
+ "notes": "Runs last: whatever the earlier steps left, the registries become the reference ones (sha256 checked; nothing written on a mismatch, e.g. a different game version). Sources: retail pak23_ps4.txt, PS3 1.19 pak23.txt (dlc-patch18) and the san-multi-hunter-pak .txt of dlc-map4 (regsources.py). Recipe 1.26.0: overlay-r3 no longer replays the Lab level blocks (remove-lab deletes them anyway), so it needs no Lab psarc of DATA2 (the server's current DATA2 has none); its result is the registry remove-lab used to leave (sha256 a1b13fce...). 4/4 byte-identical (verified 2026-11-05).",
+ "recipe_version_added": "1.6.0",
+ "recipe_version_changed": "1.26.0"
+}

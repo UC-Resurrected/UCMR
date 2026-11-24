@@ -1,0 +1,31 @@
+{
+ "id": "world-levels",
+ "title": "World levels of every net.bin map registered in overlay-r3 pak23_ps4.txt (u3fix.exe world-levels, world-levels/world_levels.cpp)",
+ "kind": "script",
+ "job": "world-levels",
+ "with_jobs": [
+  "dctools"
+ ],
+ "family": "pak23_ps4.txt",
+ "needs": [],
+ "commands": [
+  [
+   "u3fix.exe",
+   "world-levels",
+   "--apply",
+   "--project",
+   "{{PROJECT}}",
+   "--ps4",
+   "{{PS4}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-r3/u3data/build/main/pak23_ps4.txt"
+ ],
+ "must_write": false,
+ "reference_check": false,
+ "status": "needs-converted-base",
+ "applied": "2026-11-15 (scratch build; in-game check pending)",
+ "notes": "General rule: every world level a net.bin map names (+0x70) gets its PS3 registry block (level-name / level-id / package <w>-ingame) in overlay-r3 pak23_ps4.txt, after the last world-* block; a world whose -ingame12.pak is in no overlay fails the step (its plan.tsv row is missing). The region tree's levels are checked against the registry. Found: world-london-mp (London Underground: the station ldn-train-multi streams in only through rgn-ldn-world-1, so after the train there was no geometry or collision) and world-yemen-mp (Airstrip: take-off-sound / air-multi-sound through rgn-yemen-multi-mid-1). Runs after registry-final, remove-lab and netgame-order-119. Diagnosis, the world-london-mp plan row and the insertion code from contributor PR 16.",
+ "recipe_version_added": "1.20.0"
+}

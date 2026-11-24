@@ -1,0 +1,36 @@
+// ucmr.rc.in - the version information (and the icon and manifest) of every Windows program and DLL UCMR builds.
+// Filled in at build time from tools/VERSION by tools/winres/winres.sh (shell builds) or tools/winres/ucmr.cmake
+// (CMake builds); the @...@ fields are replaced, nothing else.
+#include <winver.h>
+
+@UCMR_ICON_LINE@
+@UCMR_MANIFEST_LINE@
+
+1 VERSIONINFO
+ FILEVERSION @UCMR_VERSION_COMMA@
+ PRODUCTVERSION @UCMR_VERSION_COMMA@
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE @UCMR_FILETYPE@
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "UC-Resurrected"
+            VALUE "FileDescription", "@UCMR_DESCRIPTION@"
+            VALUE "FileVersion", "@UCMR_VERSION@"
+            VALUE "InternalName", "@UCMR_INTERNAL_NAME@"
+            VALUE "LegalCopyright", "@UCMR_COPYRIGHT@"
+            VALUE "OriginalFilename", "@UCMR_FILENAME@"
+            VALUE "ProductName", "UCMR"
+            VALUE "ProductVersion", "@UCMR_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

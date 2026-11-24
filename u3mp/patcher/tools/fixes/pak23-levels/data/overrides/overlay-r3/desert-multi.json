@@ -1,0 +1,6 @@
+{
+ "templates": {
+  "levels/desert-village/ground/des-reeds-messy2alpha-001/default": "levels/desert-village/ground/des-vil-reeds2-2trans:default",
+  "levels/desert-village/ground/des-vill-wood-ledge-grab/default": "levels/cruise-ship/metal/ship-walkway-metal-dark-climbable:default"
+ }
+}

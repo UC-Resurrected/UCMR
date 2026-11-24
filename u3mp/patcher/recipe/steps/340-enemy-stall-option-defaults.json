@@ -1,0 +1,26 @@
+{
+ "id": "enemy-stall-option-defaults",
+ "title": "Lost option-default slots in 9 ss-multiplayer scripts (u3fix.exe enemy-stall, enemy-stall/apply_ss_option_defaults.cpp)",
+ "kind": "script",
+ "job": "enemy-stall",
+ "with_jobs": [
+  "dctools"
+ ],
+ "family": "overlay-r3/dc1/ss-multiplayer",
+ "needs": [],
+ "commands": [
+  [
+   "u3fix.exe",
+   "enemy-stall",
+   "--apply",
+   "--project",
+   "{{PROJECT}}"
+  ]
+ ],
+ "writes": [
+  "work/overlay-r3/u3data/build/main/dc1/ps4/ss-multiplayer/*.bin"
+ ],
+ "status": "needs-converted-base",
+ "applied": "2026-11-02 01:04",
+ "recipe_version_added": "1.0.0"
+}

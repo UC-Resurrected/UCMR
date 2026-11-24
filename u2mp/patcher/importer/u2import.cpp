@@ -1,0 +1,1578 @@
+// importer/u2import.cpp: u2import.exe, the Uncharted 2 multiplayer assets the PS4 Collection lacks, brought in from the
+// player's own PS3 copy and converted to the PS4 format, as an overlay folder.
+//
+//   u2import --ps4 <PS4 game folder> --ps3 <PS3 base folder> [--ps3-dlc <PS3 DLC folder>] --out <folder>
+//            [--ps3-data <PS3 game-data folder>] [--dns <IPv4>] [--groups A,B,C,D,E] [--speech-langs english,...] [--dlc-ruins]
+//            [--drop-navmesh] [--only REGEX] [--ps3-elf EBOOT.elf] [--objdump PATH] [--ffmpeg PATH] [--force] [--update] [--validate]
+//        u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>   (maintainers)
+//   u2import --shipped-id          the fingerprint of the installed import (the launcher compares it with state.json)
+//
+//   --ps4      the Collection's game folder (holds u2data/) or u2data itself
+//   --ps3      PS3 Uncharted 2 (GOTY NPUA80698): USRDIR, its parent or build/main (archives + all-patches.psarc)
+//   --ps3-dlc  folder with dlc-map1/2.psarc and dlc-patch*.psarc; without it the map packs (groups C, D) are skipped
+//   --ps3-data the PS3 game-data folder (RPCS3 dev_hdd0/game or a <id>DATA2 folder): net-patch9.bin and the server's
+//              map spawn paks
+//   --dns      the Uncharted 2 community server DNS: the online program (u3mp/patcher/online/uncharted_online.exe
+//              --fetch-game-data-u2) downloads that game data into <out>/ps3-data2/NPUA80698DATA2, read before --ps3-data
+//   --out     the "U2 Multiplayer" folder, laid out like Uncharted 3's "U3 Multiplayer":
+//                <out>/state.json, <out>/import.log
+//                <out>/recipe/work/u2data/build/main/...  the overlay: only converted files and the registries
+//                <out>/recipe/scratch                     caches (removable)
+//                <out>/recipe/_recipe                     the import list and the importer fingerprint of the last run,
+//                                                         items.json: a copy of state.json's item records
+//                <out>/image                              the menu overlay (u2import --overlay, made by the launcher)
+//                <out>/tools                              tool files of this import
+//
+// Rule: what the PS4 game has (skin, map, picture, sound ...) stays the PS4 one; only what it lacks is imported. Every
+// row of u2mp/docs/import-list.tsv (group, key, PS3 source, size, SHA-1) is checked against the PS4 game first; PS3
+// inputs are checked by SHA-1. Groups: A skins, B the Fort's missing pieces, C map pack 1, D map pack 2, E base extras
+// (props, banks, music, DLC character voices), F optional (only with --groups F).
+//
+// The steps run like Uncharted 3's recipe: a step whose fingerprint (this program, the inputs and options, and for the
+// later steps what the first step made) and outputs are unchanged since its last good run is skipped (the log says why a
+// step runs); within a step a converted file whose input SHA-1 and converter version are unchanged is kept (so a
+// rerun after an update costs about a second). Progress: lines "@U2MP <json>".
+// Nothing is written outside --out.
+#include "u2conv.hpp"
+#include "log_history.h"   // launcher/native/log_history.h
+
+#include <windows.h>
+#include <bcrypt.h>
+
+#include <chrono>
+#include <cstdio>
+#include <regex>
+#include <thread>
+
+using namespace u2imp;
+
+std::string shipped_id_text();   // the fingerprint of the installed import (end of this file)
+
+namespace u2imp {
+
+// ------------------------------------------------------------------------------------------------ small text helpers
+std::string sha1_hex(const Bytes &b);   // u2imp.cpp below
+
+std::vector<std::string> splitlines(const std::string &t, bool keepends) {
+    std::vector<std::string> out;
+    size_t a = 0, i = 0;
+    while (i < t.size()) {
+        const uint8_t c = uint8_t(t[i]);
+        size_t brk = 0;
+        if (c == '\r') brk = i + 1 < t.size() && t[i + 1] == '\n' ? 2 : 1;
+        else if (c == '\n' || c == '\v' || c == '\f' || c == 0x1c || c == 0x1d || c == 0x1e || c == 0x85) brk = 1;
+        if (!brk) {
+            i++;
+            continue;
+        }
+        out.push_back(t.substr(a, (keepends ? i + brk : i) - a));
+        i += brk;
+        a = i;
+    }
+    if (a < t.size()) out.push_back(t.substr(a));
+    return out;
+}
+namespace {
+bool py_space(uint8_t c) { return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f) || c == 0x85 || c == 0xa0; }
+}  // namespace
+std::string pystrip(const std::string &s) {
+    size_t a = 0, b = s.size();
+    while (a < b && py_space(uint8_t(s[a]))) a++;
+    while (b > a && py_space(uint8_t(s[b - 1]))) b--;
+    return s.substr(a, b - a);
+}
+std::vector<std::string> split_ws(const std::string &s, int max) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && py_space(uint8_t(s[i]))) i++;
+        if (i >= s.size()) break;
+        if (max >= 0 && int(out.size()) == max) {   // the rest, with its trailing white space removed
+            size_t e = s.size();
+            while (e > i && py_space(uint8_t(s[e - 1]))) e--;
+            out.push_back(s.substr(i, e - i));
+            break;
+        }
+        size_t j = i;
+        while (j < s.size() && !py_space(uint8_t(s[j]))) j++;
+        out.push_back(s.substr(i, j - i));
+        i = j;
+    }
+    return out;
+}
+std::string latin1_utf8(const std::string &s) {
+    std::string o;
+    for (unsigned char c : s) {
+        if (c < 0x80) o += char(c);
+        else o += char(0xc0 | c >> 6), o += char(0x80 | (c & 0x3f));
+    }
+    return o;
+}
+std::string utf8_latin1(const std::string &s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); i++) {
+        const unsigned char c = uint8_t(s[i]);
+        if (c >= 0xc0 && c < 0xc4 && i + 1 < s.size()) o += char(((c & 3) << 6) | (uint8_t(s[++i]) & 0x3f));
+        else o += char(c);
+    }
+    return o;
+}
+std::string py_repr(const std::string &s) {
+    const bool dq = s.find('\'') != std::string::npos && s.find('"') == std::string::npos;
+    const char q = dq ? '"' : '\'';
+    std::string o(1, q);
+    for (unsigned char c : s) {
+        if (c == '\\') o += "\\\\";
+        else if (c == uint8_t(q)) o += std::string("\\") + char(q);
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else if (c < 0x20 || (c >= 0x7f && c <= 0xa0) || c == 0xad) o += fmt("\\x%02x", c);
+        else if (c >= 0x80) o += char(0xc0 | c >> 6), o += char(0x80 | (c & 0x3f));
+        else o += char(c);
+    }
+    return o + q;
+}
+std::string py_list(const std::vector<std::string> &v) {
+    std::string o = "[";
+    for (size_t i = 0; i < v.size(); i++) o += (i ? ", " : "") + py_repr(v[i]);
+    return o + "]";
+}
+std::string basename(const std::string &key) {
+    const size_t s = key.find_last_of("/\\");
+    return s == std::string::npos ? key : key.substr(s + 1);
+}
+
+fs::path patcher_dir() { return exe_dir().parent_path() / "patcher"; }   // u2mp/bin/u2import.exe -> u2mp/patcher
+fs::path launcher_root() { return exe_dir().parent_path().parent_path(); }
+
+}  // namespace u2imp
+
+namespace {
+
+const char *CONV_VERSION = "4";        // bump when a converter changes its output: those files are converted again
+const char *SKIN_VERSION = "twin2";    // mp-hero skins: PS4-twin build first; skins converted before it are redone
+const char *ACTOR_VERSION = "u2ag2";   // actor27 paks: U2 artgroup / lookup / LEVEL_PATS layout, props, anims
+// PS3 speech language -> PS4 speech archive (<name>_ps4.psarc). NPUA80698 is the North American release: its Spanish /
+// Portuguese tracks are taken as the Latin American Spanish / Brazilian Portuguese the PS4 game has.
+const std::map<std::string, std::string> SPEECH_LANGS = {{"english", "english"}, {"french", "french"}, {"spanish", "sam-spanish"}, {"portuguese", "brazilian"}};
+const std::string OUT_MAIN = "u2data/build/main";
+// PS3 sources of the GOTY release (NPUA80698 1.10: base archives + all-patches.psarc) and the map packs
+bool goty(const std::string &source) { return source == "patch" || source == "base" || source == "dlc-map2" || source == "dlc-map1"; }
+
+bool isfile(const fs::path &p) {
+    std::error_code ec;
+    return fs::is_regular_file(p, ec);
+}
+bool isdir(const fs::path &p) {
+    std::error_code ec;
+    return fs::is_directory(p, ec);
+}
+long long fsize(const fs::path &p) {
+    std::error_code ec;
+    const auto n = fs::file_size(p, ec);
+    return ec ? -1 : (long long)n;
+}
+double seconds_since(std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); }
+std::string join_notes(const std::vector<std::string> &v) {
+    std::string s;
+    for (size_t i = 0; i < v.size(); i++) s += (i ? "; " : "") + v[i];
+    return s;
+}
+std::string cut(const std::string &s, size_t n) { return s.size() > n ? s.substr(0, n) : s; }
+std::string text_of(const Value *v) { return v && v->kind == Value::String ? v->s : ""; }
+
+// a JSON value with every object's keys sorted (json.dump(sort_keys=True))
+Value sorted_keys(const Value &v) {
+    Value o = v;
+    if (o.kind == Value::Object) {
+        std::stable_sort(o.fields.begin(), o.fields.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+        for (auto &f : o.fields) f.second = sorted_keys(f.second);
+    } else if (o.kind == Value::Array)
+        for (auto &x : o.items) x = sorted_keys(x);
+    return o;
+}
+
+struct Args {
+    std::string ps4, ps3, ps3_dlc, ps3_data, out, groups = "A,B,C,D,E", speech_langs, list, only, ffmpeg, ps3_elf, objdump, dns;
+    bool dlc_ruins = false, no_dlc_ruins = false, drop_navmesh = false, no_verify = false, update = false, force = false, validate = false;
+};
+
+struct Row {
+    std::map<std::string, std::string> f;
+    const std::string &operator[](const std::string &k) const {
+        static const std::string none;
+        const auto it = f.find(k);
+        return it == f.end() ? none : it->second;
+    }
+};
+
+std::vector<Row> read_list(const fs::path &path) {
+    std::vector<Row> rows;
+    const std::string t = read_text(path);
+    std::vector<std::string> lines;
+    size_t a = 0;
+    for (size_t i = 0; i <= t.size(); i++)
+        if (i == t.size() || t[i] == '\n') {
+            if (i > a || i < t.size()) lines.push_back(t.substr(a, i - a));
+            a = i + 1;
+        }
+    if (lines.empty()) return rows;
+    auto cells = [](std::string l) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();   // a CRLF checkout
+        return split(l, '\t');
+    };
+    const auto head = cells(lines[0]);
+    for (size_t i = 1; i < lines.size(); i++) {
+        const auto v = cells(lines[i]);
+        if (v.size() < head.size()) continue;
+        Row r;
+        for (size_t k = 0; k < head.size(); k++) r.f[head[k]] = v[k];
+        rows.push_back(r);
+    }
+    return rows;
+}
+
+std::vector<std::string> listdir_sorted(const fs::path &d) {
+    std::vector<std::string> v;
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(d, ec)) v.push_back(S(e.path().filename()));
+    std::sort(v.begin(), v.end());
+    return v;
+}
+std::string upper(std::string s) {
+    for (char &c : s) c = char(toupper(uint8_t(c)));
+    return s;
+}
+
+// ------------------------------------------------------------------------------------------------ SHA-1 memo
+// The verified SHA-1 of a source, kept in <out>/work/sha1-cache.json while its container (the psarc archive holding
+// the member, or the loose file) keeps the same size and write time: an update run then checks an unchanged source
+// without reading and hashing it again, the way the step fingerprint trusts the archives' size and mtime.
+struct Sha1MemoEntry {
+    long long size = 0, mtime = 0;
+    std::string sha;
+};
+std::map<std::string, Sha1MemoEntry> sha1_memo;
+bool sha1_memo_loaded = false, sha1_memo_dirty = false;
+
+void sha1_memo_load(const fs::path &work) {
+    if (sha1_memo_loaded) return;
+    sha1_memo_loaded = true;
+    const auto v = try_json(work / "sha1-cache.json");
+    if (!v || !v->is_object()) return;
+    const Value *ver = v->get("version"), *es = v->get("entries");
+    if (!ver || ver->kind != Value::Int || ver->i != 1 || !es || !es->is_object()) return;
+    for (const auto &[k, e] : es->fields) {
+        const Value *sz = e.get("size"), *mt = e.get("mtime"), *sh = e.get("sha1");
+        if (sz && mt && sh && sz->kind == Value::Int && mt->kind == Value::Int && sh->kind == Value::String)
+            sha1_memo[k] = {sz->i, mt->i, sh->s};
+    }
+}
+
+void sha1_memo_save(const fs::path &work) {
+    if (!sha1_memo_dirty) return;
+    Value es = Value::object();
+    for (const auto &[k, e] : sha1_memo)
+        es.set(k, obj({{"size", num(e.size)}, {"mtime", num(e.mtime)}, {"sha1", str(e.sha)}}));
+    const Value v = obj({{"version", num(1)}, {"entries", es}});
+    try {
+        std::error_code ec;
+        fs::create_directories(work, ec);
+        write_text(work / "sha1-cache.json", dumps(v));
+        sha1_memo_dirty = false;
+    } catch (const std::exception &) {
+    }
+}
+
+bool sha1_memo_stamp(const fs::path &container, long long &size, long long &mtime) {
+    WIN32_FILE_ATTRIBUTE_DATA d = {};
+    if (!GetFileAttributesExW(container.wstring().c_str(), GetFileExInfoStandard, &d)) return false;
+    if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    size = (long long)((uint64_t(d.nFileSizeHigh) << 32) | d.nFileSizeLow);
+    mtime = (long long)((uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime);
+    return true;
+}
+std::string sha1_memo_key(const Entry &e) { return e.path.empty() ? e.arc_path + "::" + std::to_string(e.index) : S(e.path); }
+fs::path sha1_memo_container(const Entry &e) { return e.path.empty() ? P(e.arc_path) : e.path; }
+
+bool sha1_memo_get(const Entry &e, std::string &sha) {
+    long long size, mtime;
+    if (!sha1_memo_stamp(sha1_memo_container(e), size, mtime)) return false;
+    const auto it = sha1_memo.find(sha1_memo_key(e));
+    if (it == sha1_memo.end() || it->second.size != size || it->second.mtime != mtime) return false;
+    sha = it->second.sha;
+    return true;
+}
+bool sha1_memo_get(const fs::path &p, std::string &sha) {
+    long long size, mtime;
+    if (!sha1_memo_stamp(p, size, mtime)) return false;
+    const auto it = sha1_memo.find(S(p));
+    if (it == sha1_memo.end() || it->second.size != size || it->second.mtime != mtime) return false;
+    sha = it->second.sha;
+    return true;
+}
+void sha1_memo_put(const Entry &e, const std::string &sha) {
+    long long size, mtime;
+    if (!sha1_memo_stamp(sha1_memo_container(e), size, mtime)) return;
+    const std::string k = sha1_memo_key(e);
+    const auto it = sha1_memo.find(k);
+    if (it != sha1_memo.end() && it->second.size == size && it->second.mtime == mtime && it->second.sha == sha) return;
+    sha1_memo[k] = {size, mtime, sha};
+    sha1_memo_dirty = true;
+}
+void sha1_memo_put(const fs::path &p, const std::string &sha) {
+    long long size, mtime;
+    if (!sha1_memo_stamp(p, size, mtime)) return;
+    const std::string k = S(p);
+    const auto it = sha1_memo.find(k);
+    if (it != sha1_memo.end() && it->second.size == size && it->second.mtime == mtime && it->second.sha == sha) return;
+    sha1_memo[k] = {size, mtime, sha};
+    sha1_memo_dirty = true;
+}
+
+class Importer {
+public:
+    explicit Importer(const Args &a) : a(a) {
+        out = fs::absolute(P(a.out));
+        files = out / "recipe" / "work";   // the converted files (the game's overlay folder)
+        main = files / P(OUT_MAIN);
+        work = out / "recipe" / "scratch";
+        state_file = out / "state.json";
+        if (auto s = try_json(state_file); s && s->is_object()) state = *s;
+        else state = Value::object();
+        prev_status = text_of(state.get("status"));
+        // no item records in state.json (it was lost, or the folder was copied without it): the copy kept beside the
+        // converted files (save()), so those files are reused, not converted again
+        if (!state.get("items") || !state.get("items")->is_object() || state.get("items")->fields.empty()) {
+            if (auto r = try_json(records_file()); r && r->is_object()) state.set("items", *r);
+            else state.set("items", Value::object());
+        }
+    }
+    int run();
+
+private:
+    Args a;
+    fs::path out, files, main, work, state_file;
+    Value state;
+    std::string prev_status;
+    std::unique_ptr<PS3> ps3;
+    std::unique_ptr<PS4> ps4;
+    std::set<std::string> music_refs_, langs;
+    std::string ffmpeg;
+    bool dlc_ruins = false;
+    std::vector<Row> rows;
+    std::map<std::string, std::string> level_txt;   // level -> its PS3 .txt (latin-1)
+    std::string exe_digest, base_digest;
+    bool state_dirty = false;
+    FILE *logf = nullptr;
+    Context ctx;
+
+    Value &items() { return *state.get("items"); }
+    Value *item(const std::string &key) { return items().get(key); }
+
+    void lg(const std::string &text) {
+        log(text);
+        if (logf) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            std::fprintf(logf, "%02d:%02d:%02d %s\n", t.wHour, t.wMinute, t.wSecond, text.c_str());
+            std::fflush(logf);
+        }
+    }
+
+    // the item records also live in recipe/_recipe/items.json, beside the converted files they describe
+    fs::path records_file() const { return out / "recipe" / "_recipe" / "items.json"; }
+
+    void save() {
+        const fs::path tmp = S(state_file) + ".tmp";
+        write_text(tmp, dump_indent1(sorted_keys(state)));
+        try {   // only a copy: state.json stays the record
+            std::error_code ec;
+            fs::create_directories(records_file().parent_path(), ec);
+            write_text(records_file(), dumps(sorted_keys(items())));
+        } catch (const std::exception &) {
+        }
+        // a sync client or a virus scanner may hold state.json for a moment: retry
+        for (int i = 0; i < 40; i++) {
+            if (MoveFileExW(tmp.wstring().c_str(), state_file.wstring().c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                state_dirty = false;
+                return;
+            }
+            if (i == 39) throw std::runtime_error("PermissionError: cannot replace " + S(state_file));
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    }
+
+    fs::path out_path(const std::string &rel) {
+        const fs::path p = main / P(rel);
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+        return p;
+    }
+
+    // the converted file of an item that no longer has it (not imported any more, failed, or now written elsewhere):
+    // deleted, so only the files of this import stay in the overlay (registries() counts every file there)
+    void drop_old_out(const std::string &key, const std::string &new_out) {
+        const Value *old = item(key);
+        const std::string o = old ? text_of(old->get("out")) : "";
+        if (o.empty() || o == new_out) return;
+        for (const auto &[k, it] : items().fields)   // another item writes the same file
+            if (k != key && text_of(it.get("out")) == o && text_of(it.get("status")) == "ok") return;
+        std::error_code ec;
+        if (fs::remove(files / P(o), ec)) lg("removed " + o + " (" + key + " has no converted file now)");
+    }
+
+    void set_item(const std::string &key, const std::string &status, const std::string &group, std::vector<std::pair<std::string, Value>> kw) {
+        std::string new_out;
+        for (const auto &[k, v] : kw)
+            if (k == "out") new_out = text_of(&v);
+        drop_old_out(key, status == "ok" ? new_out : "");
+        Value it = Value::object();
+        it.set("status", str(status));
+        it.set("group", str(group));
+        for (auto &[k, v] : kw) it.set(k, v);
+        it.set("conv", str(CONV_VERSION));
+        items().set(key, it);
+        state_dirty = true;
+    }
+
+    bool done_before(const std::string &key, const std::string &src_sha) {
+        const Value *it = item(key);
+        if (a.force || !it || text_of(it->get("conv")) != CONV_VERSION || text_of(it->get("src_sha1")) != src_sha) return false;
+        const std::string k = lower(key);
+        if (starts(k, "actor27/mp-hero") && text_of(it->get("skin")) != SKIN_VERSION) return false;
+        if (starts(k, "actor27/") && text_of(it->get("actor")) != ACTOR_VERSION) return false;
+        if (text_of(it->get("status")) != "ok") return false;
+        const fs::path o = files / P(text_of(it->get("out")));
+        const Value *sz = it->get("size");
+        return isfile(o) && sz && sz->kind == Value::Int && fsize(o) == sz->i;
+    }
+
+    // a converted file: status ok, its output and size
+    void record(const std::string &key, const std::string &group, const std::string &rel, std::vector<std::pair<std::string, Value>> kw) {
+        const std::string o = OUT_MAIN + "/" + rel;
+        kw.insert(kw.begin(), {"out", str(o)});
+        set_item(key, "ok", group, kw);
+        Value &it = *item(key);
+        const std::string k = lower(key);
+        if (starts(k, "actor27/mp-hero")) it.set("skin", str(SKIN_VERSION));
+        if (starts(k, "actor27/")) it.set("actor", str(ACTOR_VERSION));
+        it.set("size", num(fsize(files / P(o))));
+    }
+
+    // (entry, bytes) of the PS3 file of a row, checked by SHA-1; throws std::out_of_range with the reason. A row
+    // already done (need_data false) is checked from the SHA-1 memo, so an unchanged source is not read again.
+    std::pair<const Entry *, Bytes> source(const Row &row, bool need_data) {
+        auto cands = ps3->candidates(row["key"]);
+        if (cands.empty()) throw std::out_of_range("not in the given PS3 folders (needs " + row["ps3_source"] + ")");
+        const std::string want = row["sha1"];
+        std::vector<std::string> mism;
+        // the listed source first, then the GOTY copies, the BCUS title updates (dlc-patch*) last
+        std::stable_sort(cands.begin(), cands.end(), [&](const Entry *x, const Entry *y) {
+            const auto kx = std::make_pair(x->source != row["ps3_source"], !goty(x->source)), ky = std::make_pair(y->source != row["ps3_source"], !goty(y->source));
+            return kx < ky;
+        });
+        for (const Entry *e : cands) {
+            if (want.empty() || a.no_verify) return {e, need_data ? e->read() : Bytes{}};
+            if (need_data) {
+                Bytes data = e->read();
+                const std::string sha = sha1_hex(data);
+                sha1_memo_put(*e, sha);
+                if (sha == want) return {e, std::move(data)};
+            } else {
+                std::string sha;
+                if (!sha1_memo_get(*e, sha)) {
+                    sha = sha1_hex(e->read());
+                    sha1_memo_put(*e, sha);
+                }
+                if (sha == want) return {e, Bytes{}};
+            }
+            mism.push_back(e->where());
+        }
+        std::string w;
+        for (size_t i = 0; i < mism.size() && i < 3; i++) w += (i ? "; " : "") + mism[i];
+        throw std::out_of_range("SHA-1 differs from the import list in " + w);
+    }
+
+    // "" when PS4 lacks the file, else why it stays the PS4 one
+    std::string ps4_has(const Row &row) {
+        const std::string k = lower(row["key"]);
+        if (starts(k, "sound1/speech/")) {
+            const std::string lang = split(k, '/')[2];
+            const auto l4 = SPEECH_LANGS.find(lang);
+            if (l4 == SPEECH_LANGS.end() || !ps4->speech.count(l4->second)) return "no PS4 speech language for " + lang;
+            if (!langs.count(l4->second)) return "language not selected";
+            return ps4->speech.at(l4->second).count(basename(k)) ? "PS4 " + l4->second + " speech has it" : "";
+        }
+        if (starts(k, "sound1/music/")) {
+            if (ps4->has(k)) return "PS4 has it";
+            const auto name = music_name(basename(k).substr(0, basename(k).size() - 5));
+            if (!name) return "PS4 music settings do not use it";
+            if (ps4->has("sound1/music/" + *name + ".xvag")) return "PS4 music settings do not use it (PS4 plays its own renumbered copy " + *name + ")";
+            return "";
+        }
+        if ((k == "pak22/ruins-multi.pak" || k == "pak22/ruins-multi-ingame10.pak") && dlc_ruins) return "";
+        if (ends(k, ".txt") && starts(k, "pak22/")) return "";
+        return ps4->has(k) ? "PS4 has it" : "";
+    }
+
+    // the track name the PS4 music settings use for a PS3 track: the same name, else the one name with the same title
+    // after the track number (PS4 renumbered the tracks)
+    std::optional<std::string> music_name(const std::string &stem) {
+        const std::string s = lower(stem);
+        for (const std::string &r : music_refs_)
+            if (lower(r) == s) return r;
+        auto title = [](const std::string &x) {
+            if (x.size() > 1) {
+                size_t i = 0;
+                while (i < x.size() && isdigit(uint8_t(x[i]))) i++;
+                if (i > 0 && i < x.size() && x[i] == '_') return x.substr(i + 1);
+            }
+            return x;
+        };
+        std::vector<std::string> same;
+        for (const std::string &r : music_refs_)
+            if (title(lower(r)) == title(s)) same.push_back(r);
+        if (same.size() == 1) return same[0];
+        return std::nullopt;
+    }
+
+    // ---------------------------------------------------------------------------------------------- converters
+    Converted conv_xvag(const Row &row, const Entry &entry, const Bytes &data) {
+        const std::string k = row["key"];
+        std::string rel;
+        if (starts(lower(k), "sound1/speech/")) rel = "sound1/speech/" + SPEECH_LANGS.at(split(lower(k), '/')[2]) + "/" + basename(entry.key);
+        else if (starts(lower(k), "sound1/music/")) {
+            const std::string b = basename(entry.key);
+            rel = "sound1/music/" + music_name(b.substr(0, b.size() - 5)).value_or("None") + ".xvag";
+        } else
+            rel = k.substr(0, k.rfind('/')) + "/" + basename(entry.key);
+        write_bytes(out_path(rel), xvag_convert(data));
+        return {rel, {}};
+    }
+
+    Converted conv_bank(const Row &, const Entry &entry, const Bytes &data) {
+        std::string note;
+        const Bytes o = bank_convert(data, ffmpeg, note);
+        const std::string rel = "sound1/banks/ps4/" + basename(entry.key);
+        write_bytes(out_path(rel), o);
+        return {rel, {note}};
+    }
+
+    fs::path src_file(const Entry &entry, const Bytes &data) {
+        const fs::path d = work / "src";
+        std::error_code ec;
+        fs::create_directories(d, ec);
+        const fs::path p = d / P(basename(entry.key));
+        if (!(isfile(p) && fsize(p) == (long long)data.size())) write_bytes(p, data);
+        return p;
+    }
+
+    Converted conv_actor(const Row &, const Entry &entry, const Bytes &data) { return convert_actor(ctx, entry, src_file(entry, data)); }
+
+    Converted conv_level(const Row &, const Entry &entry, const Bytes &data) {
+        const fs::path src = src_file(entry, data);
+        const std::string rel = "pak22/ps4/" + basename(entry.key);
+        return {rel, convert_level(ctx, src, out_path(rel))};
+    }
+
+    // ---------------------------------------------------------------------------------------------- steps
+    std::string step_fingerprint(const std::string &sid, bool first, Value *parts = nullptr);
+    bool step_outputs_ok(const std::string &sid);
+    void step_items();
+    fs::path data2;   // <out>/ps3-data2/NPUA80698DATA2 when it holds usable game data (downloaded): read first
+    std::string fetch_data2(const std::string &elf, const fs::path &target, const fs::path &same_as, bool &same);
+    void ensure_data2(const std::string &elf);
+    std::string data2_digest();
+    std::vector<fs::path> ps3_data_roots();
+    std::vector<fs::path> ps3_data_candidates();
+    std::optional<fs::path> ps3_data_pak22();
+    std::optional<fs::path> ps3_data_file(const std::string &name);
+    void net_spawn_paks();
+    void net_patch();
+    void net_images();
+    void registries();
+    void texts();
+    int finish(const std::string &status, std::vector<std::pair<std::string, Value>> kw = {});
+};
+
+int Importer::run() {
+    std::error_code ec;
+    // the folders of a "U2 Multiplayer" folder, named as in "U3 Multiplayer" (image: the launcher's menu overlay)
+    for (const fs::path &d : {out / "image", out / "tools", out / "recipe" / "_recipe", work, files})
+        fs::create_directories(d, ec);
+    // a full run starts a new log (it grew with every import before), the earlier ones kept LOG_DAYS days as
+    // import.<date>.log; an --only run adds to the last one
+    if (a.only.empty()) keep_log_history(out / "import.log");
+    logf = _wfopen((out / "import.log").wstring().c_str(), a.only.empty() ? L"wb" : L"ab");
+    lg("=== u2mp import " + now_text() + " (converter " + CONV_VERSION + ")");
+    state.set("status", str("running"));
+    state.set("started", str(now_text()));
+    state.set("pid", num(GetCurrentProcessId()));
+    state.set("inputs", obj({{"ps4", str(a.ps4)}, {"ps3", str(a.ps3)}, {"ps3_dlc", str(a.ps3_dlc)}}));
+    state.set("conv", str(CONV_VERSION));
+    state.set("updating", Value::boolean(a.update));
+    state.remove("error");
+    state.remove("failed");
+    save();
+    try {
+        ps4 = std::make_unique<PS4>(a.ps4);
+        ps3 = std::make_unique<PS3>(a.ps3, a.ps3_dlc);
+    } catch (const std::runtime_error &e) {
+        return finish("failed", {{"error", str(e.what())}});
+    }
+    std::string arcs;
+    for (size_t i = 0; i < ps3->archives.size(); i++) arcs += (i ? ", " : "") + basename(ps3->archives[i]);
+    lg(fmt("PS3 archives: %zu (%s)", ps3->archives.size(), arcs.c_str()));
+    // the decrypted PS3 EBOOT.elf is required: no import without it
+    const std::string elf = !a.ps3_elf.empty() ? a.ps3_elf : S(ps3->base_main.parent_path().parent_path() / "EBOOT.elf");
+    bool ok = false;
+    if (FILE *f = _wfopen(P(elf).wstring().c_str(), L"rb")) {
+        char m[4] = {};
+        ok = std::fread(m, 1, 4, f) == 4 && !std::memcmp(m, "\x7f" "ELF", 4);
+        std::fclose(f);
+    }
+    if (!ok) {
+        const std::string why = "No decrypted PS3 Uncharted 2 EBOOT.elf of your own copy of the game: add it, then import again";
+        if (a.update && (prev_status == "imported" || prev_status == "partial")) {
+            // an automatic update of a working import: not applied, the current files stay playable
+            state.set("update_failed_for", str(shipped_id_text()));
+            return finish(prev_status, {{"error", str("Update not applied: " + why)}});
+        }
+        return finish("failed", {{"error", str(why)}});
+    }
+    lg("PS3 EBOOT.elf: " + elf);
+    ensure_data2(elf);
+    music_refs_ = ps4->music_refs();
+    if (!a.speech_langs.empty())
+        for (const std::string &l : split(a.speech_langs, ',')) langs.insert(strip(l));
+    else
+        for (const auto &[k, v] : SPEECH_LANGS) langs.insert(v);
+    dlc_ruins = a.dlc_ruins && !a.ps3_dlc.empty() && !a.no_dlc_ruins;
+    ffmpeg = find_ffmpeg(a.ffmpeg);
+    lg("ffmpeg: " + (ffmpeg.empty() ? std::string("not found (banks with MP3 samples are skipped)") : ffmpeg));
+    ctx.ps3 = ps3.get();
+    ctx.ps4 = ps4.get();
+    ctx.work = work;
+    ctx.main = main;
+    ctx.ps4_game = a.ps4;
+    ctx.ps3_elf = elf;
+    ctx.objdump = a.objdump;
+    ctx.drop_navmesh = a.drop_navmesh;
+    std::set<char> groups;
+    for (const std::string &g : split(a.groups, ','))
+        if (!strip(g).empty()) groups.insert(char(toupper(uint8_t(strip(g)[0]))));
+    for (const Row &r : read_list(P(a.list)))
+        if (!r["group"].empty() && groups.count(r["group"][0])) rows.push_back(r);
+    if (!a.only.empty()) {
+        const std::regex re(a.only);
+        std::vector<Row> keep;
+        for (const Row &r : rows)
+            if (std::regex_search(r["key"], re)) keep.push_back(r);
+        rows = keep;
+    }
+    auto order = [](const Row &r) {
+        const std::string top = split(r["key"], '/')[0];
+        return top == "sound1" ? 0 : top == "actor27" ? 1 : top == "pak22" ? 2 : 3;
+    };
+    std::stable_sort(rows.begin(), rows.end(), [&](const Row &x, const Row &y) {
+        return std::make_tuple(order(x), x["group"], x["key"]) < std::make_tuple(order(y), y["group"], y["key"]);
+    });
+    std::string gl;
+    for (char g : groups) gl += (gl.empty() ? "" : ",") + std::string(1, g);
+    lg(fmt("%zu import-list rows in groups %s", rows.size(), gl.c_str()));
+    exe_digest = sha256_file(exe_dir() / "u2import.exe");
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Step {
+        std::string id, title;
+        std::function<void()> fn;
+        bool first;
+    };
+    const std::vector<Step> steps = {
+        {"import-list", fmt("Files from the PS3 copy: sounds, skins, actors and levels (%zu rows)", rows.size()), [this] { step_items(); }, true},
+        {"net-images", "Menu images of the multiplayer maps", [this] { net_images(); }, false},
+        {"net-spawn-paks", "Spawn paks of the multiplayer maps (PS3 game data)", [this] { net_spawn_paks(); }, false},
+        {"net-patch", "net-patch9: the PS3 server live-data DC module", [this] { net_patch(); }, false},
+        {"registries", "pak22_ps4.txt and banks.txt: the imported levels and banks", [this] { registries(); }, false},
+        {"texts", "Text banks with the multiplayer strings", [this] { texts(); }, false},
+    };
+    if (!state.get("steps") || !state.get("steps")->is_object()) state.set("steps", Value::object());
+    std::vector<std::string> failed;
+    for (size_t i = 0; i < steps.size(); i++) {
+        const Step &s = steps[i];
+        event(obj({{"phase", str("recipe")}, {"step", num((long long)(i + 1))}, {"total", num((long long)(steps.size()))}, {"id", str(s.id)}, {"title", str(s.title)},
+                   {"status", str("running")}}));
+        lg(fmt("[%zu/%zu] %s - %s", i + 1, steps.size(), s.id.c_str(), s.title.c_str()));
+        Value parts;
+        const std::string fp = step_fingerprint(s.id, s.first, &parts);
+        Value *old = state.get("steps")->get(s.id);
+        // why it runs again (the log says it): what changed since its last good run
+        std::string why;
+        if (a.force) why = "--force";
+        else if (!old) why = "it has not run in this folder before";
+        else if (text_of(old->get("status")) != "ok") why = "its last run ended '" + text_of(old->get("status")) + "'";
+        else if (text_of(old->get("fp")) != fp) {
+            const Value *pp = old->get("parts");
+            for (const auto &[k, words] : std::vector<std::pair<std::string, std::string>>{
+                     {"code", "u2import.exe changed"}, {"options", "the import options or PS3 archives changed"},
+                     {"upstream", s.first ? "the import list changed" : "what the first step made or the game data changed"}})
+                if (!pp || text_of(pp->get(k)) != text_of(parts.get(k))) why += (why.empty() ? "" : ", ") + words;
+        } else if (!step_outputs_ok(s.id))
+            why = "its files are not as the last run left them";
+        if (why.empty()) {
+            lg("        no change (already applied)");
+            event(obj({{"phase", str("recipe")}, {"id", str(s.id)}, {"status", str("ok")}, {"note", str("no change")}}));
+            continue;
+        }
+        lg("        runs because " + why);
+        const auto t = std::chrono::steady_clock::now();
+        try {
+            s.fn();
+            const double sec = seconds_since(t);
+            Value r = obj({{"fp", str(fp)}, {"status", str("ok")}, {"parts", parts}});
+            Value secs;
+            secs.kind = Value::Float;
+            secs.f = std::round(sec * 10) / 10;
+            r.set("seconds", secs);
+            state.get("steps")->set(s.id, r);
+            lg(fmt("        ok  %.1f s", sec));
+            event(obj({{"phase", str("recipe")}, {"id", str(s.id)}, {"status", str("ok")}, {"note", str(fmt("ok  %.1f s", sec))}}));
+        } catch (const std::exception &e) {   // one step failing does not stop the others
+            failed.push_back(s.id);
+            const std::string note = cut(e.what(), 400);
+            state.get("steps")->set(s.id, obj({{"fp", str(fp)}, {"status", str("failed")}, {"note", str(note)}}));
+            lg(fmt("        FAILED after %.1f s: %s", seconds_since(t), cut(e.what(), 300).c_str()));
+            event(obj({{"phase", str("recipe")}, {"id", str(s.id)}, {"status", str("failed")}, {"note", str(note)}}));
+        }
+        save();
+    }
+    std::map<std::string, long long> counts;
+    for (const auto &[k, it] : items().fields) counts[text_of(it.get("status"))]++;
+    Value c = Value::object();
+    std::string cl;
+    for (const auto &[k, n] : counts) {
+        c.set(k, num(n));
+        cl += (cl.empty() ? "" : ", ") + k + " " + std::to_string(n);
+    }
+    state.set("counts", c);
+    std::string fl;
+    for (const std::string &f : failed) fl += (fl.empty() ? "" : ", ") + f;
+    lg(fmt("done in %.0f s: %s; steps failed: %s", seconds_since(t0), cl.c_str(), fl.empty() ? "none" : fl.c_str()));
+    if (a.validate) state.set("validation", validate(*ps3, *ps4, ctx, work / "validate", [this](const std::string &s) { lg(s); }));
+    state.set("recipe_id", str(shipped_id_text()));
+    Value fa = Value::object();
+    fa.kind = Value::Array;
+    for (const std::string &f : failed) fa.items.push_back(str(f));
+    if (std::find(failed.begin(), failed.end(), "import-list") != failed.end())
+        return finish("failed", {{"failed", fa}, {"error", str("step import-list failed: see the import log")}});
+    const long long bad = counts["failed"] + counts["missing"];
+    return finish(bad || counts["unsupported"] || !failed.empty() ? "partial" : "imported", {{"failed", fa}});
+}
+
+// sha256 over the step id, this program, the inputs and options, and (first step) the import list or (later steps) what
+// the first step made: its item records and the level lists, taken once right after it. parts: the hashes of those
+// three (code, options, upstream), so the log can say which one changed.
+std::string Importer::step_fingerprint(const std::string &sid, bool first, Value *parts) {
+    Sha256 h;
+    h.update(sid.data(), sid.size());
+    h.update("\0", 1);
+    h.update(exe_digest.data(), exe_digest.size());
+    Value arcs = Value::object();
+    arcs.kind = Value::Array;
+    for (const std::string &p : ps3->archives) {
+        std::error_code ec;
+        const auto t = fs::last_write_time(P(p), ec);
+        arcs.items.push_back(obj({{"name", str(basename(p))}, {"size", num(fsize(P(p)))}, {"mtime", num(ec ? 0 : (long long)t.time_since_epoch().count())}}));
+    }
+    const Value opts = obj({{"conv", str(CONV_VERSION)}, {"skin", str(SKIN_VERSION)}, {"actor", str(ACTOR_VERSION)}, {"ps4", str(a.ps4)}, {"ps3", str(a.ps3)},
+                            {"dlc", str(a.ps3_dlc)}, {"data", str(a.ps3_data)}, {"elf", str(a.ps3_elf)}, {"groups", str(a.groups)},
+                            {"langs", str(a.speech_langs)}, {"dlc_ruins", Value::boolean(a.dlc_ruins)}, {"no_dlc_ruins", Value::boolean(a.no_dlc_ruins)},
+                            {"navmesh", Value::boolean(a.drop_navmesh)}, {"only", str(a.only)}, {"no_verify", Value::boolean(a.no_verify)}, {"archives", arcs}});
+    const std::string o = dumps(opts, true);
+    h.update(o.data(), o.size());
+    std::string up;   // what the step builds on
+    if (first) {
+        std::string t = read_text(P(a.list));
+        t.erase(std::remove(t.begin(), t.end(), '\r'), t.end());
+        const std::string d = sha256_hex(t);
+        h.update(d.data(), d.size());
+        up = d;
+    } else {
+        if (base_digest.empty()) {
+            Value its = Value::object();
+            for (const Row &r : rows)
+                if (const Value *it = item(r["key"])) its.set(r["key"], *it);
+            Value lt = Value::object();
+            for (const auto &[k, v] : level_txt) lt.set(k, str(latin1_utf8(v)));
+            Value both = Value::object();
+            both.kind = Value::Array;
+            both.items = {its, lt};
+            base_digest = sha256_hex(dumps(both, true));
+        }
+        h.update(base_digest.data(), base_digest.size());
+        // the game data the net steps read (a download or an RPCS3 folder may change under the same path)
+        const std::string d = data2_digest();
+        h.update(d.data(), d.size());
+        up = base_digest + d;
+    }
+    if (parts) *parts = obj({{"code", str(exe_digest)}, {"options", str(sha256_hex(o))}, {"upstream", str(sha256_hex(up))}});
+    return h.hex();
+}
+
+// sha256 over the game-data files the net steps read: net-patch9.bin and the spawn paks (path, size, time)
+std::string Importer::data2_digest() {
+    Value l = Value::object();
+    l.kind = Value::Array;
+    auto add = [&](const fs::path &p) {
+        std::error_code ec;
+        const auto t = fs::last_write_time(p, ec);
+        l.items.push_back(obj({{"path", str(S(p))}, {"size", num(fsize(p))}, {"mtime", num(ec ? 0 : (long long)t.time_since_epoch().count())}}));
+    };
+    if (const auto f = ps3_data_file("net-patch9.bin")) add(*f);
+    if (const auto d = ps3_data_pak22())
+        for (const std::string &f : listdir_sorted(*d))
+            if (ends(f, "-pak-ingame10.pak")) add(*d / P(f));
+    return sha256_hex(dumps(l, true));
+}
+
+// a skipped step must still have its files: the import-list step's converted files and its level lists (the later
+// steps write few files and are cheap to redo)
+bool Importer::step_outputs_ok(const std::string &sid) {
+    if (sid != "import-list") return true;
+    for (const auto &[k, it] : items().fields)
+        if (text_of(it.get("status")) == "ok" && !text_of(it.get("out")).empty()) {
+            const fs::path p = files / P(text_of(it.get("out")));
+            const Value *sz = it.get("size");
+            if (!isfile(p) || !sz || fsize(p) != sz->i) return false;
+        }
+    const auto lt = try_json(work / "level-txt.json");
+    if (!lt || !lt->is_object()) return false;
+    level_txt.clear();
+    for (const auto &[k, v] : lt->fields) level_txt[k] = utf8_latin1(v.s);
+    return true;
+}
+
+// step import-list: every import-list row the PS4 game lacks, converted (unchanged inputs keep their files)
+void Importer::step_items() {
+    level_txt.clear();
+    sha1_memo_load(work);
+    for (size_t n = 0; n < rows.size(); n++) {
+        const Row &row = rows[n];
+        const std::string key = row["key"], kl = lower(key), group = row["group"];
+        if (n % 50 == 0 || !starts(kl, "sound1/speech/"))
+            event(obj({{"phase", str("item")}, {"n", num((long long)(n + 1))}, {"total", num((long long)(rows.size()))}, {"key", str(key)}}));
+        const std::string have = ps4_has(row);
+        if (!have.empty()) {
+            const std::string st = starts(have, "PS4 ") && have.find("do not use") == std::string::npos ? "ps4" : "skipped";
+            set_item(key, st, group, {{"note", str(have)}});
+            continue;
+        }
+        const bool txt_input = ends(kl, ".txt") && starts(kl, "pak22/");
+        const bool done = !txt_input && !row["sha1"].empty() && done_before(key, row["sha1"]);
+        const Entry *entry = nullptr;
+        Bytes data;
+        try {
+            std::tie(entry, data) = source(row, !done);
+        } catch (const std::out_of_range &e) {
+            if ((group[0] == 'C' || group[0] == 'D') && a.ps3_dlc.empty() && ps3->candidates(key).empty()) {
+                // map pack rows without --ps3-dlc (the launcher's GOTY-only import): not part of this import
+                set_item(key, "skipped", group, {{"note", str(std::string("map pack ") + group[0] + " not given (--ps3-dlc): GOTY-only import")}});
+                continue;
+            }
+            set_item(key, "missing", group, {{"note", str(e.what())}});
+            lg("MISSING " + key + ": " + e.what());
+            continue;
+        }
+        const std::string src_sha = !row["sha1"].empty() ? row["sha1"] : sha1_hex(data);
+        if (txt_input) {
+            const std::string b = basename(key);
+            level_txt[b.substr(0, b.size() - 4)] = std::string(data.begin(), data.end());
+            set_item(key, "ok", group, {{"note", str("registry input")}, {"src", str(entry->source)}, {"src_sha1", str(src_sha)}});
+            continue;
+        }
+        if (done || done_before(key, src_sha)) {
+            Value *it = item(key);
+            if (text_of(it->get("src")) != entry->source) {   // same bytes; the archive they are read from now
+                it->set("src", str(entry->source));
+                state_dirty = true;
+            }
+            continue;
+        }
+        std::function<Converted(const Row &, const Entry &, const Bytes &)> fn;
+        if (ends(kl, ".xvag")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_xvag(r, e, d); };
+        else if (ends(kl, ".bnk")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_bank(r, e, d); };
+        else if (starts(kl, "actor27/") && ends(kl, ".pak")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_actor(r, e, d); };
+        else if (starts(kl, "pak22/") && ends(kl, ".pak")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_level(r, e, d); };
+        else {
+            set_item(key, "skipped", group, {{"note", str("optional (" + split(key, '/')[0] + "): not referenced by the PS4 game")}});
+            continue;
+        }
+        const auto t = std::chrono::steady_clock::now();
+        try {
+            const Converted c = fn(row, *entry, data);
+            const std::string notes = join_notes(c.notes);
+            record(key, group, c.rel, {{"src", str(entry->source)}, {"src_sha1", str(src_sha)}, {"note", str(cut(notes, 400))}});
+            if (!starts(kl, "sound1/speech/")) lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), entry->source.c_str(), seconds_since(t), cut(notes, 200).c_str()));
+        } catch (const Unsupported &e) {
+            set_item(key, "unsupported", group, {{"note", str(cut(e.what(), 400))}, {"src", str(entry->source)}});
+            lg("UNSUPPORTED " + key + ": " + e.what());
+        } catch (const std::exception &e) {
+            set_item(key, "failed", group, {{"src", str(entry->source)}, {"note", str(cut(e.what(), 400))}});
+            lg("FAILED " + key + ": " + cut(e.what(), 300));
+        }
+        if (n % 20 == 0 && state_dirty) save();
+    }
+    // rows that left the import list (a newer list, or the PS4 game has them now): their records and converted files
+    // go, so an update keeps only what this import makes. Only on a full run of the groups this run imports; the items
+    // of the net steps (net spawn paks, net-patch9, net images) are not import-list rows and stay.
+    if (a.only.empty()) {
+        std::set<std::string> listed;
+        std::set<char> run_groups;
+        for (const Row &row : rows) {
+            listed.insert(row["key"]);
+            if (!row["group"].empty()) run_groups.insert(row["group"][0]);
+        }
+        std::vector<std::string> gone;
+        for (const auto &[k, it] : items().fields) {
+            const std::string g = text_of(it.get("group"));
+            const bool net_item = k == "dc1/net-patch9.bin" || k == "pak22/" + std::string(NETIMG_OUT_NAME) || ends(k, "-pak-ingame10.pak");
+            if (!listed.count(k) && !net_item && !g.empty() && run_groups.count(g[0])) gone.push_back(k);
+        }
+        for (const std::string &k : gone) {
+            drop_old_out(k, "");
+            items().remove(k);
+            lg("removed record " + k + ": not in the import list any more");
+        }
+        if (!gone.empty()) state_dirty = true;
+    }
+    std::error_code ec;
+    fs::create_directories(work, ec);
+    Value lt = Value::object();
+    for (const auto &[k, v] : level_txt) lt.set(k, str(latin1_utf8(v)));
+    write_text(work / "level-txt.json", dumps(lt));
+    save();
+    sha1_memo_save(work);
+}
+
+namespace {
+const char *DATA2_ID = "NPUA80698DATA2";   // <out>/ps3-data2/NPUA80698DATA2/USRDIR
+
+// a game-data USRDIR the net steps can use: net-patch9.bin and at least one spawn package
+bool data2_usable(const fs::path &usrdir) {
+    if (!isfile(usrdir / "net-patch9.bin")) return false;
+    const fs::path pak = usrdir / "build" / "main" / "pak22";
+    if (!isdir(pak)) return false;
+    for (const std::string &f : listdir_sorted(pak))
+        if (ends(f, "-pak-ingame10.pak")) return true;
+    return false;
+}
+}  // namespace
+
+// The online program's game-data download: `uncharted_online.exe --fetch-game-data-u2 <dns> <target> <EBOOT.elf>
+// [--same-as <USRDIR>]` writes <target>/USRDIR/... as Uncharted 2 would when it goes online (net-patch9.bin and the
+// maps' spawn packages; where the files come from is the online program's business). Its stdout lines: start, get
+// <path> <got> <total>, file <path> <bytes>, note <path> <text>, fail <path> <text>, error <text>, same net-patch9.bin
+// (the --same-as copy is the server's: nothing else fetched), done <files> <bytes> <failed>; exit 0 = complete. Returns
+// "" or what went wrong (no addresses: the program prints none, and the DNS value is not logged).
+std::string Importer::fetch_data2(const std::string &elf, const fs::path &target, const fs::path &same_as, bool &same) {
+    const fs::path exe = launcher_root() / "u3mp" / "patcher" / "online" / "uncharted_online.exe";
+    if (!isfile(exe)) return "the online program is missing (" + S(exe) + ")";
+    std::vector<std::string> fails, cmd = {S(exe), "--fetch-game-data-u2", strip(a.dns), S(target), elf};
+    if (!same_as.empty()) {
+        cmd.push_back("--same-as");
+        cmd.push_back(S(same_as));
+    }
+    long long files = 0, done = 0;
+    int rc;
+    try {
+        rc = u3imp::run(cmd, fs::path(), {}, [&](const std::string &raw) {
+            const std::string line = strip(raw);
+            const size_t sp = line.find(' ');
+            const std::string kind = line.substr(0, sp), rest = sp == std::string::npos ? "" : line.substr(sp + 1);
+            if (kind == "file") {
+                const size_t k = rest.rfind(' ');
+                const std::string size = k == std::string::npos ? "0" : rest.substr(k + 1);
+                files++;
+                done += std::all_of(size.begin(), size.end(), [](char c) { return c >= '0' && c <= '9'; }) && !size.empty() ? std::stoll(size) : 0;
+                lg("game data: downloaded " + (k == std::string::npos ? rest : rest.substr(0, k)) + " (" + size + " bytes)");
+                event(obj({{"phase", str("data2")}, {"status", str("running")},
+                           {"note", str(fmt("Downloading the game data: %lld files, %lld KB", files, done >> 10))}}));
+            } else if (kind == "fail" || kind == "error") {
+                fails.push_back(rest);
+                lg("game data: " + line);
+            } else if (kind == "same") {
+                same = true;
+            } else if (kind == "note" || kind == "start" || kind == "done") {
+                lg("game data: " + line);
+            }
+        });
+    } catch (const std::exception &e) {
+        return std::string("the online program could not start (") + e.what() + ")";
+    }
+    if (rc == 0) return "";
+    std::string f;
+    for (const std::string &x : fails) f += (f.empty() ? "" : "; ") + x;
+    return f.empty() ? fmt("the online program ended with code %d", rc) : cut(f, 400);
+}
+
+// The game data the net steps read (net-patch9.bin and the maps' spawn packages: what Uncharted 2 GOTY writes to
+// dev_hdd0/game/NPUA80698DATA2 when it goes online). With the Uncharted 2 community server DNS (--dns) the online program
+// downloads the server's current copy at every import and update into <out>/ps3-data2, as the game does each time it
+// goes online: first only net-patch9.bin, compared with the copy the import would read; the rest only when it differs.
+// The download goes to a new folder that replaces the old copy only when it is usable. Without a DNS, or when the
+// download fails, an earlier download or the --ps3-data folder (RPCS3's) is used as before.
+void Importer::ensure_data2(const std::string &elf) {
+    const fs::path own = out / "ps3-data2" / DATA2_ID, usrdir = own / "USRDIR";
+    const bool own_ok = data2_usable(usrdir);
+    if (own_ok) data2 = own;
+    const std::string dns = strip(a.dns);
+    if (dns.empty() || !a.only.empty()) {
+        if (own_ok) lg("game data: using the copy downloaded earlier (" + S(own) + ")");
+        return;
+    }
+    lg("game data: downloading the server's current game data through the Uncharted 2 community server DNS, as "
+       "Uncharted 2 does when it goes online");
+    event(obj({{"phase", str("data2")}, {"status", str("running")}, {"note", str("Downloading the game data...")}}));
+    // the copy the import would read without a download: kept as it is when the server's net-patch9.bin is the same
+    fs::path have = own_ok ? usrdir : fs::path();
+    if (have.empty())
+        if (const auto f = ps3_data_file("net-patch9.bin"); f && data2_usable(f->parent_path())) have = f->parent_path();
+    const fs::path fresh = out / "ps3-data2-new";
+    std::error_code ec;
+    fs::remove_all(fresh, ec);
+    bool same = false;
+    const std::string why = fetch_data2(elf, fresh / DATA2_ID, have, same);
+    if (same && why.empty()) {
+        fs::remove_all(fresh, ec);
+        event(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data is current.")}}));
+        lg("game data: " + S(have) + " is the server's current game data (same net-patch9.bin): nothing downloaded");
+        return;
+    }
+    std::string failed = why;
+    if (data2_usable(fresh / DATA2_ID / "USRDIR")) {
+        ec.clear();
+        fs::remove_all(own, ec);
+        fs::create_directories(own.parent_path(), ec);
+        ec.clear();
+        fs::rename(fresh / DATA2_ID, own, ec);
+        if (!ec && data2_usable(usrdir)) {
+            fs::remove_all(fresh, ec);
+            data2 = own;
+            event(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data downloaded.")}}));
+            lg("game data: downloaded to " + S(usrdir) + (why.empty() ? "" : " (but: " + why + ")"));
+            return;
+        }
+        failed = "the download could not replace " + S(own) + (ec ? " (" + ec.message() + ")" : "");
+        data2 = data2_usable(usrdir) ? own : fs::path();
+    } else if (failed.empty()) {
+        failed = "the download has no net-patch9.bin or no spawn packages";
+    }
+    fs::remove_all(fresh, ec);
+    event(obj({{"phase", str("data2")}, {"status", str("failed")}, {"note", str(cut(failed, 300))}}));
+    lg("game data: the download gave no usable folder (" + cut(failed, 500) + "); using what is on this PC");
+}
+
+// The DATA2 folders in `base`: the GOTY's NPUA80698DATA2 first, then every other title's (other regions) sorted.
+// net-patch9.bin defines the skin table every PC of a match must share, so the GOTY's copy wins whenever it is
+// there; the folder name order (BCES... before NPUA...) never decides.
+std::vector<fs::path> data2_folders(const fs::path &base) {
+    std::vector<fs::path> v;
+    if (!isdir(base)) return v;
+    if (isdir(base / DATA2_ID)) v.push_back(base / DATA2_ID);
+    for (const std::string &x : listdir_sorted(base))
+        if (ends(upper(x), "DATA2") && upper(x) != DATA2_ID && isdir(base / P(x))) v.push_back(base / P(x));
+    return v;
+}
+
+// --ps3-data as given, plus (when it is RPCS3's dev_hdd0/game or holds <id>DATA2 folders) its DATA2 folders, GOTY first
+std::vector<fs::path> Importer::ps3_data_roots() {
+    std::vector<fs::path> roots;
+    const fs::path d = P(a.ps3_data);
+    if (a.ps3_data.empty() || !isdir(d)) return roots;
+    roots.push_back(d);
+    for (const fs::path &base : {d, d / "game", d / "dev_hdd0" / "game"})
+        for (const fs::path &x : data2_folders(base)) roots.push_back(x);
+    return roots;
+}
+
+// the downloaded game data (ensure_data2), the data roots, then (from the PS3 folders up to dev_hdd0/game) its DATA2
+// folders, GOTY first
+std::vector<fs::path> Importer::ps3_data_candidates() {
+    std::vector<fs::path> cands;
+    if (!data2.empty()) cands.push_back(data2);
+    for (const fs::path &r : ps3_data_roots()) cands.push_back(r);
+    for (const std::string &root : {a.ps3_dlc, a.ps3}) {
+        if (root.empty()) continue;
+        fs::path p = fs::absolute(P(root));
+        for (int i = 0; i < 6; i++) {
+            if (lower(S(p.filename())) == "game") {
+                for (const fs::path &x : data2_folders(p)) cands.push_back(x);
+                break;
+            }
+            p = p.parent_path();
+        }
+    }
+    return cands;
+}
+
+// Names where a game-data file came from, for the log: the GOTY's data, another title's (region's) data or a folder
+// given as is. Every PC of a match must use the same net-patch9.bin, so a non-GOTY source is called out.
+std::string data2_source(const fs::path &file) {
+    for (fs::path p = file.parent_path(); !p.empty() && p != p.parent_path(); p = p.parent_path()) {
+        const std::string n = upper(S(p.filename()));
+        if (n == DATA2_ID) return n + " (the GOTY's game data)";
+        if (ends(n, "DATA2"))
+            return n + " (another release's game data: " + DATA2_ID +
+                   " has none; other PCs of a match may have different data)";
+    }
+    return S(file.parent_path()) + " (as given)";
+}
+
+// pak22 of the PS3 game-data folder: the maps' spawn packages the game downloads when it goes online (the import's own
+// download in <out>/ps3-data2, else RPCS3's NPUA80698DATA2 after going online there once; the packages are the server's
+// map data, byte-identical in BCUS98123DATA2 and BCES00757DATA2).
+std::optional<fs::path> Importer::ps3_data_pak22() {
+    for (const fs::path &c : ps3_data_candidates())
+        for (const std::string sub : {"", "USRDIR", "USRDIR/build/main", "build/main"}) {
+            const fs::path d = !sub.empty() || !ends(lower(S(c)), "pak22") ? (sub.empty() ? c / "pak22" : c / P(sub) / "pak22") : c;
+            if (!isdir(d)) continue;
+            for (const std::string &f : listdir_sorted(d))
+                if (ends(f, "-pak-ingame10.pak")) return d;
+        }
+    return std::nullopt;
+}
+
+std::optional<fs::path> Importer::ps3_data_file(const std::string &name) {
+    for (const fs::path &c : ps3_data_candidates())
+        for (const fs::path &f : {c / P(name), c / "USRDIR" / P(name)})
+            if (isfile(f)) return f;
+    return std::nullopt;
+}
+
+// pak22/ps4/<map>-pak-ingame10.pak: each multiplayer map's spawners, CTF flags and territories. The game asks for the
+// level '<map>-pak'; PS3 1.10 downloaded these packages as 1-<map>-pak-ingame10.pak (neither disc has them, PS4 ships only
+// stage-multi-pak-ingame10). Converted like any -ingame10 data pak, registered as level '<map>-pak'.
+void Importer::net_spawn_paks() {
+    sha1_memo_load(work);
+    const auto d = ps3_data_pak22();
+    std::vector<std::string> found;
+    if (d)
+        for (const std::string &f : listdir_sorted(*d))
+            if (ends(f, "-pak-ingame10.pak")) found.push_back(f);
+    if (d) lg("net spawn paks: from " + S(*d) + ", " + data2_source(*d / "pak"));
+    else lg("net spawn paks: no PS3 game-data folder with <map>-pak-ingame10.pak (set --dns or --ps3-data): multiplayer maps have no player spawners");
+    for (const std::string &f : found) {
+        // optional "<digits>-" in front, then "<level>-pak-ingame10.pak"
+        std::string n = f;
+        size_t i = 0;
+        while (i < n.size() && isdigit(uint8_t(n[i]))) i++;
+        if (i > 0 && i < n.size() && n[i] == '-') n = n.substr(i + 1);
+        const std::string level = n.substr(0, n.size() - std::string("-ingame10.pak").size());
+        if (level.size() <= 4) continue;
+        const std::string key = "pak22/" + level + "-ingame10.pak", rel = "pak22/ps4/" + level + "-ingame10.pak";
+        if (ps4->has(key)) {   // stage-multi-pak: PS4 ships it
+            level_txt[level] = "level-id " + level + "\npackage " + level + "-ingame\n";
+            set_item(key, "ps4", "A", {{"note", str("PS4 has it")}});
+            continue;
+        }
+        const fs::path src = *d / P(f);
+        std::string src_sha;
+        if (!sha1_memo_get(src, src_sha)) {
+            src_sha = sha1_hex(read_bytes(src));
+            sha1_memo_put(src, src_sha);
+        }
+        if (!done_before(key, src_sha)) {
+            const auto t = std::chrono::steady_clock::now();
+            std::vector<std::string> notes;
+            try {
+                notes = convert_level(ctx, src, out_path(rel));
+            } catch (const std::exception &e) {
+                set_item(key, "failed", "A", {{"src", str("ps3-data")}, {"note", str(cut(e.what(), 400))}});
+                lg("FAILED " + key + ": " + cut(e.what(), 300));
+                continue;
+            }
+            record(key, "A", rel, {{"src", str("ps3-data")}, {"src_sha1", str(src_sha)}, {"note", str(cut(join_notes(notes), 400))}});
+            lg(fmt("ok      %s <- ps3-data %s (%.1fs) %s", key.c_str(), f.c_str(), seconds_since(t), notes.empty() ? "" : notes[0].c_str()));
+        }
+        if (isfile(out_path(rel))) level_txt[level] = "level-id " + level + "\npackage " + level + "-ingame\n";
+    }
+    size_t maps = 0;
+    for (const auto &[k, v] : level_txt) maps += ends(k, "-pak");
+    lg(fmt("net spawn paks: %zu maps", maps));
+    save();
+}
+
+// dc1/ps4/net-patch9.bin: the PS3 server live-data DC module (weapon sets the PS4 net.bin names but does not define,
+// playlists ...). PS3 1.10 downloaded it into the game-data folder and bound its symbols at NetInit; the runtime
+// (netpatch.cpp) loads the converted file the same way.
+void Importer::net_patch() {
+    sha1_memo_load(work);
+    const std::string key = "dc1/net-patch9.bin", rel = "dc1/ps4/net-patch9.bin";
+    const auto src = ps3_data_file("net-patch9.bin");
+    if (!src) {
+        set_item(key, "missing", "A", {{"note", str("no PS3 game-data folder with net-patch9.bin (NPUA80698DATA2; set --dns or --ps3-data)")}});
+        lg("MISSING " + key + ": no PS3 game-data folder with net-patch9.bin (set --dns, or start the PS3 GOTY once in RPCS3 and set --ps3-data): match start asserts on weapon set 0x8cf8e1cc");
+        return;
+    }
+    lg("net-patch9: from " + S(*src) + ", " + data2_source(*src));
+    std::string src_sha;
+    if (sha1_memo_get(*src, src_sha) && done_before(key, src_sha) && text_of(item(key)->get("dc")) == NETPATCH_VERSION) return;
+    const Bytes data = read_bytes(*src);
+    src_sha = sha1_hex(data);
+    sha1_memo_put(*src, src_sha);
+    if (done_before(key, src_sha) && text_of(item(key)->get("dc")) == NETPATCH_VERSION) return;
+    const auto t = std::chrono::steady_clock::now();
+    Bytes conv;
+    std::string note;
+    try {
+        conv = convert_net_patch(ctx, data, note);
+    } catch (const std::exception &e) {
+        set_item(key, "failed", "A", {{"src", str("ps3-data")}, {"note", str(cut(e.what(), 400))}});
+        lg("FAILED " + key + ": " + cut(e.what(), 300));
+        return;
+    }
+    write_bytes(out_path(rel), conv);
+    record(key, "A", rel, {{"src", str("ps3-data")}, {"src_sha1", str(src_sha)}, {"note", str(note)}, {"dc", str(NETPATCH_VERSION)}});
+    lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), S(*src).c_str(), seconds_since(t), note.c_str()));
+    save();
+}
+
+// pak22/ps4/net-u2mp.pak: the PS3 net.pak menu images the PS4 net.pak lacks, registered as its own level / package
+void Importer::net_images() {
+    sha1_memo_load(work);
+    const std::string out_name = NETIMG_OUT_NAME, key = "pak22/" + out_name;
+    // the GOTY all-patches net.pak first (the newer BCUS dlc-patch7 one adds only images nothing names)
+    auto c = ps3->candidates("pak22/net.pak");
+    std::stable_sort(c.begin(), c.end(), [](const Entry *x, const Entry *y) { return goty(x->source) > goty(y->source); });
+    const fs::path ps4_net = ps4->pak_dir / "net.pak";
+    if (c.empty() || !isfile(ps4_net)) {
+        set_item(key, "missing", "A", {{"note", str("no PS3 or PS4 net.pak")}});
+        return;
+    }
+    std::string src_sha;
+    const bool memo = sha1_memo_get(*c[0], src_sha);
+    const fs::path o = out_path("pak22/ps4/" + out_name);
+    auto needs_conversion = [&] {
+        const Value *ni = item(key) ? item(key)->get("netimg") : nullptr;
+        return !done_before(key, src_sha) || !ni || ni->kind != Value::Int || ni->i != NETIMG_VERSION;
+    };
+    if (!memo || needs_conversion()) {
+        const Bytes data = c[0]->read();
+        src_sha = sha1_hex(data);
+        sha1_memo_put(*c[0], src_sha);
+        if (needs_conversion()) {
+            const fs::path src = work / "ps3-net.pak";
+            std::error_code ec;
+            fs::create_directories(work, ec);
+            write_bytes(src, data);
+            const auto t = std::chrono::steady_clock::now();
+            std::vector<std::string> names;
+            try {
+                names = convert_net_images(src, ps4_net, o);
+            } catch (const std::exception &e) {
+                fs::remove(src, ec);
+                set_item(key, "failed", "A", {{"src", str(c[0]->source)}, {"note", str(cut(e.what(), 400))}});
+                lg("FAILED " + key + ": " + cut(e.what(), 300));
+                return;
+            }
+            fs::remove(src, ec);
+            if (names.empty()) return;
+            record(key, "A", "pak22/ps4/" + out_name,
+                   {{"src", str(c[0]->source)}, {"src_sha1", str(src_sha)}, {"note", str(fmt("%zu menu images", names.size()))}, {"netimg", num(NETIMG_VERSION)}});
+            lg(fmt("ok      %s <- %s (%.1fs) %zu menu images", key.c_str(), c[0]->source.c_str(), seconds_since(t), names.size()));
+        }
+    }
+    if (isfile(o)) {
+        const std::string lv = out_name.substr(0, out_name.size() - 4);
+        level_txt[lv] = "level-id " + lv + "\npackage " + lv + "\n";
+    }
+}
+
+// pak22_ps4.txt and banks.txt of the overlay (from the PS4 files + what was converted)
+void Importer::registries() {
+    // the levels of the net-images / net-spawn-paks steps: a resumed import skips those steps when nothing changed, so
+    // they come back from the item records here
+    std::map<std::string, std::string> lt = level_txt;
+    for (const auto &[k, it] : items().fields) {
+        if (!starts(k, "pak22/") || !ends(k, "-pak-ingame10.pak")) continue;
+        const std::string level = k.substr(6, k.size() - 6 - std::string("-ingame10.pak").size());
+        const std::string st = text_of(it.get("status"));
+        if ((st == "ok" || st == "ps4") && (st == "ps4" || isfile(files / P(text_of(it.get("out"))))))
+            lt.emplace(level, "level-id " + level + "\npackage " + level + "-ingame\n");
+    }
+    const std::string net_u2mp = std::string(NETIMG_OUT_NAME).substr(0, std::string(NETIMG_OUT_NAME).size() - 4);
+    if (isfile(main / "pak22" / "ps4" / NETIMG_OUT_NAME)) lt.emplace(net_u2mp, "level-id " + net_u2mp + "\npackage " + net_u2mp + "\n");
+    auto in_overlay = [this](const std::string &rel) { return isfile(main / P(rel)); };
+    auto have_pak = [&](const std::string &name) {
+        for (const std::string &n : package_file_names(name))
+            if (ps4->has("pak22/" + n + ".pak") || in_overlay("pak22/ps4/" + n + ".pak")) return true;
+        return false;
+    };
+    auto have_actor = [&](const std::string &name) { return ps4->has("actor27/" + name + ".pak") || in_overlay("actor27/ps4/" + name + ".pak"); };
+    auto have_bank = [&](const std::string &name) { return ps4->has("sound1/banks/" + name + ".bnk") || in_overlay("sound1/banks/ps4/" + name + ".bnk"); };
+    const std::string text = read_text(ps4->registry_path);
+    std::set<std::string> failed;
+    for (const auto &[k, it] : items().fields) {
+        const std::string st = text_of(it.get("status"));
+        if (starts(k, "pak22/") && ends(k, ".pak") && (st == "unsupported" || st == "failed" || st == "missing")) {
+            const std::string b = basename(k);
+            failed.insert(b.substr(0, b.size() - 4));
+        }
+    }
+    const RegistryResult r = build_registry(text, lt, have_pak, have_actor, have_bank, failed);
+    const fs::path p = out_path("pak22_ps4.txt");
+    if (!a.only.empty() && lt.empty())
+        lg("pak22_ps4.txt: unchanged (--only run without level rows)");
+    else {
+        std::error_code ec;
+        if (!r.added.empty()) write_text(p, r.text);
+        else if (isfile(p)) fs::remove(p, ec);
+        Value added = Value::object(), skipped = Value::object(), dropped = Value::object();
+        added.kind = Value::Array;
+        for (const std::string &n : r.added) added.items.push_back(str(latin1_utf8(n)));
+        for (const auto &[n, why] : r.skipped) skipped.set(latin1_utf8(n), str(latin1_utf8(why)));
+        for (const auto &[n, lines] : r.dropped) {
+            Value l = Value::object();
+            l.kind = Value::Array;
+            for (const auto &[k, v] : lines) l.items.push_back(str(latin1_utf8(k + " " + v)));
+            dropped.set(latin1_utf8(n), l);
+        }
+        state.set("registry", obj({{"added", added}, {"skipped", skipped}, {"dropped", dropped}}));
+        lg(latin1_utf8(fmt("pak22_ps4.txt: %zu levels added %s; %zu not added", r.added.size(), py_list(r.added).c_str(), r.skipped.size())));
+        for (const auto &[n, why] : r.skipped) lg(latin1_utf8("        not added " + n + ": " + why));
+        for (const auto &[n, lines] : r.dropped) {
+            std::string s;
+            for (size_t i = 0; i < lines.size(); i++) s += (i ? ", " : "") + lines[i].first + " " + lines[i].second;
+            lg(latin1_utf8("        dropped from " + n + " (no such file): " + s));
+        }
+    }
+    const fs::path bank_dir = main / "sound1" / "banks" / "ps4";
+    std::vector<std::string> new_banks;
+    if (isdir(bank_dir))
+        for (const std::string &f : listdir_sorted(bank_dir))
+            if (ends(f, ".bnk")) new_banks.push_back(f);
+    bool banks_written = false;
+    if (!new_banks.empty() && isfile(ps4->banks_txt)) {
+        const auto [btxt, add] = build_banks_txt(read_text(ps4->banks_txt), new_banks);
+        if (!add.empty()) write_text(out_path("sound1/config/ps4/banks.txt"), btxt);
+        banks_written = !add.empty();
+        Value av = Value::object();
+        av.kind = Value::Array;
+        for (const std::string &b : add) av.items.push_back(str(b));
+        state.set("banks_txt", av);
+        lg(fmt("banks.txt: %zu banks added %s", add.size(), py_list(add).c_str()));
+    }
+    const fs::path banks_txt = main / "sound1" / "config" / "ps4" / "banks.txt";
+    if (!banks_written && isfile(banks_txt)) {   // no bank to add now: the one of an earlier import goes
+        std::error_code ec;
+        fs::remove(banks_txt, ec);
+    }
+    save();
+}
+
+// text1/ps4/<lang>.<category> (common, networking) for every PS4 language: the PS4 bank completed with the GOTY texts
+// it lacks (texts.cpp); the game reads its banks from core.psarc and the runtime answers misses from these files
+void Importer::texts() {
+    const fs::path core = ps4->main / "core.psarc";
+    if (!isfile(core)) return;
+    Psarc arc(core);
+    std::map<std::string, std::vector<std::pair<int, Bytes>>> banks;   // category -> (language, PS4 bank), archive order
+    for (size_t i = 0; i < arc.names.size(); i++) {
+        const std::string &n = arc.names[i];
+        if (!starts(n, "text1/ps4/")) continue;
+        const std::string rest = n.substr(10);
+        const size_t dot = rest.find('.');
+        if (dot == std::string::npos || dot == 0) continue;
+        const std::string num_s = rest.substr(0, dot), cat = rest.substr(dot + 1);
+        if (!std::all_of(num_s.begin(), num_s.end(), [](char c) { return c >= '0' && c <= '9'; }) || (cat != "networking" && cat != "common")) continue;
+        const int lang = std::stoi(num_s);
+        auto &v = banks[cat];
+        const Bytes b = arc.read(i + 1);
+        auto it = std::find_if(v.begin(), v.end(), [&](const auto &x) { return x.first == lang; });
+        if (it != v.end()) it->second = b;
+        else v.push_back({lang, b});
+    }
+    Value added = Value::object(), counts = Value::object();
+    long long n_goty = 0, n_related = 0;
+    std::vector<std::string> left;
+    for (const auto &[category, ps4b] : banks) {
+        std::map<int, std::vector<Bytes>> gb;
+        for (const auto &[lang, _] : ps4b) {
+            auto &list = gb[lang];
+            for (const Entry *e : ps3->candidates("text1/" + std::to_string(lang) + "." + category))
+                if (goty(e->source)) list.push_back(e->read());
+        }
+        for (const auto &[lang, res] : texts_complete(ps4b, gb)) {
+            const std::string rel = "text1/ps4/" + std::to_string(lang) + "." + category;
+            const fs::path o = main / P(rel);
+            const TextCounts &n = res.second;
+            counts.set(rel, obj({{"goty", num(n.goty)}, {"related", num(n.related)}, {"left", num(n.left)}}));
+            n_goty += n.goty;
+            n_related += n.related;
+            if (!res.first) {
+                std::error_code ec;
+                if (isfile(o)) fs::remove(o, ec);
+                continue;
+            }
+            write_bytes(out_path(rel), *res.first);
+            added.set(rel, num(n.goty + n.related));
+        }
+    }
+    std::vector<std::pair<std::string, long long>> lefts;
+    for (const auto &[rel, c] : counts.fields)
+        if (c.get("left")->i) lefts.push_back({rel, c.get("left")->i});
+    std::sort(lefts.begin(), lefts.end());
+    std::string ls;
+    for (const auto &[rel, n] : lefts) ls += (ls.empty() ? "" : ", ") + basename(rel) + " " + std::to_string(n);
+    state.set("text", added);
+    state.set("text_sources", counts);
+    state.remove("text_title_update");
+    lg(fmt("text banks: %zu written (%lld texts from GOTY, %lld from the related language; still English: %s)", added.fields.size(), n_goty, n_related,
+           ls.empty() ? "none" : ls.c_str()));
+    save();
+}
+
+int Importer::finish(const std::string &status, std::vector<std::pair<std::string, Value>> kw) {
+    for (auto &[k, v] : kw) state.set(k, v);
+    state.set("status", str(status));
+    state.set("finished", str(now_text()));
+    state.remove("pid");
+    state.remove("updating");
+    // an automatic update (--update) that failed is not started again at every launcher start for the same import version
+    if (status == "failed" && a.update) state.set("update_failed_for", str(shipped_id_text()));
+    else if (status == "imported" || status == "partial") state.remove("update_failed_for");
+    // recipe/_recipe: the import list this import used and the importer's fingerprint (state.json recipe_id)
+    if (status == "imported" || status == "partial") {
+        try {
+            const fs::path r = out / "recipe" / "_recipe";
+            std::error_code ec;
+            fs::create_directories(r, ec);
+            write_text(r / "import-list.tsv", read_text(P(a.list)));
+            write_text(r / "recipe-id.txt", text_of(state.get("recipe_id")) + "\n");
+        } catch (const std::exception &e) {
+            lg(std::string("recipe/_recipe not written: ") + e.what());
+        }
+    }
+    sha1_memo_save(work);
+    save();
+    event(obj({{"phase", str("done")}, {"status", str(status)}, {"error", str(text_of(state.get("error")))}}));
+    lg("status: " + status + " " + text_of(state.get("error")));
+    if (logf) std::fclose(logf);
+    logf = nullptr;
+    return status == "imported" || status == "partial" ? 0 : 1;
+}
+
+}  // namespace
+
+namespace u2imp {
+
+std::string sha1_hex(const Bytes &b) {
+    static BCRYPT_ALG_HANDLE provider = [] {
+        BCRYPT_ALG_HANDLE alg = nullptr;
+        BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0);
+        return alg;
+    }();
+    BCRYPT_HASH_HANDLE h = nullptr;
+    uint8_t d[20];
+    BCryptCreateHash(provider, &h, nullptr, 0, nullptr, 0, 0);
+    for (size_t o = 0; o < b.size(); o += 1u << 30)
+        BCryptHashData(h, const_cast<PUCHAR>(b.data() + o), ULONG(std::min<size_t>(b.size() - o, 1u << 30)), 0);
+    BCryptFinishHash(h, d, sizeof d, 0);
+    BCryptDestroyHash(h);
+    std::string s;
+    for (uint8_t x : d) s += fmt("%02x", x);
+    return s;
+}
+
+}  // namespace u2imp
+
+// the fingerprint of the installed import: this program, the import list and the bank envelope table it reads
+std::string shipped_id_text() {
+    Sha256 h;
+    auto add = [&](const std::string &name, const fs::path &p, bool text) {
+        if (!fs::is_regular_file(p)) return;
+        std::string t = read_text(p);
+        if (text) t.erase(std::remove(t.begin(), t.end(), '\r'), t.end());   // a CRLF checkout gives the release zip's value
+        const std::string d = sha256_hex(t);
+        h.update(name.data(), name.size());
+        h.update("\0", 1);
+        h.update(d.data(), d.size());
+    };
+    add("u2import.exe", exe_dir() / "u2import.exe", false);
+    add("import-list.tsv", patcher_dir().parent_path() / "docs" / "import-list.tsv", true);
+    add("adsr_env.json", launcher_root() / "u3mp" / "patcher" / "tools" / "fixes" / "sound-banks" / "adsr_env.json", true);
+    return h.hex();
+}
+
+int wmain(int argc, wchar_t **argv) {
+    g_event_prefix = "@U2MP ";
+    u3::g_u2 = true;   // the Uncharted 3 converters write for Uncharted 2 (set before any thread starts)
+    SetConsoleOutputCP(CP_UTF8);
+    std::vector<std::string> v;
+    for (int i = 1; i < argc; i++) {
+        const int n = WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, nullptr, 0, nullptr, nullptr);
+        std::string s(size_t(n > 0 ? n - 1 : 0), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, s.data(), n, nullptr, nullptr);
+        v.push_back(s);
+    }
+    try {
+        if (!v.empty() && v[0] == "--shipped-id") {
+            log(shipped_id_text());
+            return 0;
+        }
+        if (const auto r = dev_command(v)) return *r;   // the maintainers' converter commands (devtools.cpp)
+        // the launcher: u2import --overlay <game folder> <overlay folder> [--update <update folder>]; prints the overlay folder
+        if (!v.empty() && v[0] == "--overlay") {
+            if (v.size() < 3) {
+                std::fputs("usage: u2import --overlay <game folder> <overlay folder> [--update <folder>]\n", stderr);
+                return 2;
+            }
+            std::optional<fs::path> upd;
+            if (v.size() >= 5 && v[3] == "--update" && !v[4].empty()) upd = P(v[4]);
+            log(S(build_overlay(P(v[1]), P(v[2]), upd)));
+            return 0;
+        }
+        // maintainers: u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>
+        if (!v.empty() && v[0] == "--validate-twins") {
+            std::map<std::string, std::string> o;
+            for (size_t i = 1; i + 1 < v.size(); i += 2) o[v[i]] = v[i + 1];
+            if (o["--ps4"].empty() || o["--ps3"].empty() || o["--work"].empty()) {
+                std::fputs("usage: u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>\n", stderr);
+                return 2;
+            }
+            const PS3 ps3(o["--ps3"], o["--ps3-dlc"]);
+            const PS4 ps4(o["--ps4"]);
+            twin_validate(ps3, ps4, P(o["--work"]));
+            return 0;
+        }
+        Args a;
+        a.list = S(patcher_dir().parent_path() / "docs" / "import-list.tsv");
+        const std::map<std::string, std::string *> vals = {{"--ps4", &a.ps4},         {"--ps3", &a.ps3},       {"--ps3-dlc", &a.ps3_dlc}, {"--ps3-data", &a.ps3_data},
+                                                           {"--out", &a.out},         {"--groups", &a.groups}, {"--speech-langs", &a.speech_langs},
+                                                           {"--list", &a.list},       {"--only", &a.only},     {"--ffmpeg", &a.ffmpeg},
+                                                           {"--ps3-elf", &a.ps3_elf}, {"--objdump", &a.objdump},  {"--dns", &a.dns}};
+        const std::map<std::string, bool *> flags = {{"--dlc-ruins", &a.dlc_ruins}, {"--no-dlc-ruins", &a.no_dlc_ruins}, {"--drop-navmesh", &a.drop_navmesh},
+                                                     {"--no-verify", &a.no_verify}, {"--update", &a.update},             {"--force", &a.force},
+                                                     {"--validate", &a.validate}};
+        for (size_t i = 0; i < v.size(); i++) {
+            if (flags.count(v[i])) *flags.at(v[i]) = true;
+            else if (vals.count(v[i]) && i + 1 < v.size()) {
+                std::string *target = vals.at(v[i]);
+                *target = v[++i];
+            }
+            else {
+                std::fprintf(stderr, "u2import: unknown argument %s\n", v[i].c_str());
+                return 2;
+            }
+        }
+        if (a.ps4.empty() || a.ps3.empty() || a.out.empty()) {
+            std::fprintf(stderr, "usage: u2import --ps4 <folder> --ps3 <folder> --out <folder> [options] | --shipped-id\n");
+            return 2;
+        }
+        return Importer(a).run();
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "u2import: %s\n", e.what());
+        return 1;
+    }
+}

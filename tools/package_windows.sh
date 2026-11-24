@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+# package_windows.sh - assembles the Windows release: dist/UCMR_windows/ and its zip, dist/UCMR_windows.zip.
+# Players need 64-bit Windows 10 or 11 and a Vulkan graphics card; no Python or MSYS2 of their own.
+#
+# What the package holds:
+#   UCMR_Launcher.exe        what players start (tools/windows_starter/starter.cpp); "Uncharted Launcher.exe" is the same
+#                            program under its old name, for launchers up to 0.10.155 and old shortcuts
+#   launcher-qt\             the launcher's window (Qt 6), launcher\native\ its core and the game starter
+#   gow3_pc\                 the game runtime with its DLLs
+#   u2mp\, u3mp\             the multiplayer importers (u2import.exe, u3import.exe, u3fix.exe, tables, the helper builds, ffmpeg, objdump)
+#   tools\                   the update installer and the base game's file list
+#   licenses\                the licenses of everything bundled
+# Never any game file: each player points the launcher at their own copy. No Python: everything is C or C++.
+#
+# Run from Git Bash or an MSYS2 CLANG64 shell after gow3_pc/build.sh and tools/build_ffmpeg.sh. Settings:
+#   MSYS2_ROOT              the MSYS2 folder (/c/msys64 by default)
+#   NVIDIA_DLSS_LICENSE     the DLSS SDK's license file, when the DLSS files were fetched (tools/fetch_aa_files.sh)
+set -euo pipefail
+cd -- "$(dirname -- "$0")/.."
+
+# ---------------------------------------------------------------------------------------------------------- setup
+
+msys=${MSYS2_ROOT:-/c/msys64}
+msys=${msys%/}   # MSYS2 at "/" (GitHub's runner) would otherwise make "//usr", a network path
+[[ -d $msys/clang64/bin ]] && export PATH="$msys/clang64/bin:$PATH"
+small_ffmpeg=downloads/ffmpeg-8.1.1-min/bin   # tools/build_ffmpeg.sh: the decoders the port uses, nothing else
+# ccache is optional: the CI installs it and restores .ccache, a local build without it compiles as before. The C++
+# programs compile one source at a time, so ccache can reuse the objects that did not change.
+CXX=(clang++)
+CMAKE_CACHE=()
+if command -v ccache >/dev/null; then
+    CXX=(ccache clang++)
+    CMAKE_CACHE=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+fi
+obj=dist/stage/obj
+source tools/winres/winres.sh   # winres: every program and DLL built here gets version information and a manifest
+
+need() {   # need <file> <how to make it>
+    [[ -f $1 ]] || { echo "Missing $1: $2" >&2; exit 1; }
+}
+need gow3_pc/out/gow3-probe.exe 'build the runtime first (gow3_pc/build.sh)'
+need "$small_ffmpeg/ffmpeg.exe" 'build the small FFmpeg first (tools/build_ffmpeg.sh)'
+export PATH="$PWD/$small_ffmpeg:$PATH"   # its DLLs carry FFmpeg's usual names: these are found before MSYS2's
+
+# Only the latest helper build may be committed (AGENTS.md): a new build replaces the old folder, it is never copied
+committed_builds=$(git ls-files u3mp/patcher/build | cut -d/ -f4 | sort -u)
+if (( $(grep -c . <<< "$committed_builds") > 1 )); then
+    echo "More than one helper build committed under u3mp/patcher/build:" $committed_builds >&2
+    echo "Keep only the latest: git rm -r the older folders (they stay in git history)." >&2
+    exit 1
+fi
+
+out=dist/stage/UCMR_windows
+lic=$out/licenses
+rm -rf -- dist/stage
+mkdir -p "$out/gow3_pc/out" "$out/tools" "$out/launcher/assets" "$out/launcher/native" \
+    "$out/analysis/uncharted-user" "$lic"
+
+# the DLLs a program loads that Windows does not have: the small FFmpeg's own, every other one from CLANG64. By name,
+# not by the folder ldd found it in: ldd takes the first one in PATH, and 0.10.117 shipped without libz-1.dll (ffmpeg
+# and the runtime's avcodec need it) because the runner had UCRT64's first. A DLL that is in neither stops the package.
+shipped_dlls() {
+    local listed name
+    # those two first, so ldd also lists what their DLLs load (Windows' API sets have no file: ldd cannot find them)
+    listed=$(PATH="$small_ffmpeg:$msys/clang64/bin:$PATH" ldd "$1") || { echo "ldd failed on $1" >&2; return 1; }
+    if grep 'not found' <<< "$listed" | grep -qv '^\s*\(api\|ext\)-ms-win-'; then
+        echo "$1 needs DLLs that are not found:" >&2
+        grep 'not found' <<< "$listed" | grep -v '^\s*\(api\|ext\)-ms-win-' >&2
+        return 1
+    fi
+    while read -r name; do
+        if [[ -f $small_ffmpeg/$name ]]; then echo "$small_ffmpeg/$name"
+        elif [[ -f $msys/clang64/bin/$name ]]; then echo "$msys/clang64/bin/$name"
+        else echo "$1 needs $name, which is neither in the small FFmpeg nor in CLANG64" >&2; return 1
+        fi
+    done < <(awk '$2 == "=>" && tolower($3) !~ /^\/c\/windows\// && tolower($3) ~ /\.dll$/ && tolower($1) != "vulkan-1.dll" \
+                  {print $1}' <<< "$listed" | sort -u)   # Vulkan's loader is the graphics driver's, never ours
+}
+
+# copy_dlls <program> <folder>: shipped_dlls into the folder (a failure stops the package)
+copy_dlls() {
+    local dlls dll
+    dlls=$(shipped_dlls "$1")
+    while read -r dll; do [[ -n $dll ]] && cp "$dll" "$2/"; done <<< "$dlls"
+}
+
+# MSYS2 files that ship: licenses\ covers their packages (msys2_licenses at the end)
+from_msys=()
+note_msys_file() {   # note_msys_file <clang64 | ucrt64> <shipped file>; the small FFmpeg's are our own build
+    [[ -f $small_ffmpeg/$(basename -- "$2") ]] && return 0
+    from_msys+=("$(cygpath -m "$msys/$1/bin/$(basename -- "$2")")")
+}
+
+drop_caches() {
+    find "$1" -name __pycache__ -prune -exec rm -rf {} +
+}
+
+# ---------------------------------------------------------------------------------------------------------- parts
+
+runtime() {   # the game runtime, without debug information, and what it loads
+    llvm-strip --strip-debug -o "$out/gow3_pc/out/gow3-probe.exe" gow3_pc/out/gow3-probe.exe
+    local dll
+    copy_dlls gow3_pc/out/gow3-probe.exe "$out/gow3_pc/out"
+    for dll in "$out"/gow3_pc/out/*.dll; do note_msys_file clang64 "$dll"; done
+}
+
+u2_import() {   # Uncharted 2's importer and its list of what it makes (it reads the player's own game)
+    mkdir -p "$out/u2mp/docs" "$out/u2mp/bin"
+    cp u2mp/README.md "$out/u2mp/"
+    cp u2mp/docs/import-list.tsv "$out/u2mp/docs/"
+    # u2import.exe (u2mp/patcher/importer): the import, the menu overlay and the launcher's version check; it links the
+    # Uncharted 3 importer's helpers and converters (from u3mp/patcher: the bank envelope table; u3mp/bin: ffmpeg, objdump)
+    local fx=u3mp/patcher/tools/fixes im=u3mp/patcher/importer u2=u2mp/patcher/importer
+    local flags=(-std=c++20 -O2 -municode -I"$u2" -I"$im" -I"$fx/dctools" -Ilauncher/native)
+    local dir=$obj/u2import s o objs=()
+    mkdir -p "$dir"
+    for s in "$u2/u2import.cpp" "$u2/sources.cpp" "$u2/sound.cpp" "$u2/registry.cpp" "$u2/texts.cpp" "$u2/levels.cpp" "$u2/stage.cpp" \
+        "$u2/netimg.cpp" "$u2/netpatch.cpp" "$u2/actor.cpp" "$u2/actorparts.cpp" "$u2/actors.cpp" "$u2/havok.cpp" "$u2/twin.cpp" \
+        "$u2/overlay.cpp" "$u2/stagecheck.cpp" "$u2/validate.cpp" "$u2/devtools.cpp" "$im/common.cpp" "$fx/dctools/psarc.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/proc.cpp" "$fx/dctools/fixlib.cpp" \
+        "$fx/sound-banks/convert_banks.cpp" "$fx/dctools/ndpak.cpp" "$fx/dctools/ps4writer.cpp" "$fx/dctools/ps4ingame.cpp" \
+        "$fx/dctools/ps4stage.cpp" "$fx/dctools/stageplan.cpp" "$fx/dctools/ps3bg.cpp" "$fx/dctools/visinfo.cpp" "$fx/dctools/collision.cpp" \
+        "$fx/dctools/texcodec.cpp" "$fx/dctools/hkconvert.cpp" "$fx/dctools/ps3fp.cpp" "$fx/dctools/ps4mats.cpp" "$fx/dctools/ps4actor.cpp" \
+        "$fx/dctools/anim.cpp" "$fx/dctools/skel.cpp" "$fx/dctools/fgcoll.cpp" "$fx/dctools/dcconv.cpp" "$fx/dctools/normal_blend.cpp"; do
+        o=$dir/${s//\//_}.o
+        "${CXX[@]}" "${flags[@]}" -c "$s" -o "$o"
+        objs+=("$o")
+    done
+    winres "$dir/winres.o" u2import.exe "UCMR Uncharted 2 multiplayer import"
+    "${CXX[@]}" -municode -static -s -Wl,--gc-sections -Wl,--no-insert-timestamp "${objs[@]}" "$dir/winres.o" \
+        -lbcrypt -lshell32 -lole32 -luuid -ladvapi32 -o "$out/u2mp/bin/u2import.exe"
+}
+
+u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest multiplayer helper build
+    mkdir -p "$out/u3mp/bin"
+    cp -r u3mp/patcher "$out/u3mp/patcher"
+    rm -rf "$out/u3mp/patcher/maintainer"   # the maintainers' own scripts
+    drop_caches "$out/u3mp/patcher"
+    # The package carries the committed build and nothing else. The private files can be ahead of this commit (a newer
+    # helper pushed while a release builds): never let such a folder replace the committed one, and stop when the
+    # helper for the committed build is missing or is not the one its build.json names.
+    local builds=$out/u3mp/patcher/build newest=$committed_builds d want have
+    for d in "$builds"/v*/; do [[ $(basename -- "$d") == "$newest" ]] || rm -rf -- "$d"; done
+    # the helper's link (link.json: its bytes and where they go in the menu shell, made by the helper build)
+    want=$(grep -o '"link.json": *"[0-9a-f]*"' "$builds/$newest/build.json" | grep -o '[0-9a-f]\{64\}')
+    have=$(sha256sum "$builds/$newest/link.json" 2>/dev/null | cut -c1-64 || true)   # empty when it is missing
+    if [[ -z $have && ${PACKAGE_WITHOUT_HELPER:-} == 1 ]]; then
+        # a pull request's test package (no private files): the helper stays the one the tester already has installed
+        echo "multiplayer helper build $newest: its helper is not in this test package (no private files)"
+    elif [[ -z $want || $want != "$have" ]]; then
+        echo "The helper of build $newest is missing or is not the one its build.json names (private files out of step?)" >&2
+        exit 1
+    else
+        echo "multiplayer helper build in the package: $newest"
+    fi
+    cp gow3_pc/LICENSE "$out/u3mp/patcher/LICENSE.txt"
+    # u3fix.exe: the recipe steps written in C++ (the list is in tools/fixes/dctools/u3fix.cpp); the steps run it from
+    # u3mp/bin, which the importer puts on PATH. Static, no DLL of ours. Without it those steps fail: stop here.
+    local fx=u3mp/patcher/tools/fixes
+    local flags=(-std=c++20 -O2 -municode -I"$fx/dctools" -Ilauncher/native)
+    local dir=$obj/u3fix s o objs=()
+    mkdir -p "$dir"
+    : > "$dir/objects.txt"
+    for s in "$fx/dctools/u3fix.cpp" "$fx/dctools/fixlib.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
+        "$fx/no-rpcn-menu/remove_rpcn_page.cpp" "$fx/netgame-order/netgame_order.cpp" \
+        "$fx/enemy-stall/apply_ss_option_defaults.cpp" \
+        "$fx/coop-chars/apply_coop_desc_fix.cpp" "$fx/airport-igc3/airport_igc3.cpp" \
+        "$fx/dctools/psarc.cpp" "$fx/text1-merge/merge_text1.cpp" "$fx/coop-audit/apply_option_defaults_2.cpp" \
+        "$fx/registry/run_mkregistry.cpp" "$fx/pak23-registry/apply_registry.cpp" "$fx/hat-chloe/apply_hair_key.cpp" \
+        "$fx/pak23-levels/levels.cpp" "$fx/actor33/build_actors.cpp" "$fx/dctools/proc.cpp" "$fx/dctools/ndpak.cpp" \
+        "$fx/dctools/ps4writer.cpp" "$fx/dctools/ps4ingame.cpp" "$fx/dctools/vischeat.cpp" "$fx/dctools/windoff.cpp" \
+        "$fx/dctools/texcodec.cpp" "$fx/dctools/ps3bg.cpp" "$fx/dctools/stageplan.cpp" "$fx/dctools/ps4stage.cpp" \
+        "$fx/dctools/collision.cpp" "$fx/dctools/visinfo.cpp" "$fx/dctools/ps3fp.cpp" "$fx/dctools/anim.cpp" \
+        "$fx/dctools/skel.cpp" "$fx/dctools/hkconvert.cpp" "$fx/dctools/fgcoll.cpp" "$fx/dctools/ps4actor.cpp" "$fx/dctools/ps4mats.cpp" \
+        "$fx/dctools/dcconv.cpp" "$fx/dcconv/convert_dc1.cpp" "$fx/dcconv/apply_recipes.cpp" "$fx/sound-banks/convert_banks.cpp" \
+        "$fx/part-emitters/build_part_modules.cpp" "$fx/audio-defs/audio_defs.cpp" "$fx/music-streams/copy_music.cpp" "$fx/actor33/actors_hk.cpp" "$fx/coop-vo/apply_vo.cpp" \
+        "$fx/coop-voice2/apply_coop_vox.cpp" "$fx/dctools/net_edits.cpp" \
+        "$fx/eula-batch/make_eula.cpp" "$fx/wall-emblem/make_emblem.cpp" "$fx/dctools/lab_reg.cpp" "$fx/world-levels/world_levels.cpp" "$fx/dctools/normal_blend.cpp"; do
+        o=$dir/${s//\//_}.o
+        "${CXX[@]}" "${flags[@]}" -MMD -MF "$o.d" -c "$s" -o "$o"
+        objs+=("$o")
+        echo "$o $s" >> "$dir/objects.txt"
+    done
+    # the code id of every u3fix step (tools/code_ids.cpp: a hash of the compiled code that step runs, written into
+    # u3fix.exe): the import reruns a recipe step only when its own code changed, not when any of u3fix.exe changed
+    "${CXX[@]}" -std=c++20 -O2 -municode -static -s -o "$obj/code_ids.exe" tools/code_ids.cpp -lbcrypt
+    llvm-nm -A -P -g "${objs[@]}" > "$dir/nm.txt"
+    "$obj/code_ids.exe" "$fx/dctools/u3fix.cpp" "$dir/objects.txt" "$dir/nm.txt" "$(clang++ --version | head -1)" "$dir/code_ids.cpp" > "$dir/code_ids.log"
+    "${CXX[@]}" "${flags[@]}" -c "$dir/code_ids.cpp" -o "$dir/code_ids.o"
+    winres "$dir/winres.o" u3fix.exe "UCMR Uncharted 3 multiplayer import steps"
+    "${CXX[@]}" -municode -static -s -Wl,--gc-sections -Wl,--no-insert-timestamp "${objs[@]}" "$dir/code_ids.o" "$dir/winres.o" \
+        -Wl,-u,u3fix_code_ids -o "$out/u3mp/bin/u3fix.exe"
+    grep -aq 'U3FIX-CODE-IDS 1' "$out/u3mp/bin/u3fix.exe" || { echo "u3fix.exe carries no code ids" >&2; exit 1; }
+    # u3import.exe: the import the launcher runs (u3mp/patcher/importer: the image, the recipe driver, staged updates);
+    # it links the launcher's own prepare / module link code for the base image
+    local im=u3mp/patcher/importer
+    flags=(-std=c++20 -O2 -municode -I"$im" -I"$fx/dctools" -Ilauncher/native)
+    dir=$obj/u3import
+    objs=()
+    mkdir -p "$dir"
+    for s in "$im/u3import.cpp" "$im/recipe.cpp" "$im/net18adapt.cpp" "$im/mpimage.cpp" "$im/ps3keep.cpp" "$im/ps3values.cpp" "$im/common.cpp" "$fx/dctools/psarc.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/fixlib.cpp" \
+        launcher/native/prepare.cpp launcher/native/link.cpp launcher/native/system.cpp; do
+        o=$dir/${s//\//_}.o
+        "${CXX[@]}" "${flags[@]}" -c "$s" -o "$o"
+        objs+=("$o")
+    done
+    winres "$dir/winres.o" u3import.exe "UCMR Uncharted 3 multiplayer import"
+    "${CXX[@]}" -municode -static -s -Wl,--gc-sections -Wl,--no-insert-timestamp "${objs[@]}" "$dir/winres.o" \
+        -lbcrypt -lshell32 -lole32 -luuid -ladvapi32 -o "$out/u3mp/bin/u3import.exe"
+    # ffmpeg (the EULA pages) and, when installed, GNU objdump (the characters' Havok
+    # tables; mingw-w64-ucrt-x86_64-binutils: without it the import skips that step)
+    local dll
+    cp "$small_ffmpeg/ffmpeg.exe" "$out/u3mp/bin/"
+    copy_dlls "$small_ffmpeg/ffmpeg.exe" "$out/u3mp/bin"
+    for dll in "$out"/u3mp/bin/*.dll; do note_msys_file clang64 "$dll"; done
+    local objdump=$msys/ucrt64/bin/objdump.exe
+    if [[ -f $objdump ]]; then
+        mkdir -p "$out/u3mp/bin/binutils"
+        cp "$objdump" "$out/u3mp/bin/binutils/"
+        from_msys+=("$(cygpath -m "$objdump")")
+        ldd "$objdump" | awk -v tree="$(cygpath -u "$msys/ucrt64/bin")" 'index($3, tree) == 1 {print $3}' | sort -u |
+            while read -r dll; do cp "$dll" "$out/u3mp/bin/binutils/"; done
+        for dll in "$out"/u3mp/bin/binutils/*.dll; do if [[ -f $dll ]]; then note_msys_file ucrt64 "$dll"; fi; done
+    else
+        echo "Note: no GNU objdump in $msys/ucrt64/bin: the multiplayer import will skip the Havok tables" >&2
+    fi
+}
+
+launcher_core() {   # the launcher's native code: its core, the game starter, the update installer
+    CLANG64="$msys/clang64" bash launcher/native/build.sh
+    cp launcher/native/uncharted_native.dll launcher/native/game_starter.exe "$out/launcher/native/"
+    cp launcher/native/apply_update.exe "$out/tools/"
+    cp tools/game_files_102.json.gz "$out/tools/"
+    cp launcher/assets/UCMR.ico launcher/assets/icon.png launcher/assets/window_icon.bmp "$out/launcher/assets/"
+}
+
+starter() {   # UCMR_Launcher.exe with the launcher's icon (and its copy under the old name)
+    winres dist/stage/starter.res.o UCMR_Launcher.exe "UCMR Launcher" 100 launcher/assets/UCMR.ico
+    "${CXX[@]}" -O2 -std=c++17 -municode -c tools/windows_starter/starter.cpp -o dist/stage/starter.o
+    "${CXX[@]}" -municode -mwindows -static -s dist/stage/starter.o dist/stage/starter.res.o \
+        -o "$out/UCMR_Launcher.exe"
+    cp "$out/UCMR_Launcher.exe" "$out/Uncharted Launcher.exe"   # launchers up to 0.10.155 require this name
+}
+
+# the Qt window with what it loads and nothing else
+qt_window() {
+    need "$msys/clang64/bin/windeployqt6.exe" 'install Qt 6 (pacman -S mingw-w64-clang-x86_64-qt6-declarative)'
+    local build=dist/stage/qt-build win=$out/launcher-qt
+    cmake -S launcher-qt -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_CXX_COMPILER=clang++ "${CMAKE_CACHE[@]}" > /dev/null
+    ninja -C "$build" UnchartedLauncher > "$build.log" 2>&1 || { tail -40 "$build.log" >&2; exit 1; }
+    mkdir -p "$win"
+    llvm-strip -o "$win/UnchartedLauncher.exe" "$build/UnchartedLauncher.exe"
+    PATH="$msys/clang64/share/qt6/bin:$PATH" windeployqt6 --qtpaths "$msys/clang64/bin/qtpaths6.exe" --release \
+        --qmldir launcher-qt/qml --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime \
+        "$win/UnchartedLauncher.exe" > "$build-deploy.log" 2>&1 || { tail -40 "$build-deploy.log" >&2; exit 1; }
+    # windeployqt misses QML plugin DLLs in CLANG64's layout: each deployed QML folder gets its source's DLLs
+    local qml_from=$msys/clang64/share/qt6/qml dir plugin
+    while read -r dir; do
+        for plugin in "$qml_from/$dir"/*.dll; do
+            [[ -f $plugin && ! -f $win/qml/$dir/$(basename -- "$plugin") ]] && cp "$plugin" "$win/qml/$dir/"
+        done
+    done < <(cd "$win/qml" && find . -type d)
+    # the window is built for the Basic style, its QML imports (QtCore, QtQuick, Controls, Effects, Layouts), the
+    # Windows platform plugin, the widget style of its file dialogs and the .ico reader; the rest goes
+    local style module
+    for style in FluentWinUI3 Fusion Imagine Material Universal Windows; do
+        rm -rf "$win/qml/QtQuick/Controls/$style"
+        rm -f "$win"/Qt6QuickControls2"$style"*.dll
+    done
+    for module in QtQml/XmlListModel QtQuick/Dialogs QtQuick/LocalStorage QtQuick/NativeStyle QtQuick/Particles \
+            QtQuick/Shapes QtQuick/VectorImage QtQuick/tooling; do
+        rm -rf "$win/qml/$module"
+    done
+    rm -rf "$win/qmltooling" "$win/generic" "$win/tls" "$win/networkinformation"
+    find "$win/imageformats" -name '*.dll' ! -name qico.dll -delete
+    printf '[Paths]\r\nPrefix = .\r\nPlugins = .\r\nQmlImports = qml\r\n' > "$win/qt.conf"   # never an installed Qt
+    # the CLANG64 DLLs Qt and its plugins load (windeployqt only brings Qt's own)
+    local dll
+    find "$win" \( -name '*.exe' -o -name '*.dll' \) -print0 | xargs -0 -n 20 ldd 2>/dev/null |
+        awk '/clang64/ {print $3}' | sort -u | while read -r dll; do
+        [[ -f $win/$(basename -- "$dll") ]] || cp "$dll" "$win/"
+    done
+    # keep only the top-level DLLs reachable through the imports of the program and its plugins
+    declare -A have=() reached=()
+    for dll in "$win"/*.dll; do
+        local base=${dll##*/}
+        have[${base,,}]=$dll
+    done
+    local todo=("$win/UnchartedLauncher.exe") file name
+    while IFS= read -r -d '' file; do todo+=("$file"); done < <(find "$win" -mindepth 2 -name '*.dll' -print0)
+    while (( ${#todo[@]} )); do
+        file=${todo[0]}
+        todo=("${todo[@]:1}")
+        while read -r name; do
+            name=${name,,}
+            if [[ -n ${have[$name]:-} && -z ${reached[$name]:-} ]]; then
+                reached[$name]=1
+                todo+=("${have[$name]}")
+            fi
+        done < <(llvm-objdump -p "$file" | awk '/DLL Name:/ {print $3}')
+    done
+    for name in "${!have[@]}"; do
+        [[ -n ${reached[$name]:-} ]] || rm -f -- "${have[$name]}"
+    done
+    for dll in "$win"/*.dll; do from_msys+=("$(cygpath -m "$msys/clang64/bin/$(basename -- "$dll")")"); done
+    echo "launcher window: $(du -sh "$win" | cut -f1)"
+}
+
+texts() {
+    cp tools/VERSION "$out/VERSION"   # the update check compares this with the releases
+    cp tools/README-Windows.txt "$out/README.txt"
+    cp gow3_pc/LICENSE "$out/LICENSE.txt"
+    cp tools/defaults/disabled-optimizations.txt "$out/analysis/uncharted-user/"   # what Uncharted can't take
+}
+
+aa_files() {   # DLAA, when tools/fetch_aa_files.sh fetched it (else the in-game menu leaves it out); FSR 4 models: never shipped
+    if [[ -f gow3_pc/out/gow3_dlss.dll && -f gow3_pc/out/nvngx_dlss.dll ]]; then
+        cp gow3_pc/out/gow3_dlss.dll gow3_pc/out/nvngx_dlss.dll "$out/gow3_pc/out/"
+        local license=${NVIDIA_DLSS_LICENSE:-} f
+        if [[ -z $license ]]; then
+            for f in downloads/dlss-sdk-*/LICENSE.txt; do [[ -f $f ]] && { license=$f; break; }; done
+        fi
+        [[ -f $license ]] || { echo 'The DLSS files ship only with their license: set NVIDIA_DLSS_LICENSE.' >&2; exit 1; }
+        mkdir -p "$lic/nvidia-dlss" "$lic/gow3-dlss-bridge"
+        cp "$license" "$lic/nvidia-dlss/LICENSE.txt"
+        cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$lic/gow3-dlss-bridge/"
+    fi
+}
+
+licenses() {
+    local d f
+    for d in gow3_pc/gpu/third_party/* gow3_pc/third_party/*; do   # the runtime's bundled sources
+        for f in "$d"/LICENSE* "$d"/COPYING* "$d"/COPYRIGHT*; do
+            [[ -f $f ]] && { mkdir -p "$lic/${d##*/}"; cp "$f" "$lic/${d##*/}/"; }
+        done
+    done
+    head -n 24 gow3_pc/gpu/third_party/gcn/include/gcn/si_ci_vi_merged_offset.h > "$lic/gcn-headers.txt"   # in its head
+    if [[ -d $msys/clang64/share/licenses/opus ]]; then   # Opus, in the runtime for Uncharted 2's voice chat
+        mkdir -p "$lic/opus"
+        cp "$msys"/clang64/share/licenses/opus/* "$lic/opus/"
+    fi
+    mkdir -p "$lic/bearssl" "$lic/ffmpeg"
+    cp tools/licenses/bearssl/LICENSE.txt tools/licenses/bearssl/SOURCE.txt "$lic/bearssl/"   # TLS of the online parts
+    cp "$small_ffmpeg/../COPYING.LGPLv2.1" "$lic/ffmpeg/"
+    printf '%s\n' "FFmpeg 8.1.1 (https://ffmpeg.org/releases/ffmpeg-8.1.1.tar.xz), LGPL 2.1 or later, unchanged; built by" \
+        "tools/build_ffmpeg.sh in the port's source with only the decoders, formats and filters the port uses." \
+        > "$lic/ffmpeg/SOURCE.txt"
+    msys2_licenses
+}
+
+# every MSYS2 package that has a file in the package: its license files and, in THIRD-PARTY.txt, its version, license
+# and source; pacman is asked three times in all (once per file takes minutes on GitHub's runner)
+msys2_licenses() {
+    local pacman packages f
+    pacman=$(command -v pacman || echo "$msys/usr/bin/pacman")
+    mapfile -t packages < <({ "$pacman" -Qqo "${from_msys[@]}" 2>/dev/null || true; } | sort -u)
+    while read -r f; do
+        local rel=${f#*/share/licenses/}
+        mkdir -p "$lic/msys2/$(dirname -- "$rel")"
+        cp "$msys$f" "$lic/msys2/$rel"
+    done < <({ "$pacman" -Qlq "${packages[@]}" | grep '/share/licenses/.*[^/]$' || true; })
+    {
+        echo "Third-party packages whose files ship in this package (MSYS2 builds)."
+        echo "Source code for each: https://repo.msys2.org/mingw/sources/ (package pages: https://packages.msys2.org/)"
+        "$pacman" -Qi "${packages[@]}" | awk '$1 == "Name" { print "" } $1 ~ /^(Name|Version|Licenses|URL)$/ { print }'
+    } > "$lic/THIRD-PARTY.txt"
+}
+
+# nothing from a game or a player may be in the package: executables and data, saves, caches, logs, settings files,
+# and no folder of converted files (the recipe's own overlay-* folders hold descriptions only)
+nothing_from_games() {
+    drop_caches "$out"
+    local found
+    found=$(find "$out" \( -iname eboot.bin -o -iname '*.elf' -o -iname sce_sys -o -iname savedata -o -iname cache \
+        -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' -o -iname '*.psarc' -o -iname '*.pak' \
+        -o -iname 'boot*.bin' -o -iname '*.dds' -o -iname '*.at9' \) -print)
+    found+=$(find "$out" -type d -iname 'overlay-*' -not -path '*/u3mp/patcher/tools/*' -not -path '*/u3mp/patcher/recipe/*' -print)
+    found+=$(find "$out/u3mp/patcher" -type d -iname 'overlay-*' -exec find {} -type f \
+        \( -iname '*.pak' -o -iname '*.bin' -o -iname '*.psarc' -o -iname '*.dds' \) \; 2>/dev/null)
+    if [[ -n $found ]]; then
+        printf 'These must not be in the package:\n%s\n' "$found" >&2
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------------------------------------- build
+
+runtime
+u2_import
+u3_import
+launcher_core
+qt_window
+starter
+texts
+aa_files
+licenses
+nothing_from_games
+
+rm -rf dist/UCMR_windows dist/UCMR_windows.zip
+# the zip: tools/mkzip.cpp (zlib from CLANG64, linked statically), a build tool only: it does not ship
+"${CXX[@]}" -std=c++17 -O2 -municode -static -s -o dist/stage/mkzip.exe tools/mkzip.cpp -lz
+dist/stage/mkzip.exe dist/UCMR_windows.zip "$out"
+mv "$out" dist/UCMR_windows
+du -sh dist/UCMR_windows dist/UCMR_windows.zip
