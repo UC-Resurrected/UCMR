@@ -110,7 +110,7 @@ fs::path res_dir() {
     checked = true;
     std::vector<std::string> sig;
     std::error_code ec;
-    for (const auto &e : fs::directory_iterator(paks, ec)) {
+    for (const auto &e : u3::ps4_dir(utf8(paks))) {
 #ifdef _WIN32
         struct _stat64 st;
         if (_wstat64(e.path().wstring().c_str(), &st)) continue;

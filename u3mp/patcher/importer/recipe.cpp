@@ -19,6 +19,7 @@
 #include "inflate.h"   // launcher/native/inflate.h
 #include "log_history.h"   // launcher/native/log_history.h
 #include "psarc.hpp"   // dctools
+#include "u3fix.hpp"   // dctools: the PS4 manifest resolver
 
 #ifdef _WIN32
 #include <windows.h>
@@ -336,12 +337,12 @@ std::vector<fs::path> scan_dirs(const std::vector<fs::path> &roots, int max_dept
     return out;
 }
 
-void Inputs::set_ps4(const fs::path &folder0) {
+void Inputs::set_ps4(const fs::path &folder0, const fs::path &update0) {
     const fs::path folder = absp(folder0);
     std::vector<std::string> missing;
     for (const char *n : {"eboot.bin", "sce_sys/param.sfo", "u3data/build/main/pak23_ps4.txt", "u3data/build/main/core.psarc", "u3data/build/main/dc1/ps4",
                           "u3data/build/main/pak23/ps4", "u3data/build/main/actor33/ps4", "u3data/build/main/sound1/streams", "u2data/build/main/sound1/streams"})
-        if (!present(folder / P(n))) missing.push_back(n);
+        if (!u3::ps4_exists(S(folder / P(n)))) missing.push_back(n);
     if (!missing.empty()) {
         std::string l;
         for (const auto &m : missing) l += (l.empty() ? "" : ", ") + m;
@@ -349,8 +350,9 @@ void Inputs::set_ps4(const fs::path &folder0) {
         return;
     }
     ps4 = folder;
+    if (!update0.empty()) ps4_update = absp(update0);
     try {
-        ps4_sfo = parse_sfo(folder / "sce_sys" / "param.sfo");
+        ps4_sfo = parse_sfo(u3::upath(S(folder / "sce_sys" / "param.sfo")));
     } catch (const std::exception &e) {
         problems.push_back(std::string("PS4 param.sfo unreadable: ") + e.what());
     }
@@ -448,8 +450,7 @@ std::vector<std::string> Inputs::speech_langs() const {
 std::vector<std::string> Inputs::ps4_speech_langs() const {
     std::vector<std::string> out;
     if (!ps4) return out;
-    std::error_code ec;
-    for (const auto &e : fs::directory_iterator(*ps4 / "u3data" / "build" / "main" / "sound1" / "streams" / "speech", ec)) {
+    for (const auto &e : u3::ps4_dir(S(*ps4 / "u3data" / "build" / "main" / "sound1" / "streams" / "speech"))) {
         const std::string f = S(e.path().filename());
         if (ends(f, "_ps4.psarc")) out.push_back(f.substr(0, f.size() - 10));
     }
@@ -1179,7 +1180,7 @@ Value step_copy_list(const Value &s, const Inputs &inp, const fs::path &out, con
             else if (r.at("source_kind") == "ps4-retail") base = inp.ps4;
             else throw u3::Stop("KeyError: '" + r.at("source_kind") + "'");
             if (!base) throw u3::Stop("TypeError: no " + r.at("source_kind") + " folder");
-            const fs::path src = *base / P(ent);
+            const fs::path src = u3::upath(S(*base) + "/" + ent);
             if (!is_file(src)) throw std::out_of_range("[Errno 2] No such file or directory: '" + S(src) + "'");
             note_read(src);
             return read_bytes(src);
@@ -1370,7 +1371,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
     const std::vector<Value> steps = load_steps(print);
     if (a.ps4.empty() || a.ps3_u3.empty() || a.out.empty()) throw u3::Stop("--ps4, --ps3-u3 and --out are required");
     Inputs inp;
-    inp.set_ps4(P(a.ps4));
+    inp.set_ps4(P(a.ps4), a.ps4_update.empty() ? fs::path() : P(a.ps4_update));
     std::vector<fs::path> u3f, u2f;
     for (const auto &f : a.ps3_u3) u3f.push_back(P(f));
     for (const auto &f : a.ps3_u2) u2f.push_back(P(f));

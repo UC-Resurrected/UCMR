@@ -1022,8 +1022,8 @@ std::shared_ptr<Blob> nav_mesh_u2(const Pak &p, const PakItem &it) { return nav_
 
 std::set<std::string> anim_actor_names(const fs::path &retail_actor33, const fs::path &conv_json) {
     std::set<std::string> s;
-    if (fs::is_directory(retail_actor33))
-        for (const auto &e : fs::directory_iterator(retail_actor33)) {
+    if (u3::ps4_exists(utf8(retail_actor33)))
+        for (const auto &e : u3::ps4_dir(utf8(retail_actor33))) {
             const std::string f = utf8(e.path().filename());
             if (f.size() < 4 || f.compare(f.size() - 4, 4, ".pak") != 0) continue;
             try {

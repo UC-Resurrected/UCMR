@@ -27,8 +27,7 @@ std::string lower(std::string s) {
 // returned as glob writes them: <dir>\<name>
 std::vector<std::string> glob_dir(const std::string &dir, bool (*match)(const std::string &)) {
     std::vector<std::string> r;
-    if (!fs::is_directory(upath(dir))) return r;
-    for (const auto &e : fs::directory_iterator(upath(dir))) {
+    for (const auto &e : u3::ps4_dir(dir)) {
         const std::string n = utf8(e.path().filename());
         if (match(lower(n))) r.push_back(dir + "\\" + n);
     }

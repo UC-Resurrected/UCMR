@@ -104,7 +104,7 @@ int world_levels(const std::vector<std::string> &argv) {
             if (fs::is_regular_file(p, ec)) return p;
         }
         if (a.val.count("--ps4")) {
-            const fs::path p = upath(a.get("--ps4", "")) / "u3data" / "build" / "main" / "pak23" / "ps4" / upath(file);
+            const fs::path p = upath(a.get("--ps4", "") + "/u3data/build/main/pak23/ps4/" + file);
             if (fs::is_regular_file(p, ec)) return p;
         }
         return {};

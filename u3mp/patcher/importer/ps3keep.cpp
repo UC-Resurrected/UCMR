@@ -4,10 +4,10 @@
 //   ps3-kept/<id>/<folder name>/...   one per PS3 folder (id = folder name + hash of its path), e.g. .../USRDIR/...
 //   ps3-kept/<id>/PARAM.SFO           a file next to that folder (PS3_GAME/PARAM.SFO beside USRDIR)
 //   ps3-kept/elf/EBOOT.elf            the decrypted EBOOT.elf when it is not in a PS3 folder
-//   ps3-kept/manifest.json            what is kept, how (hard link or verified copy), complete or not
+//   ps3-kept/manifest.json            what is kept, how (verified copy), complete or not
 // Which files: the ones the imports recorded (<data>/ps3-reads.txt) plus ps3-needed.tsv (what a full import reads, traced
-// 2026-11-09). On the same drive the files are hard links; on another drive they are copied and compared with the
-// source. Later imports add the kept folders after the player's own: the player's folders win while they exist.
+// 2026-11-09). Every file is copied and compared with the source. Later imports add the kept folders after the player's
+// own: the player's folders win while they exist.
 #include "ps3keep.hpp"
 
 #include "recipe.hpp"
@@ -15,7 +15,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include "port.h"   // launcher/native/port.h: hard links
 #include <sys/stat.h>
 #endif
 
@@ -188,11 +187,6 @@ std::string copy_verified(const fs::path &src, const fs::path &dst) {
     return want;
 }
 
-bool same_file(const fs::path &a, const fs::path &b) {
-    std::error_code ec;
-    return fs::equivalent(a, b, ec);
-}
-
 int64_t mtime_ns(const fs::path &p) {
     // os.stat().st_mtime_ns: nanoseconds since 1970
 #ifdef _WIN32
@@ -248,11 +242,20 @@ Value ps3keep_keep(const fs::path &data, const std::vector<fs::path> &roots0, co
     if (plan.empty() && !(m.get("complete") && m.get("complete")->truthy()))
         return obj({{"complete", Value::boolean(false)}, {"error", str("no PS3 folder found to keep files from")}});
     fs::create_directories(kept);
-    // space for the files that cannot be hard links (another drive)
+    Value &files = *m.get("files");
+    Value &mroots = *m.get("roots");
+    auto unchanged = [&](const Item &it, const fs::path &dst, const Value *rec) {
+        std::error_code e;
+        if (!fs::exists(dst, e)) return false;
+        const uint64_t size = fs::file_size(P(it.p), e);
+        return !e && fs::file_size(dst, e) == size && !e && rec && rec->get("mtime") && rec->get("mtime")->i == mtime_ns(P(it.p)) &&
+               rec->get("sha256") && rec->get("sha256")->truthy();
+    };
     uint64_t need = 0;
-    const std::string kd = lower(S(kept.root_name()));
-    for (const Item &it : plan)
-        if (lower(S(P(it.p).root_name())) != kd && !fs::exists(kept / P(it.rel), ec)) need += fs::file_size(P(it.p), ec);
+    for (const Item &it : plan) {
+        const fs::path dst = kept / P(it.rel);
+        if (!unchanged(it, dst, files.get(it.rel))) need += fs::file_size(P(it.p), ec);
+    }
     const auto sp = fs::space(kept, ec);
     if (double(need) > double(sp.available) - 1e9) {
         Value st = m.get("state") ? *m.get("state") : Value::object();
@@ -262,41 +265,21 @@ Value ps3keep_keep(const fs::path &data, const std::vector<fs::path> &roots0, co
     }
     if (ev) ev(obj({{"phase", str("ps3keep")}, {"status", str("running")}, {"note", str(fmt("Keeping the PS3 files the import needs (%zu files)...", plan.size()))}}));
     lg(fmt("PS3 files: keeping %zu file(s) in %s", plan.size(), S(kept).c_str()));
-    int linked = 0, copied = 0, same = 0;
-    Value &files = *m.get("files");
-    Value &mroots = *m.get("roots");
+    int copied = 0, same = 0;
     for (const Item &it : plan) {
         const fs::path src = P(it.p), dst = kept / P(it.rel);
         const uint64_t size = fs::file_size(src, ec);
         const Value *rec = files.get(it.rel);
-        if (fs::exists(dst, ec)) {
-            if (same_file(src, dst)) {
-                same++;
-                files.set(it.rel, obj({{"size", num((long long)size)}, {"how", str("link")}}));
-                if (it.root) mroots.set(it.root->first, str(it.root->second));
-                continue;
-            }
-            if (fs::file_size(dst, ec) == size && rec && rec->get("mtime") && rec->get("mtime")->i == mtime_ns(src) && rec->get("sha256") &&
-                rec->get("sha256")->truthy()) {
-                same++;
-                if (it.root) mroots.set(it.root->first, str(it.root->second));
-                continue;
-            }
-            fs::remove(dst, ec);
+        if (unchanged(it, dst, rec)) {
+            same++;
+            if (it.root) mroots.set(it.root->first, str(it.root->second));
+            continue;
         }
+        if (fs::exists(dst, ec)) fs::remove(dst, ec);
         fs::create_directories(dst.parent_path());
-#ifdef _WIN32
-        if (CreateHardLinkW(dst.c_str(), src.c_str(), nullptr)) {
-#else
-        if (port::hard_link(src, dst)) {
-#endif
-            files.set(it.rel, obj({{"size", num((long long)size)}, {"how", str("link")}}));
-            linked++;
-        } else {
-            const std::string h = copy_verified(src, dst);
-            files.set(it.rel, obj({{"size", num((long long)size)}, {"how", str("copy")}, {"mtime", num(mtime_ns(src))}, {"sha256", str(h)}}));
-            copied++;
-        }
+        const std::string h = copy_verified(src, dst);
+        files.set(it.rel, obj({{"size", num((long long)size)}, {"how", str("copy")}, {"mtime", num(mtime_ns(src))}, {"sha256", str(h)}}));
+        copied++;
         if (it.root) mroots.set(it.root->first, str(it.root->second));
     }
     // Kept files nothing needs any more: their PS3 original is still in one of the player's folders, but no import read
@@ -355,7 +338,7 @@ Value ps3keep_keep(const fs::path &data, const std::vector<fs::path> &roots0, co
                         {"folder", str(S(kept))},
                         {"error", str(lost.empty() ? "" : "the kept files are not found as: " + lost_s)}}));
     write_text(kept / "manifest.json", dump_indent1(m));
-    lg(fmt("PS3 files: %zu kept (%.1f GB; %d new hard links, %d verified copies, %d unchanged)", n_files, size / 1e9, linked, copied, same) +
+    lg(fmt("PS3 files: %zu kept (%.1f GB; %d verified copies, %d unchanged)", n_files, size / 1e9, copied, same) +
        (lost.empty() ? "" : "; NOT complete: " + m.get("state")->get("error")->s));
     if (ev)
         ev(obj({{"phase", str("ps3keep")},

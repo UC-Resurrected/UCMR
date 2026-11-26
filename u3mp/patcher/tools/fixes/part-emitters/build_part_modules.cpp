@@ -858,13 +858,13 @@ int part_modules(const std::vector<std::string> &argv) {
     static const std::vector<std::pair<std::string, std::string>> EXPECT = {
         {"part-cave-multi", "9c9d7dad7bcc21df44cdf6707cec394a"}, {"part-gompa-multi", "42594391eae33a9a3dc24bb98a7df58c"}, {"part-shambhala-multi", "33184d353df478eb8d53fc2d3838511f"}};
     const auto t0 = std::chrono::steady_clock::now();
-    const fs::path main4 = upath(ps4d) / "u3data" / "build" / "main" / "dc2" / "part-module";
+    const std::string main4 = ps4d + "/u3data/build/main/dc2/part-module/";
     Ps3Index idx(disc, upd, "");
     std::map<std::pair<std::string, std::string>, std::string> want;
     for (const auto &r : read_tsv(job / "inputs.tsv")) want[{r.at(0), r.at(1)}] = r.at(2);
     std::vector<std::string> differ;
     auto ps4 = [&](const std::string &m) {
-        const fs::path p = main4 / upath(m + ".bin");
+        const fs::path p = upath(main4 + m + ".bin");
         if (!fs::exists(p)) throw Stop("FileNotFoundError: PS4 retail module missing: " + win_path(utf8(p)));
         B b = read_file(p);
         auto w = want.find({"ps4", "dc2/part-module/" + m + ".bin"});
@@ -987,7 +987,7 @@ int part_modules(const std::vector<std::string> &argv) {
             const std::string m = rel.substr(8, rel.size() - 12);
             if (m.find("test") != std::string::npos) continue;
             const auto b3 = idx.read(rel);
-            const fs::path p4f = main4 / upath(m + ".bin");
+            const fs::path p4f = upath(main4 + m + ".bin");
             if (!b3 || (!outs.count(m) && !fs::exists(p4f))) continue;
             const B base = outs.count(m) ? outs.at(m) : read_file(p4f);
             const DC a3(*b3);

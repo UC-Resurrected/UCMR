@@ -91,7 +91,7 @@ often exist already).
 | `gow3_pc/gpu/shadps4` (vendored, with `gow3:` changes) | 376 | 124 815 | 25 | 99 | 37 | 137 | Upstream is Linux-first; our `gow3:` Windows additions need Linux bodies in ~8 files | M |
 | `gow3_pc/tests` | 104 | 34 017 | 24 | 127 | 6 | 32 | ~36 of the CMake test targets sit inside `if (WIN32)` | M |
 | `gow3_pc/tools`, `gow3_pc/packaging` | 5 | 795 | 4 | 18 | 13 | 4 | Windows tools by design (`play.c`, `bridge_helper`) | S |
-| `u3mp/patcher/importer` (`u3import.exe`) | 11 | 5 475 | 4 | 73 | 85 | 0 | Process runner, junctions, hard links, `wmain` | M |
+| `u3mp/patcher/importer` (`u3import.exe`) | 11 | 5 475 | 4 | 73 | 85 | 0 | Process runner, PS4 manifest, `wmain` | M |
 | `u3mp/patcher/tools/fixes` (`u3fix.exe`) | 78 | 31 425 | 5 | 96 | 67 | 0 | 73 files already pure std C++; `proc.cpp` is the hot spot | M |
 | `u3mp/patcher/recipe` | 1 | 602 | 1 | 6 | 0 | 4 | `CommandLineToArgvW` | S |
 | `u2mp/patcher/importer` (`u2import.exe`) | 21 | 9 542 | 1 | 15 | 12 | 0 | Only `u2import.cpp` | S |
@@ -301,8 +301,8 @@ pdh`) and `SHARED` elsewhere (links X11, `--allow-shlib-undefined`, runtime symb
 |---|---|---|---|
 | `tools/fixes/dctools/proc.cpp` | Process runner for steps/ffmpeg/objdump: `CreatePipe` (8), `CreateProcessW` (5), `SetHandleInformation`, `WaitForSingleObject`, env block, `quote_arg` (Python `list2cmdline` emulation) | `port::spawn(argv vector)`; quoting only in the Windows body | M — **done**: `run`, `run_pipe`, `run_to_file`, `run_to_lines` and the worker pass the argv vector to `port::spawn` (stderr apart where the step reads it: `Spawn::err_pipe`) |
 | `importer/common.cpp` | Same runner + `GetModuleFileNameW`, BCrypt, env merge "case-insensitive like Windows" (line 419) | `port::spawn`, `port::executable_path`, shared SHA-256; env names case-sensitive on Linux | M — **done** |
-| `importer/u3import.cpp` | `wmain`, `SetConsoleOutputCP`, directory **junctions** via `DeviceIoControl(FSCTL_SET_REPARSE_POINT)`, `CreateHardLinkW`, `MoveFileExW`, `_wfopen`, ffmpeg fallback `C:\msys64\...\ffmpeg.exe` | `main` (UTF-8 argv on Linux), `port::dir_link` (junction / `symlink`), `port::hard_link` (`CreateHardLinkW` / `link`), `port::replace_file` | M — **done** (`main` on Linux, `wmain` kept; PATH joined with `:`; the MSYS2 ffmpeg fallback is Windows-only) |
-| `importer/ps3keep.cpp` | `CreateHardLinkW`, `GetFileAttributesExW`, `lower()` path compare with `"\\"`, `\r\n` | `port::hard_link`; case rule §8.4 | S–M — **done** |
+| `importer/u3import.cpp` | `wmain`, `SetConsoleOutputCP`, `MoveFileExW`, `_wfopen`, ffmpeg fallback `C:\msys64\...\ffmpeg.exe` | `main` (UTF-8 argv on Linux), `std::filesystem`, `port::replace_file`; the PS4 base/update view is a manifest, not a junction or hard-link tree | M — **done** (`main` on Linux, `wmain` kept; PATH joined with `:`; the MSYS2 ffmpeg fallback is Windows-only) |
+| `importer/ps3keep.cpp` | `GetFileAttributesExW`, `lower()` path compare with `"\\"`, `\r\n` | `std::filesystem`; kept files are verified copies; case rule §8.4 | S–M — **done** |
 | `importer/recipe.cpp` | `_wstat64`, `CopyFileW`, fnmatch emulated "as on Windows" (case-insensitive, `/` → `\`), runs `u3fix.exe`/`u3import.exe` by name (line 1280) | `std::filesystem`; keep the matcher identical on both OS; `.exe` mapping (§10) | S — **done**: on Linux a step's program goes through `port::program_name` at run time; the JSON and the fingerprints are unchanged (`--recipe-fingerprint` gives the same value on both systems) |
 | `importer/mpimage.cpp` | includes `<windows.h>` only | drop the include | S — **done** |
 | `tools/fixes/dctools/fixlib.cpp` | `game_running()` via toolhelp; `win_path()` (`/` → `\`) | `port::list_processes`; see §8.2 for `win_path` | S — **done** (`win_path` leaves Linux paths as they are) |
@@ -615,9 +615,9 @@ on it:
 - Share modes: `FILE_SHARE_*`/`MOVEFILE_*`/reparse flags in 27 files. Windows blocks deleting/renaming open files;
   Linux never does. Code must not use "rename failed" as the signal that the game is running (use process checks).
   `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` = `rename()` (atomic on Linux).
-- Links: junctions (`u3import.cpp`, `FSCTL_SET_REPARSE_POINT`), hard links (`u3import.cpp`, `ps3keep.cpp`, same drive
-  else copy), symlink update views (need Developer Mode/administrator on Windows; `runtime_file.c` works around the
-  UCRT `stat` of symlinks). Linux: `symlink` always allowed, `link` on the same file system.
+- Links: the U3 import creates none. The PS4 base/update view is a `U3PS4V2` manifest that the steps resolve
+  (`U3_PS4_ROOT`, `U3_PS4_MANIFEST`), and `ps3keep` writes verified copies. Folder walks skip existing symlinks;
+  no `port::hard_link` or `port::dir_link` remains.
 
 ## 9. Processes and runtime behaviour
 
@@ -658,10 +658,10 @@ on it:
 
 - The player's PS4 copy (`CUSA02344` with `eboot.bin` and `sce_sys`), PS3 folders and the update are read in place;
   nothing requires NTFS. Case: §8.4.
-- Import output and the update view live under the install folder: hard links / junctions on the same drive with copy
-  fallback (`u3import.cpp`, `ps3keep.cpp`); on Linux hard links need the same file system (copy fallback stays).
+- Import output and the PS4 base/update view live under the install folder: the view is a manifest, and `ps3keep`
+  writes verified copies; neither needs hard links, junctions or a particular file system.
 - File systems on Linux: external NTFS drives mounted with `ntfs3` are case-sensitive; exFAT/FAT is case-insensitive
-  but has no hard links or symlinks (copy fallback needed for the junction case too).
+  but the import no longer needs hard links or symlinks.
 - The slow-drive warning uses `GetDriveTypeW`/`DeviceIoControl` (seek penalty): Linux reads
   `/sys/block/<dev>/queue/rotational`.
 - Free-space checks: `GetDiskFreeSpaceExW` → `std::filesystem::space` (runtime already uses `statvfs`).
@@ -680,7 +680,6 @@ side by side:
 |---|---|---|
 | `port::utf8(path)`, `port::path(utf8)` | `WideCharToMultiByte`/`MultiByteToWideChar` | identity |
 | `port::replace_file(from, to)` / `write_atomic` | `MoveFileExW(REPLACE_EXISTING)` | `rename` |
-| `port::hard_link`, `port::dir_link` | `CreateHardLinkW`, junction (`FSCTL_SET_REPARSE_POINT`) | `link`, `symlink` |
 | `port::file_id(path)` | `GetFileInformationByHandle(Ex)` | `stat` `st_dev`/`st_ino` |
 | `port::find_ci(dir, name)` | exact open (NTFS) | directory scan with ASCII fold |
 | `port::executable_path()` | `GetModuleFileNameW` | `readlink("/proc/self/exe")` |

@@ -9,6 +9,12 @@ namespace u3 {
 
 fs::path upath(const std::string &utf8_path);
 
+// the PS4 game as the recipe reads it: base/update paths from the U3PS4V2 manifest (recipe.cpp and the steps)
+void ps4_view_set(const fs::path &root, const fs::path &manifest);
+bool ps4_exists(const std::string &path);
+std::vector<fs::directory_entry> ps4_dir(const std::string &path);
+std::vector<fs::path> ps4_files(const std::string &path);
+
 // --flag and --name value arguments
 struct Args {
     Args(const std::vector<std::string> &argv, const std::set<std::string> &flags, const std::set<std::string> &values);

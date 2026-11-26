@@ -106,7 +106,7 @@ fs::path stm_dir() {   // the PS3 disc's animstream4.psarc, extracted
 }
 
 fs::path template_pak(const std::string &t, bool solo) {
-    const fs::path tp = upath(ret()) / upath(t + ".pak");
+    const fs::path tp = upath(ret() + "/" + t + ".pak");
     if (!solo) {
         prefetch_read(tp);
         return tp;

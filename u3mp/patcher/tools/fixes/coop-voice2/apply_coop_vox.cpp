@@ -291,11 +291,10 @@ int coop_voice2(const std::vector<std::string> &argv) {
     }
     std::set<std::string> scripts;
     for (const std::string &d : {RET, OVL})
-        if (fs::is_directory(upath(d)))
-            for (const auto &e : fs::directory_iterator(upath(d))) {
-                const std::string x = utf8(e.path().filename());
-                if (x.rfind("ss-coop-adv", 0) == 0 && x.size() >= 4 && x.compare(x.size() - 4, 4, ".bin") == 0) scripts.insert(x);
-            }
+        for (const auto &e : u3::ps4_dir(d)) {
+            const std::string x = utf8(e.path().filename());
+            if (x.rfind("ss-coop-adv", 0) == 0 && x.size() >= 4 && x.compare(x.size() - 4, 4, ".bin") == 0) scripts.insert(x);
+        }
     std::set<uint32_t> allvox = have;
     for (const auto &[s, v] : srcsyms) allvox.insert(s);
     allvox.insert(other.begin(), other.end());

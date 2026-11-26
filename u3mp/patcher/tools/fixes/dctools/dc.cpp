@@ -64,7 +64,8 @@ void set_read_cache_mb(size_t mb) {
     evict_locked();
 }
 
-bool prefetch_read(const fs::path &p) {
+bool prefetch_read(const fs::path &p0) {
+    const fs::path p = resolve_read_path(p0);
     const std::string k = utf8(p);
     {
         std::lock_guard<std::mutex> l(g_cache_m);
@@ -95,14 +96,14 @@ bool prefetch_read(const fs::path &p) {
 
 bool have_read_cache(const fs::path &p) {
     std::lock_guard<std::mutex> l(g_cache_m);
-    return g_cache_limit && g_cache.count(utf8(p)) != 0;
+    return g_cache_limit && g_cache.count(utf8(resolve_read_path(p))) != 0;
 }
 
 bool provide_read_cache(const fs::path &p, Bytes data, bool pin) {
     auto d = std::make_shared<Bytes>(std::move(data));
     std::lock_guard<std::mutex> l(g_cache_m);
     if (!g_cache_limit || d->size() > g_cache_limit) return false;
-    const std::string k = utf8(p);
+    const std::string k = utf8(resolve_read_path(p));
     if (auto it = g_cache.find(k); it != g_cache.end()) {
         g_cache_bytes -= it->second.data->size();
         g_cache.erase(it);
@@ -130,7 +131,8 @@ std::string utf8(const fs::path &p) {
     return std::string(u.begin(), u.end());
 }
 
-Bytes read_file(const fs::path &p) {
+Bytes read_file(const fs::path &p0) {
+    const fs::path p = resolve_read_path(p0);
     const std::string k = utf8(p);
     std::shared_ptr<Bytes> hit;
     {

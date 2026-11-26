@@ -41,6 +41,7 @@ struct Stop : std::runtime_error {
 std::string fmt(const char *f, ...);            // printf into a std::string
 std::string hex8(uint32_t v);                   // "%08x"
 std::string utf8(const fs::path &p);            // a path for messages
+fs::path resolve_read_path(const fs::path &p);   // the PS4 manifest path for p, otherwise p
 Bytes read_file(const fs::path &p);
 void set_read_cache_mb(size_t mb);   // bounded RAM cache of read_file() contents (0 = off); shared by all threads
 bool prefetch_read(const fs::path &p);   // read p into that cache without returning a copy

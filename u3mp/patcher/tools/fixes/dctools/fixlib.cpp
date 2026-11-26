@@ -2,7 +2,11 @@
 // output), apart from u3fix.cpp's main so that the Uncharted 2 import (u2mp/patcher/importer) links them too.
 #include "u3fix.hpp"
 
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
@@ -12,16 +16,156 @@
 
 namespace u3 {
 
+namespace {
+
+fs::path raw_path(const std::string &s) {
 #ifdef _WIN32
-fs::path upath(const std::string &s) { return fs::path(std::u8string(s.begin(), s.end())); }
+    return fs::path(std::u8string(s.begin(), s.end()));
 #else
-fs::path upath(const std::string &s) {   // a backslash (the Windows separator some steps join with) is a "/" here
     std::u8string u(s.begin(), s.end());
     for (char8_t &c : u)
         if (c == u8'\\') c = u8'/';
     return fs::path(u);
-}
 #endif
+}
+
+std::string norm_key(std::string s) {
+    for (char &c : s)
+        if (c == '\\') c = '/';
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+#ifdef _WIN32
+    for (char &c : s) c = char(std::tolower((unsigned char)c));
+#endif
+    return s;
+}
+
+struct Ps4View {
+    std::string root;
+    std::map<std::string, std::string> files, dirs;
+    bool active = false, loaded = false;
+
+    void load(const fs::path &root0, const fs::path &manifest) {
+        root = norm_key(utf8(root0));
+        files.clear();
+        dirs.clear();
+        active = false;
+        loaded = true;
+        std::error_code ec;
+        if (manifest.empty() || !fs::is_regular_file(manifest, ec)) return;
+        std::ifstream in(manifest, std::ios::binary);
+        if (!in) throw Stop("cannot read " + utf8(manifest));
+        std::string line;
+        std::getline(in, line);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line != "U3PS4V2") throw Stop(utf8(manifest) + ": not a U3 PS4 manifest");
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const size_t a = line.find('\t');
+            const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+            if (a == std::string::npos || b == std::string::npos) throw Stop(utf8(manifest) + ": bad manifest line");
+            const std::string rel = norm_key(line.substr(a + 1, b - a - 1)), real = line.substr(b + 1);
+            if (line[0] == 'F') files[rel] = real;
+            else if (line[0] == 'D') dirs[rel] = real;
+            else throw Stop(utf8(manifest) + ": bad manifest entry");
+        }
+        active = true;
+    }
+
+    void ensure() {
+        if (loaded) return;
+        const char *m = std::getenv("U3_PS4_MANIFEST"), *r = std::getenv("U3_PS4_ROOT");
+        if (!m || !*m || !r || !*r) {
+            loaded = true;
+            return;
+        }
+        load(raw_path(r), raw_path(m));
+    }
+
+    bool under(const std::string &key) const {
+        if (!active) return false;
+        if (key == root) return true;
+        return key.size() > root.size() && key.compare(0, root.size(), root) == 0 && key[root.size()] == '/';
+    }
+    std::string rel(const std::string &key) const { return key == root ? std::string() : key.substr(root.size() + 1); }
+    const std::string *find(const std::string &r, bool dir) const {
+        const auto &m = dir ? dirs : files;
+        auto it = m.find(r);
+        return it == m.end() ? nullptr : &it->second;
+    }
+};
+
+Ps4View &view() {
+    static Ps4View v;
+    static std::once_flag once;
+    std::call_once(once, [&] { v.ensure(); });
+    return v;
+}
+
+}  // namespace
+
+void ps4_view_set(const fs::path &root, const fs::path &manifest) { view().load(root, manifest); }
+
+fs::path upath(const std::string &s) {
+    Ps4View &v = view();
+    const std::string key = norm_key(s);
+    if (v.under(key)) {
+        const std::string r = v.rel(key);
+        if (const std::string *p = v.find(r, false)) return raw_path(*p);
+        if (const std::string *p = v.find(r, true)) return raw_path(*p);
+    }
+    return raw_path(s);
+}
+
+fs::path resolve_read_path(const fs::path &p) { return upath(utf8(p)); }
+
+bool ps4_exists(const std::string &s) {
+    Ps4View &v = view();
+    const std::string key = norm_key(s);
+    if (v.under(key)) {
+        const std::string r = v.rel(key);
+        if (v.find(r, false) || v.find(r, true)) return true;
+    }
+    std::error_code ec;
+    return fs::exists(raw_path(s), ec);
+}
+
+std::vector<fs::directory_entry> ps4_dir(const std::string &s) {
+    std::vector<fs::directory_entry> out;
+    Ps4View &v = view();
+    const std::string key = norm_key(s);
+    if (v.under(key)) {
+        const std::string r = v.rel(key), prefix = r.empty() ? std::string() : r + "/";
+        std::map<std::string, std::string> kids;
+        for (const auto *m : {&v.dirs, &v.files})
+            for (auto it = m->lower_bound(prefix); it != m->end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
+                const std::string name = it->first.substr(prefix.size());
+                if (name.empty() || name.find('/') != std::string::npos) continue;
+                kids[name] = it->second;
+            }
+        for (const auto &[name, p] : kids) out.emplace_back(raw_path(p));
+        return out;
+    }
+    std::error_code ec;
+    for (fs::directory_iterator it(raw_path(s), ec), end; it != end; it.increment(ec)) out.emplace_back(*it);
+    return out;
+}
+
+std::vector<fs::path> ps4_files(const std::string &s) {
+    std::vector<fs::path> out;
+    Ps4View &v = view();
+    const std::string key = norm_key(s);
+    if (v.under(key)) {
+        const std::string r = v.rel(key), prefix = r.empty() ? std::string() : r + "/";
+        for (auto it = v.files.lower_bound(prefix); it != v.files.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it)
+            out.push_back(raw_path(it->second));
+        return out;
+    }
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(raw_path(s), ec), end; it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) out.push_back(it->path());
+    return out;
+}
 
 Args::Args(const std::vector<std::string> &argv, const std::set<std::string> &flags, const std::set<std::string> &values) {
     for (size_t i = 0; i < argv.size(); i++) {

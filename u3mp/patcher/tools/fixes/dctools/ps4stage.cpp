@@ -447,7 +447,7 @@ std::shared_ptr<std::map<std::string, std::vector<std::string>>> load_dict(const
     auto &slot = g_dicts[utf8(dp)];
     if (slot) return slot;
     slot = std::make_shared<std::map<std::string, std::vector<std::string>>>();
-    if (!dp.empty() && fs::exists(dp)) {
+    if (!dp.empty() && u3::ps4_exists(utf8(dp))) {
         const Bytes d = read_file(dp);
         const std::string t(d.begin(), d.end());
         size_t a = 0;
@@ -3106,7 +3106,7 @@ const std::vector<SkyTemplate> &retail_sky_templates(const fs::path &pak_dir) {
     auto [it, fresh] = g_sky_tmpl.try_emplace(utf8(pak_dir));
     if (!fresh) return it->second;
     std::vector<std::string> names;
-    for (const auto &e : fs::directory_iterator(pak_dir)) {
+    for (const auto &e : u3::ps4_dir(utf8(pak_dir))) {
         const std::string fn = utf8(e.path().filename());
         if (starts_with(fn, "sky-") && ends_with(fn, ".pak") && !ends_with(fn, "-ingame12.pak")) names.push_back(fn);
     }

@@ -343,7 +343,7 @@ int coop_vo(const std::vector<std::string> &argv) {
     // goty-speech-<lang>.psarc, the English file where the PS3 copy lacks that language or line
     const fs::path speech4 = upath(a.need("--ps4") + "/u3data/build/main/sound1/streams/speech");
     std::vector<std::string> langs;
-    for (const auto &e : fs::directory_iterator(speech4)) {
+    for (const auto &e : u3::ps4_dir(utf8(speech4))) {
         const std::string f = utf8(e.path().filename());
         if (f.size() > 10 && f.compare(f.size() - 10, 10, "_ps4.psarc") == 0 && f != "english_ps4.psarc")
             langs.push_back(f.substr(0, f.size() - 10));
