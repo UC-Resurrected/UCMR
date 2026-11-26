@@ -103,9 +103,10 @@ jobs:
   # from apt.llvm.org (the importers' C++20) and Qt from download.qt.io (aqtinstall; 22.04's own Qt 6.2 is too old).
   # A test package: no private files (no helper), not part of a release yet (§13 phase 7). The check unpacks it,
   # hides the Qt it was built with, starts the launcher without a screen until its core is ready and runs the
-  # importers' checks on the unpacked folder.
+  # importers' checks on the unpacked folder. The game runtime comes from the runtime job (gpu-tests, Ubuntu 24.04).
   linux-package:
     name: Linux package
+    needs: gpu-tests   # the game runtime is built there (C++23 toolchain) and staged into this package
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
@@ -155,6 +156,12 @@ jobs:
       - name: Small FFmpeg
         run: CC=gcc bash tools/build_ffmpeg.sh
 
+      - name: The runtime (from the runtime job)
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-linux
+          path: dist/runtime
+
       - name: Package
         run: |
           export QT_DIR=$(ls -d "$HOME/Qt/$QT_VERSION"/*gcc_64 | head -1)
@@ -181,6 +188,20 @@ jobs:
           cat selfcheck.log
           grep -q 'self-check: window and launcher core ready' selfcheck.log
           OUT=$pkg bash tools/importer_smoke.sh
+          # the game runtime (built on Ubuntu 24.04 by the runtime job): its libraries, and a start without a game where
+          # this system's C library is new enough for it
+          probe=$pkg/gow3_pc/out/gow3-probe
+          ldd "$probe" > runtime-ldd.log 2>&1 || true
+          cat runtime-ldd.log
+          if grep -q 'version .GLIBC_[0-9.]*. not found' runtime-ldd.log; then
+            echo "::warning title=runtime::gow3-probe needs a newer C library than Ubuntu 22.04's: $(grep -o 'GLIBC_[0-9.]*' runtime-ldd.log | sort -uV | tail -1)"
+          else
+            missing=$(grep 'not found' runtime-ldd.log || true)
+            if [[ -n $missing ]]; then echo "::error title=runtime::libraries not found: $missing"; exit 1; fi
+            status=0; "$probe" > usage.log 2>&1 || status=$?
+            cat usage.log
+            [[ $status == 1 ]] && grep -q '^Usage: ' usage.log
+          fi
 
       - name: Keep the package
         uses: actions/upload-artifact@v4
@@ -189,14 +210,16 @@ jobs:
           path: dist/UCMR_linux.tar.gz
           compression-level: 0   # already compressed
 
-  # The GPU library's unit tests that need no Vulkan device and no game (gow3_pc/gpu/CMakeLists.txt, the targets
-  # outside `if (WIN32)`). Ubuntu 24.04 for a C++23 compiler and library; SDL3 is built from source (no distro
-  # package yet). cheat-hook-test and actor-hook-test stay Windows-only until their memory helper has a Linux body
-  # (§4.6).
+  # The game runtime (gow3_pc/build.sh: gow3-probe with the GPU library and every C++ subsystem, the same CMake
+  # target as Windows) and the unit tests that need no game (gow3_pc/tests/run_unit_tests.sh), with lavapipe as a
+  # software Vulkan device. Ubuntu 24.04 for a C++23 compiler and library; SDL3 is built from source (no distro
+  # package yet) with the X11, Wayland and sound parts it loads at run time; the runtime links the small FFmpeg
+  # (tools/build_ffmpeg.sh). No game files exist here: gow3-probe is built, linked and started (usage, the Vulkan
+  # check, a missing boot file), no game. The staged runtime goes into the Linux package job.
   gpu-tests:
-    name: GPU unit tests
+    name: Game runtime and unit tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       SDL3_VERSION: release-3.2.0
     steps:
@@ -208,10 +231,12 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends clang cmake ninja-build pkg-config glslang-tools \
-            libvulkan-dev libfmt-dev libboost-dev libxxhash-dev libx11-dev libxext-dev \
-            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev mesa-vulkan-drivers
-          # mesa-vulkan-drivers: lavapipe, a software Vulkan device, for async-pipeline-cache-test
+          sudo apt-get install -y -q --no-install-recommends clang cmake ninja-build pkg-config glslang-tools nasm \
+            zlib1g-dev libopus-dev libvulkan-dev libfmt-dev libboost-dev libxxhash-dev mesa-vulkan-drivers \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgles-dev libdrm-dev \
+            libgbm-dev libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev
+          # mesa-vulkan-drivers: lavapipe, a software Vulkan device (async-pipeline-cache-test, gow3-probe --vulkan-only)
           # names that differ between Ubuntu releases: each one on its own, so a missing one is named
           for p in libvulkan-memory-allocator-dev libvma-dev robin-map-dev libtsl-robin-map-dev libzydis-dev; do
             sudo apt-get install -y -q --no-install-recommends "$p" > /dev/null 2>&1 && echo "installed $p" ||
@@ -223,49 +248,66 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/sdl3
-          key: sdl3-${{ env.SDL3_VERSION }}-ubuntu-24.04
+          key: sdl3-${{ env.SDL3_VERSION }}-ubuntu-24.04-desktop
 
       - name: SDL3
         if: steps.sdl3.outputs.cache-hit != 'true'
         run: |
           git clone -q --depth 1 -b "$SDL3_VERSION" https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl"
           cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF > "$RUNNER_TEMP/sdl.log"
+          grep -E 'SDL_(X11|WAYLAND|PULSEAUDIO|PIPEWIRE|ALSA|HIDAPI)\b' "$RUNNER_TEMP/sdl/build/CMakeCache.txt" || true
           cmake --build "$RUNNER_TEMP/sdl/build"
           cmake --install "$RUNNER_TEMP/sdl/build"
 
-      - name: Configure
+      - name: Reuse the small FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: downloads/ffmpeg-8.1.1-min-linux
+          key: ffmpeg-min-linux-${{ hashFiles('tools/build_ffmpeg.sh') }}-ubuntu-24.04
+
+      - name: Small FFmpeg
+        run: CC=clang bash tools/build_ffmpeg.sh
+
+      - name: Build the runtime
         run: |
-          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib64/pkgconfig"
-          if ! cmake -S gow3_pc/gpu -B out/gpu -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-              -DCMAKE_BUILD_TYPE=Release -DGOW3_LTO=OFF -DCMAKE_PREFIX_PATH="$HOME/sdl3" > configure.log 2>&1; then
-            cat configure.log
-            echo "::error title=configure::$(grep -A4 -m3 'CMake Error' configure.log | tr '\n' ' ' | cut -c1-900)"
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib64/pkgconfig:$PWD/downloads/ffmpeg-8.1.1-min-linux/lib/pkgconfig"
+          if ! CC=clang CXX=clang++ bash gow3_pc/build.sh > build.log 2>&1; then
+            cat build.log
+            grep -E 'error|undefined reference|CMake Error' gow3_pc/out/gpu-build.log build.log 2>/dev/null | head -20 |
+              while IFS= read -r l; do echo "::error::$(cut -c1-900 <<< "$l")"; done
             exit 1
           fi
-          cat configure.log
+          cat build.log
+          grep -c 'warning:' gow3_pc/out/gpu-build.log | xargs echo "compiler warnings:"
+          ls -l gow3_pc/out
 
-      - name: Build and run the tests
+      - name: Start the runtime (no game)
         run: |
-          tests=(motion-history-test ui-composition-test async-compiler-test warmup-inbox-test async-pipeline-cache-test
-                 depth-stencil-state-test blend-rewrite-test aliasing-test async-fetch-snapshot-test png-decode-test
-                 upscaler-support-test orb-multiplier-test stat-multipliers-test perf-overlay-test graphics-settings-test
-                 cheat-hooks-test signatures-test readback-queue-test readback-sources-test wait-diagnostics-test
-                 page-state-test)
-          failed=()
-          for t in "${tests[@]}"; do
-            echo "::group::$t"
-            if ! cmake --build out/gpu --target "$t" > "out/$t.log" 2>&1; then
-              cat "out/$t.log"; echo "::endgroup::"
-              echo "::error title=$t (build)::$(grep -m4 'error' "out/$t.log" | tr '\n' ' ' | cut -c1-900)"
-              failed+=("$t"); continue
-            fi
-            if ! (cd gow3_pc/gpu && "../../out/gpu/$t") > "out/$t.run" 2>&1; then
-              cat "out/$t.run"; echo "::endgroup::"
-              echo "::error title=$t (run)::$(tail -n 4 "out/$t.run" | tr '\n' ' ' | cut -c1-900)"
-              failed+=("$t"); continue
-            fi
-            cat "out/$t.run"; echo "::endgroup::"
-          done
-          echo "${#tests[@]} tests, ${#failed[@]} failed: ${failed[*]}"
-          (( ${#failed[@]} == 0 ))
+          probe=gow3_pc/out/gow3-probe
+          echo "libraries:"; ldd "$probe"
+          echo "exports uncharted_u3_voice: $(nm -D --defined-only "$probe" | grep -c ' uncharted_u3_voice$')"
+          nm -D --defined-only "$probe" | grep -q ' uncharted_u3_voice$'
+          status=0; "$probe" > usage.log 2>&1 || status=$?
+          cat usage.log
+          [[ $status == 1 ]] && grep -q '^Usage: ' usage.log || { echo "::error title=gow3-probe::usage check failed ($status)"; exit 1; }
+          status=0; "$probe" /nonexistent/boot.bin > missing.log 2>&1 || status=$?
+          cat missing.log
+          [[ $status == 1 ]] && grep -q 'cannot open boot file' missing.log || { echo "::error title=gow3-probe::missing boot file check failed ($status)"; exit 1; }
+          "$probe" --vulkan-only | tee vulkan.log
+          grep -q 'readback PASS' vulkan.log || { echo "::error title=gow3-probe::Vulkan check failed"; exit 1; }
+
+      - name: Unit tests
+        run: bash gow3_pc/tests/run_unit_tests.sh gow3_pc/out/gpu
+
+      - name: Stage the runtime for the package
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib64/pkgconfig"
+          CC=clang CXX=clang++ bash tools/package_linux.sh runtime
+          ls -l dist/runtime/gow3_pc/out; find dist/runtime/licenses | sort
+
+      - name: Keep the runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-linux
+          path: dist/runtime

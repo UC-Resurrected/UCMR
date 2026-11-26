@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # package_linux.sh - assembles the Linux package: dist/UCMR_linux/ and its tarball, dist/UCMR_linux.tar.gz, with the
-# folder layout of the Windows zip (tools/package_windows.sh; docs/WINDOWS-DEPENDENCIES.md §7.5). The game runtime is
-# not ported yet (§13 phase 4): this package is the launcher and the imports, no game starts from it yet.
+# folder layout of the Windows zip (tools/package_windows.sh; docs/WINDOWS-DEPENDENCIES.md §7.5): the launcher, the
+# imports and the game runtime (§13 phase 4; no game was started from it on Linux yet).
 #
 # What the package holds:
 #   UCMR_Launcher            what players start (tools/linux_starter/UCMR_Launcher.sh)
 #   UCMR_Launcher.desktop    a menu entry to install (README.txt says how)
 #   launcher-qt/             the launcher's window (Qt 6) with its Qt libraries, plugins and QML
 #   launcher/native/         the launcher core (libuncharted_native.so) and the game starter
+#   gow3_pc/out/             the game runtime (gow3-probe) with the libraries it brings (stage_runtime below)
 #   u2mp/, u3mp/             the multiplayer importers (u2import, u3import, u3fix, tables, the helper build, ffmpeg)
 #   tools/                   the base game's file list
 #   licenses/                the licenses of everything bundled
@@ -16,6 +17,7 @@
 # Run on Linux from the repository root after tools/build_ffmpeg.sh. Settings:
 #   CXX        the C++ compiler (default clang++); the importers need full C++20 (clang 16 or newer)
 #   QT_DIR     the Qt 6 (6.5 or newer) to build against and ship, e.g. ~/Qt/6.8.3/gcc_64; default: qtpaths6 on PATH
+# The runtime needs a C++23 compiler and its libraries (gow3_pc/build.sh); "package_linux.sh runtime" stages only it.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 
@@ -28,6 +30,63 @@ need() {   # need <file> <how to make it>
     [[ -e $1 ]] || { echo "Missing $1: $2" >&2; exit 1; }
 }
 need "$ffmpeg/bin/ffmpeg" 'build the small FFmpeg first (tools/build_ffmpeg.sh)'
+
+# The game runtime (gow3_pc/build.sh, linked with the small FFmpeg's static libraries) staged in dist/runtime:
+# gow3_pc/out/gow3-probe without debug information, the libraries it loads that systems often lack (SDL3, fmt, Zydis,
+# xxhash, ...: every one but the C library, the graphics stack, X11/Wayland, sound and zlib) beside it (the runtime
+# finds them through its $ORIGIN run path) and their licenses. "package_linux.sh runtime" makes only this part (the
+# Linux CI builds it on a newer system than the package); the package takes a staged runtime when there is one.
+runtime_stage=dist/runtime
+stage_runtime() {
+    PKG_CONFIG_PATH="$PWD/$ffmpeg/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" bash gow3_pc/build.sh
+    local dest=$runtime_stage/gow3_pc/out rlic=$runtime_stage/licenses listed name path files=()
+    rm -rf -- "$runtime_stage"
+    mkdir -p "$dest" "$rlic/runtime"
+    strip --strip-debug -o "$dest/gow3-probe" gow3_pc/out/gow3-probe
+    listed=$(ldd gow3_pc/out/gow3-probe)
+    if grep -q 'not found' <<< "$listed"; then echo "The runtime needs libraries that are not installed:" >&2; grep 'not found' <<< "$listed" >&2; exit 1; fi
+    while read -r name path; do
+        [[ $name =~ ^(ld-linux|linux-vdso|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s|libstdc\+\+|libvulkan|libX|libxcb|libz|libbsd|libmd|libGL|libEGL|libdrm|libgbm|libwayland|libasound|libpulse|libpipewire|libdbus|libudev|libsystemd)[.-] ]] && continue
+        cp -L "$path" "$dest/$name"
+        files+=("$path")
+    done < <(awk '$2 == "=>" && $3 ~ /^\// {print $1, $3}' <<< "$listed" | sort -u)
+    echo "runtime: $(du -sh "$dest" | cut -f1) with $(cd "$dest" && ls | grep -c '\.so') bundled libraries"
+    # licenses: LibAtrac9 (MIT, in the source), FFmpeg (in licenses/ffmpeg), SDL3 (built from source, zlib license),
+    # and the copyright files of the distribution packages a bundled library or the static Opus came from
+    mkdir -p "$rlic/runtime/LibAtrac9"
+    cp gow3_pc/third_party/LibAtrac9/LICENSE* "$rlic/runtime/LibAtrac9/" 2>/dev/null || true
+    local sdl
+    for path in "${files[@]}"; do
+        if [[ $(basename -- "$path") == libSDL3.so* ]]; then
+            sdl=$(dirname -- "$(readlink -f -- "$path")")
+            mkdir -p "$rlic/runtime/SDL3"
+            find "$sdl/.." "$sdl/../share" -maxdepth 4 -path '*licenses/SDL3/*' -exec cp {} "$rlic/runtime/SDL3/" \; 2>/dev/null || true
+        fi
+    done
+    local opus
+    opus=$(find /usr/lib /usr/lib64 -name libopus.a -print -quit 2>/dev/null || true)
+    [[ -n $opus ]] && files+=("$opus")
+    if command -v dpkg > /dev/null; then
+        local packages p f
+        mapfile -t packages < <(for f in "${files[@]}"; do
+            f=$(readlink -f -- "$f")
+            dpkg -S "$f" 2>/dev/null || dpkg -S "/usr$f" 2>/dev/null || dpkg -S "${f#/usr}" 2>/dev/null || true
+        done | cut -d: -f1 | sort -u)
+        for p in "${packages[@]}"; do
+            [[ -f /usr/share/doc/$p/copyright ]] && { mkdir -p "$rlic/runtime/$p"; cp "/usr/share/doc/$p/copyright" "$rlic/runtime/$p/"; }
+        done
+        if (( ${#packages[@]} )); then
+            {
+                echo "Libraries from the build system's distribution packages in gow3_pc/out (or linked into gow3-probe)."
+                dpkg-query -W -f '${Package} ${Version} (source: ${source:Package})\n' "${packages[@]}"
+            } > "$rlic/runtime/THIRD-PARTY.txt"
+        fi
+    fi
+}
+if [[ ${1:-} == runtime ]]; then
+    stage_runtime
+    exit 0
+fi
 qtpaths=${QT_DIR:+$QT_DIR/bin/qtpaths}
 [[ -n $qtpaths && -x $qtpaths ]] || qtpaths=$(command -v qtpaths6 || command -v qtpaths || true)
 [[ -x $qtpaths ]] || { echo "No Qt 6 found: set QT_DIR (the folder with bin/qtpaths)" >&2; exit 1; }
@@ -67,6 +126,14 @@ importers() {   # u2import, u3import and u3fix (tools/build_importers_linux.sh: 
     cp "$obj/importers/u2mp/bin/u2import" "$out/u2mp/bin/"
     cp "$obj/importers/u3mp/bin/u3import" "$obj/importers/u3mp/bin/u3fix" "$out/u3mp/bin/"
     cp "$ffmpeg/bin/ffmpeg" "$out/u3mp/bin/"   # the EULA pages and the sound banks (as on Windows: FFmpeg 8.1.1)
+}
+
+runtime() {   # the game runtime and what it loads (stage_runtime: staged before, by the CI on another system, or now)
+    [[ -f $runtime_stage/gow3_pc/out/gow3-probe ]] || stage_runtime
+    mkdir -p "$out/gow3_pc"
+    cp -r "$runtime_stage/gow3_pc/out" "$out/gow3_pc/"
+    chmod 755 "$out/gow3_pc/out/gow3-probe"   # (a CI artifact keeps no file modes)
+    cp -r "$runtime_stage/licenses/runtime" "$lic/"
 }
 
 u3_patcher() {   # the Uncharted 3 recipe and tools, and the newest multiplayer helper build (as on Windows)
@@ -240,6 +307,7 @@ baseline() {
 # ---------------------------------------------------------------------------------------------------------- build
 
 importers
+runtime
 u3_patcher
 launcher_core
 qt_window
