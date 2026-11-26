@@ -52364,6 +52364,10 @@ MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's
 MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
 MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
 MM_RO const char t_left_room[] = "the match room is gone: 0x26";
+// v7.264 (not PS3 rules: PS3 had many players, two lone PCs could not stay in step; PS3 guests have no time limit)
+constexpr uint32_t STAGGER_T = 8 * TPS, GUEST_T = 90 * TPS;
+MM_RO const char t_stagger[] = "search after a lone give-up: random pause ms ";
+MM_RO const char t_guest_to[] = "guest wait: no countdown or vote from the owner in 90 s: 0x103 to the party, room left (search next)";
 MM_RO const char t_endgame[] = "EndGame: 0x105 out (post-match handler), net state 0x12 CLIENT_LOBBY, same room 0x",
                  t_endgame2[] = " (no new search)";
 MM_RO const char t_stay[] = "0x12 -> 0x11 room 0x", t_stay2[] = " (after the match, same room), reservations n = members ",
@@ -52372,8 +52376,10 @@ MM_RO const char t_stay[] = "0x12 -> 0x11 room 0x", t_stay2[] = " (after the mat
 struct State {
     uint8_t on, st, member, host_next, row, rows, rows_done, dc_rows, backing, dv_due, nolink, in_progress, late_first,
         tie, wd_said, page_seen,
-        flow, after;   // SPEC-open O7: this driver started the match flow; back in the room after the match
-    uint32_t t, wait_start, until, lines, seed, max, min, rtt, conn, kick_t, lobby_t, last_count, playlist;
+        flow, after,   // SPEC-open O7: this driver started the match flow; back in the room after the match
+        stagger;       // v7.264: the next search starts after a random pause (set by a lone owner's give-up)
+    uint32_t t, wait_start, until, lines, seed, max, min, rtt, conn, kick_t, lobby_t, last_count, playlist,
+        guest_t;       // v7.264: a guest's last sign of the owner's start (entry into 0x12, countdown, vote, load)
     uint32_t row_v[3][5];   // per row: tolerance, same region, max ping, (unused), width
     uint64_t target;
     char owner[ID];
@@ -52428,6 +52434,7 @@ MM_FN void go(uintptr_t base, uint8_t st) {
     put(l);
     mm.st = st;
     mm.t = now(base);
+    if (st == 0x12) mm.guest_t = mm.t;   // v7.264: the guest timeout counts from here
     if (st == 0x26 && room_of(base)) leave(base);   // 0x26 LEAVE_GAME leaves the room (again every 5 s until it is gone)
 }
 
@@ -53043,6 +53050,7 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
     if (count < mm.min) {
         say(t_giveup);
         send_103(base, room_of(base));
+        mm.stagger = count <= 1 ? 1 : 0;   // v7.264: alone at the deadline: the next search after a random pause
         go(base, 0x26);   // host flag stays set: 0x14 searches next
         return;
     }
@@ -53096,6 +53104,23 @@ MM_FN void guest_start(uintptr_t base, void *s) {
         say(t_fb);
         u3x_guest_load_pages(base, s);
     }
+}
+
+// v7.264: a guest at 0x12 whose owner shows no start (no countdown, vote or start-load) for 90 s leaves the room,
+// keeps it on the failed list and searches again (an owner that is stuck or gone kept guests for 8 minutes); true =
+// left. The owner's countdown, votes and load reset the wait; so does a new owner (host migration takes 0x11).
+MM_FN bool guest_timeout(uintptr_t base, uint64_t room, bool owner) {
+    const uint32_t t = now(base);
+    if (owner || !room || status(base) >= 2 || sess(base, MS)[S_START_LOAD]) {
+        mm.guest_t = t;
+        return false;
+    }
+    if (t - mm.guest_t < GUEST_T) return false;
+    say(t_guest_to);
+    fail_add(mm.fail, mm.fail_next, room, t);
+    send_103(base, room);
+    go(base, 0x26);
+    return true;
 }
 
 // 4.6: a member in 0x14 takes the leader's 0x113 (no sender check)
@@ -53263,6 +53288,17 @@ MM_FN void tick(uintptr_t base, void *s) {
             decide_now(base);
         break;
     case 0x04:
+        if (mm.stagger) {   // v7.264: two lone PCs that started together host and search in step: shift this one
+            mm.stagger = 0;
+            const uint32_t pause = next(mm.seed) % (STAGGER_T + 1);
+            mm.until = t + pause;
+            mm.n_rooms = 0;
+            mm.tried = ~0u;   // 0x07's pause, then row 0
+            Line l;
+            put(l.s(t_stagger).d(pause * 10u / 3u));
+            go(base, 0x07);
+            break;
+        }
         if (search(base)) {
             mm.until = t + SEARCH_T;
             go(base, 0x06);
@@ -53339,6 +53375,7 @@ MM_FN void tick(uintptr_t base, void *s) {
         if (room != mm.target) mm.target = room;
         if (status(base) == 3) go(base, 0x16);
         if (status(base) == 6) go(base, 0x18);
+        if (mm.st == 0x12 && guest_timeout(base, room, owner)) break;
         guest_start(base, s);
         break;
     case 0x15:
