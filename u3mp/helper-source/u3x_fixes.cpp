@@ -44921,11 +44921,13 @@ struct Ask { uint32_t id, wait; uint8_t tries, fresh, reused; };
 struct State {
     Ask ask[10];
     uint32_t frame, asked, answered, remote_frames, reused_asked, last_state;
-    uint8_t in_game, reported;
+    uint8_t in_game, reported, ready_lines;
 };
 U3X_BSS State st;
 U3X_RO const char t_line[] = "U3MP pinfo: looks fresh for ", t_of[] = " of ", t_rem[] = " remote players (reused records asked ",
     t_asked[] = "); asked ", t_ans[] = ", answered ";
+U3X_RO const char t_ready[] = "U3MP mm start: remote player record(s) marked ready (+0xe0 = 1): ",
+    t_ready2[] = "; NET+0x18 set: ";
 
 U3X_FN [[clang::minsize]] bool has_looks(const uint8_t *rec) {
     for (uintptr_t k = 0; k < LOOKS_SIZE; k++)
@@ -44935,7 +44937,7 @@ U3X_FN [[clang::minsize]] bool has_looks(const uint8_t *rec) {
 // a new match: every slot is asked again
 U3X_FN [[clang::minsize]] void new_match() {
     st.frame = st.asked = st.answered = st.remote_frames = st.reused_asked = 0;
-    st.reported = 0;
+    st.reported = st.ready_lines = 0;
     for (Ask &a : st.ask) a.id = a.wait = a.tries = a.fresh = a.reused = 0;
 }
 }  // namespace pinfo_pull
@@ -45017,6 +45019,36 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_pinfo_pull_tick(uintptr_t base, Lo
         st.asked++;
     }
 
+    // v7.266: matchmaking (net menu mode 1) only, from the match load (net states 0x2c..0x30) through play (0x1d). In a
+    // custom game every remote net player record has the flag byte +0xe0 = 1 (in front of the name at +0xe1; filled
+    // from the player's net message, and set by the game's remote-player step 0x789be0 once that player may spawn).
+    // In matchmaking the remote records stayed at 0 on host and guests, and the game held back the HUD, the in-game
+    // sound and the remote bodies (2026-11-26: +0xe0 set by hand on a guest brought its HUD on). Also NET+0x18 (the
+    // owner gets it in owner_wait; matchmaking guests never did): the object setup 0xcd261a gives new characters
+    // their bit 8 at +0x4d1 only while it is set.
+    {
+        const uint32_t mode = at<uint32_t>(base + 0x17d603c);
+        if (mode == 1 && ((net_state >= 0x2c && net_state <= 0x30) || net_state == 0x1d)) {
+            uint32_t marked = 0, net18 = 0;
+            for (int i = 0; i < 10; i++) {
+                uint8_t *rec = ngm + RECORDS + RECORD_SIZE * static_cast<uintptr_t>(i);
+                if (rec == local0 || rec == local1 || !u3x_net_player_id(rec) || rec[0x5e4] || rec[0xe0]) continue;
+                rec[0xe0] = 1;
+                marked++;
+            }
+            uint8_t &n18 = at<uint8_t>(base + 0x17d5c58 + 0x18);
+            if (!n18) {
+                n18 = 1;
+                net18 = 1;
+            }
+            if ((marked || net18) && st.ready_lines < 8 && log) {
+                st.ready_lines++;
+                Line l;
+                l.s(t_ready).d(marked).s(t_ready2).d(net18);
+                log(base, l.z());
+            }
+        }
+    }
     if (remote) st.remote_frames++;   // v7.226: the line 30 s after remote players exist (not after the net game began)
     if (!st.reported && st.remote_frames >= REPORT_FRAME && log) {
         st.reported = 1;
