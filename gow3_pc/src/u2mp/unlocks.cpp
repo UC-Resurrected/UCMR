@@ -6,6 +6,7 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/unlocks.md.
 
 #include "unlocks.h"
+#include "coop_rules.h"
 #include "host_memory.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
@@ -52,6 +53,8 @@ constexpr uint32_t kBoosterSym = sid("*net-boosters*");
 static_assert(kBoosterSym == 0x916e03b0u, "booster table id");
 constexpr uint32_t kCharAttrSym = sid("*net-skins*");
 static_assert(kCharAttrSym == 0x42d1ec02u, "character attributes id");
+constexpr uint32_t kNetGamesSym = sid("*net-games*");
+static_assert(kNetGamesSym == 0x3b9a067du, "net games table id");
 constexpr uint32_t kHeroSection = 0x681022f5;
 constexpr uint32_t kVillainSection = 0x4252add5;
 constexpr uint32_t kRootType = 0x916aa605;
@@ -126,6 +129,7 @@ int32_t g_skin_count = 0;
 uint8_t *g_slot_table = nullptr;  // the 10-entry per-slot table the game reads
 char g_slot_art[10][48];
 const char *g_record_pkg[10] = {};  // records 0..9's own packages (their +8 names the slot art)
+int32_t g_coop_shown[10] = {-2, -2, -2, -2, -2, -2, -2, -2, -2, -2};  // co-op character index last logged per slot
 uint8_t *g_store = nullptr;  // store copy with the added skin items
 uint8_t *g_boosters = nullptr;  // net-patch9's own booster table
 int32_t g_booster_count = 0;
@@ -580,6 +584,49 @@ void *spawn_lookup(const char *site, void *table, const char *name) {
     return r;
 }
 
+// Co-op characters (5.8a): the current net game's type and its three co-op characters (*net-games* record +0x70).
+struct CoopGame {
+    int32_t type = 0;
+    uint32_t chars[coop::kRanks] = {};
+};
+
+// Position of a skin id in the merged table (-1 when absent).
+int32_t merged_position(uint32_t id) {
+    const uint8_t *recs = g_skins ? rdptr(g_skins, 8) : nullptr;
+    for (int32_t i = 0; recs && id && i < g_skin_count; ++i)
+        if (rd32(recs + 0x30 * uint64_t(i), 0x10) == id) return i;
+    return -1;
+}
+
+// True in a co-op net game whose three characters are all in the merged skin table; false otherwise (outside
+// multiplayer, a competitive game, no list, or a character the table lacks: then every player keeps their own skin).
+bool coop_game(CoopGame &g) {
+    if (!g_skins || rds32(game(kNetState)) < 2) return false;
+    const uint8_t *games = dc_find(kNetGamesSym);
+    if (!games) return false;
+    int16_t index;
+    std::memcpy(&index, game(kNgm + 0x1ca0), sizeof index);
+    const uint8_t *records = rdptr(games, 8);
+    if (!records || index < 0 || index >= rds32(games)) return false;
+    const uint8_t *record = records + 0x90 * uint64_t(index);
+    const uint8_t *list = rdptr(record, 0x70);
+    if (!list) return false;
+    g.type = rds32(record, 0x0c);
+    for (int r = 0; r < coop::kRanks; ++r) g.chars[r] = rd32(list, 4 * size_t(r));
+    for (int r = 0; r < coop::kRanks; ++r) {
+        const uint32_t id = coop::preset_id(g.type, g.chars, r);
+        if (id == 0) return false;
+        if (merged_position(id) >= 0) continue;
+        static uint32_t said = 0;
+        if (said != id) {
+            said = id;
+            log("skins: co-op character %08x (rank %d) is not in the skin table; players keep their own skins", id, r);
+        }
+        return false;
+    }
+    return true;
+}
+
 // A remote skin can be a different table position or a package the other PC did not import. Use the
 // local character's skin instead of passing NULL into the NetCharacter factory.
 const char *first_loaded_skin() {
@@ -598,7 +645,9 @@ const char *fallback_skin_name() {
 }
 U2MP_GUEST void *spawn_lookup_a(void *table, const char *name) {
     void *r = spawn_lookup("0x663280", table, name);
-    if (r && name && *name) g_local_skin = name;
+    // A co-op character is the net game's, not the player's own choice (5.8a).
+    CoopGame coop;
+    if (r && name && *name && !coop_game(coop)) g_local_skin = name;
     return r;
 }
 U2MP_GUEST void *spawn_lookup_b(void *table, const char *name) {
@@ -1334,8 +1383,52 @@ uint32_t unlocks_skin_fingerprint() { return g_fingerprint.load(); }
 const char *unlocks_local_skin() { return g_local_skin.empty() ? nullptr : g_local_skin.c_str(); }
 const char *unlocks_local_villain() { return g_local_villain.empty() ? nullptr : g_local_villain.c_str(); }
 
+const char *unlocks_coop_character(int rank) {
+    CoopGame g;
+    if (!coop_game(g)) return nullptr;
+    const int32_t at = merged_position(coop::preset_id(g.type, g.chars, rank));
+    return at >= 0 ? record_package(rdptr(g_skins, 8), at) : nullptr;
+}
+
+// 5.8a: in a co-op game every player plays the net game's character of their co-op rank (tracker +0x198), as on
+// PS3: the slot's skin index is that character's own record, whatever skin the player equipped for competitive.
+static bool apply_coop_characters(uint8_t *base) {
+    CoopGame g;
+    if (!coop_game(g)) return false;
+    int32_t (&shown)[10] = g_coop_shown;
+    const uint8_t *recs = rdptr(g_skins, 8);
+    std::string changed;
+    for (int k = 0; k < 10; ++k) {
+        uint8_t *slot = base + 0x2c0 * uint64_t(k);
+        const int32_t id = int32_t(rd32(slot, 0x120));
+        const int32_t rank = rds32(slot, 0x198);
+        const int32_t at = id >= 1 && id <= 10 ? merged_position(coop::preset_id(g.type, g.chars, rank)) : -1;
+        if (at >= 0) {
+            if (at < 10) {
+                // Records 0..9 name slot art buffers; this one names its own package while a slot plays it.
+                std::snprintf(g_slot_art[at], sizeof g_slot_art[at], "%s",
+                              g_record_pkg[at] ? g_record_pkg[at] : "mp-hero");
+                wrptr(g_slot_table + 0x10 + 0x30 * uint64_t(at), 8, g_slot_art[at]);
+            }
+            wr32(slot, 0x138, uint32_t(at));
+        }
+        if (at == shown[k]) continue;
+        shown[k] = at;
+        if (at < 0) continue;
+        char b[96];
+        std::snprintf(b, sizeof b, " net id %d rank %d '%s' (index %d);", id, rank, or_dash(record_package(recs, at)),
+                      at);
+        changed += b;
+    }
+    if (!changed.empty()) log("skins: co-op characters (game type %d):%s", g.type, changed.c_str());
+    return true;
+}
+
 void unlocks_apply_slot_skins() {
     if (!g_slot_table) return;
+    uint8_t *slots = game(kNgm + 0x10);
+    if (apply_coop_characters(slots)) return;
+    for (int32_t &s : g_coop_shown) s = -2;   // the next co-op game logs its characters again
     const char *local_hero = unlocks_local_skin();
     const char *local_villain = unlocks_local_villain();
     uint8_t *base = game(kNgm + 0x10);

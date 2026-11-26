@@ -507,6 +507,39 @@ depends on both PCs having the same table position for it (session.cpp sends the
 
 No guest calls, no log.
 
+Step 0 (5.8a, co-op) runs first: when it applies, steps 2 and 3 are skipped for that frame.
+
+### 5.8a Co-op characters
+
+PS3 behaviour: in Co-op Objective every player plays a preset character of the map, chosen by the player's co-op
+rank (tracker +0x198: 0, 1, 2; the same rank picks the start spawner and the answer of net-player-coop-id); the
+skin the player equipped for competitive play is not used. AssignTeams' co-op path gives the slot of rank r the
+skin index (+0x138) of the skin record whose id is the net game's character r. The characters are three u32 skin
+ids at `*net-games*` record +0x70 (pointer), for the co-op game types 4, 8, 9 and 12 (`coop_rules.h`).
+
+Game data (PS4 net.bin, the record in effect; rank 0 / 1 / 2):
+
+| net game | level | characters |
+|---|---|---|
+| 113 | Nepal Warzone (`war-wide-coop`, 19532cb7) | `mp-hero` (Drake), `mp-hero-chloe`, `mp-hero-sullivan` |
+| 114 | The Village (5b846310) | `mp-hero-parka` (Drake), `mp-hero-elena-winter`, `mp-hero-rescuer` (Tenzin) |
+| 115 | The Sanctuary (73f794af) | `mp-hero-parka` (Drake), `mp-hero-chloe-winter`, `mp-hero-elena-winter` |
+
+All seven ids are records of net-patch9's skin table, so they are in the merged table.
+
+0. Co-op game: NET_SM (s32 0x14ce97c) >= 2, `*net-games*` (0x3b9a067d, one guest lookup) has a record at the s16
+   index ngm+0x1ca0, its +0x70 list is not NULL, its type is a co-op type and each of the three ids is found in the
+   merged table (first position with that id). If a character is missing, log once per id
+   `skins: co-op character %08x (rank %d) is not in the skin table; players keep their own skins` and go on with
+   step 2. Otherwise, for each slot with 1 <= id <= 10 and rank (+0x198) 0..2: position = the merged position of
+   character `rank`; when position < 10, copy that record's own package (6.3 step 11) into slot art buffer
+   `position` and point the record's +8 at it; write position to slot+0x138. Log
+   `skins: co-op characters (game type %d): net id %d rank %d '%s' (index %d); ...` for the slots whose position
+   changed since the last log (reset by every frame outside co-op).
+
+Also in co-op: the actor request (session.cpp) asks for the three characters' packages instead of the players'
+own skins, and spawn lookup A does not take the co-op character as the local player's own skin.
+
 ### 5.9 Table lookups at the store and Profile pages (6b34909)
 
 Both host functions (store sites, Profile sites; 2.2) do the same: for symbol 0x5a4731d2 with a

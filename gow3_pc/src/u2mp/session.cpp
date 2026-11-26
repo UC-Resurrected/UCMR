@@ -614,6 +614,11 @@ void request_match_skin_packages() {
         asked.emplace_back(actor);
         request_actor_package(actor);
     };
+    // Co-op: every player plays the net game's character of their rank, not their own skin (unlocks.md 5.8a).
+    if (unlocks_coop_character(0)) {
+        for (int rank = 0; rank < 3; ++rank) ask(unlocks_coop_character(rank));
+        return;
+    }
     ask(unlocks_local_skin());
     if (std::strcmp(unlocks_local_villain() ? unlocks_local_villain() : "", unlocks_local_skin() ? unlocks_local_skin() : "") != 0)
         ask(unlocks_local_villain());
