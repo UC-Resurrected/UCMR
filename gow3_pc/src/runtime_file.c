@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <sys/statvfs.h>
+#include "host_linux.h"
 #endif
 #ifdef _WIN32
 #include <windows.h>
@@ -209,7 +210,14 @@ static int resolve(const char *guest,char *out,size_t size,int base_only) {
     if (!m) result=ENOENT;
     else if (hit) { if ((size_t)snprintf(out,size,"%s/%s",layer->root,hit->rel)>=size) result=ENAMETOOLONG; }
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
+#ifndef _WIN32
+    /* The game folder on a case-keeping file system: names the game asks for in another case (host_linux.cpp). */
+    const size_t fold_from=(!result && m && !hit && overlay_mount(m->guest)) ? strlen(m->host) : 0;
+#endif
     pthread_mutex_unlock(&lock);
+#ifndef _WIN32
+    if (fold_from) host_linux_fold_case(out,fold_from);
+#endif
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     return result;
 }

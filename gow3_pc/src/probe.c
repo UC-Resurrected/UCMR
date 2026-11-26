@@ -37,6 +37,7 @@
 #include <execinfo.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include "host_linux.h"
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -563,97 +564,7 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     return patched;
 }
 #endif
-#ifndef _WIN32
-static void fault(int sig, siginfo_t *info, void *context) {
-    /* GPU page tracking (write-protected guest pages) is resolved first, except during a
-     * speculative read: see vectored_fault. */
-    if (gpu_enabled && sig == SIGSEGV && !runtime_fault_recover && gow3gpu_handle_fault(context, info->si_addr)) return;
-    /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
-    if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
-        sigjmp_buf *recover = runtime_fault_recover;
-        runtime_fault_recover = NULL;
-        sigset_t unblock;
-        sigemptyset(&unblock);
-        sigaddset(&unblock, sig);
-        pthread_sigmask(SIG_UNBLOCK, &unblock, NULL);
-        siglongjmp(*recover, 1);
-    }
-    /* The process is terminating: dladdr/snprintf are acceptable here. */
-    ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
-    char line[512];
-    Dl_info where;
-    if (rip - (uintptr_t)image < 0x10000000)
-        snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p\n",
-                 sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr);
-    else if (dladdr((void *)rip, &where) && where.dli_fname)
-        snprintf(line, sizeof(line), "Host fault (signal %d) in %s+0x%lx (%s), address %p\n", sig, where.dli_fname,
-                 (unsigned long)(rip - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?", info->si_addr);
-    else
-        snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
-    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
-    if (gpu_enabled) gow3gpu_dump_guest_writes(context);
-    /* Host call chain (frames with unwind info; guest frames end it). */
-    void *frames[32];
-    int depth = backtrace(frames, 32);
-    for (int i = 2; i < depth; ++i) {
-        if (dladdr(frames[i], &where) && where.dli_fname)
-            snprintf(line, sizeof(line), "  #%d %s+0x%lx (%s)\n", i, where.dli_fname,
-                     (unsigned long)((uintptr_t)frames[i] - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?");
-        else
-            snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
-        ssize_t written_=write(2, line, strlen(line)); (void)written_;
-    }
-    _exit(128 + sig);
-}
-#endif
-#ifndef _WIN32
-/* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
- * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
-static uintptr_t exe_base;
-static void write_hex(char *out, uint64_t v) {
-    const char digits[] = "0123456789abcdef";
-    for (int i = 0; i < 16; ++i) out[i] = digits[(v >> (60 - i * 4)) & 15];
-}
-static void dump_frames(ucontext_t *uc) {
-    char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
-    uintptr_t rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP], rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
-    uint64_t tid=(uint64_t)gettid();
-    /* First argument register: the lock address when a thread waits on a futex. */
-    char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
-    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)uc->uc_mcontext.gregs[REG_RDI]);
-    { ssize_t written_=write(2,arg,sizeof(arg)-1); (void)written_; }
-    for (int depth=0; depth<24; ++depth) {
-        write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
-        { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
-        uintptr_t frame[2];
-        struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
-        if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
-        if (frame[0]<=rbp) break;
-        rbp=frame[0]; rip=frame[1];
-    }
-}
-static void thread_dump(int sig, siginfo_t *info, void *context) { (void)sig; (void)info; dump_frames(context); }
-static void watchdog(int sig, siginfo_t *info, void *context) {
-    (void)info;
-    const char head[]="STOP: watchdog timeout; thread stacks:\n";
-    { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
-    dump_frames(context);
-    int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
-    char buffer[4096];
-    long n;
-    pid_t self=gettid();
-    while (dir>=0 && (n=syscall(SYS_getdents64,dir,buffer,sizeof(buffer)))>0)
-        for (long at=0; at<n;) {
-            struct { uint64_t ino; int64_t off; unsigned short reclen; unsigned char type; char name[]; } *d=(void *)(buffer+at);
-            pid_t tid=(pid_t)strtol(d->name,NULL,10);
-            if (tid>0 && tid!=self) { syscall(SYS_tgkill,getpid(),tid,SIGUSR2); usleep(20000); }
-            at+=d->reclen;
-        }
-    usleep(100000);
-    _exit(128 + sig);
-}
-#endif
+/* Linux: the fault, thread-dump and watchdog handlers are in host_linux.cpp. */
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -830,8 +741,10 @@ unsigned char *runtime_near_image_alloc(size_t bytes, int executable) {
     }
     return NULL;
 #else
-    (void)bytes; (void)executable;
-    return NULL;
+    bytes = (bytes + 0xffff) & ~(size_t)0xffff;
+    const uintptr_t lo = (uintptr_t)image > UINT64_C(0x60000000) ? (uintptr_t)image - UINT64_C(0x60000000) : 0x10000;
+    return host_linux_alloc_between(lo, (uintptr_t)image + UINT64_C(0x60000000), bytes,
+                                    PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0));
 #endif
 }
 
@@ -854,8 +767,9 @@ static unsigned char *allocate_near_image(uint64_t size) {
     }
     return NULL;
 #else
-    (void)size;
-    return allocate(page_size);
+    const uintptr_t lo = (uintptr_t)image > UINT64_C(0x60000000) ? (uintptr_t)image - UINT64_C(0x60000000) : 0x10000;
+    return host_linux_alloc_between(lo, (uintptr_t)image + (uintptr_t)size + UINT64_C(0x60000000), page_size,
+                                    PROT_READ | PROT_WRITE);
 #endif
 }
 /* Mouse look stub (src/runtime_mouselook.h): saves rax, rcx, rdx, rsi, rdi, r8-r11 and xmm0-7
@@ -1224,17 +1138,7 @@ void runtime_restart(void) {
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
-    const char *command = getenv("GOW3_RESTART_COMMAND");
-    syscall(SYS_close_range, 3u, ~0u, 0u);
-    if (command && *command) {
-        puts("Runtime: restarting through GOW3_RESTART_COMMAND");
-        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
-    } else {
-        puts("Runtime: restarting through run.sh");
-        execlp("bash", "bash", "run.sh", (char *)NULL);
-    }
-    perror("runtime_restart: exec");
-    _exit(1);
+    host_linux_restart();
 #endif
 }
 
@@ -1258,7 +1162,7 @@ int main(int argc, char **argv) {
      * LoadExec argv for Uncharted 2/3 is the complete argv: "eboot.bin" "ispartofuccollection". */
     const char *guest_argv[17]={"/app0/eboot.bin"};
     int guest_argc=1;
-    unsigned timeout_seconds = 10;
+    unsigned timeout_seconds = 0; /* --timeout: the Linux watchdog (host_linux.cpp); off by default, as Windows has none */
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
     const char *app0_overlays[8]; int app0_overlay_count=0;
     for (int i = 2; i < argc; ++i) {
@@ -1351,16 +1255,8 @@ int main(int argc, char **argv) {
     (void)timeout_seconds; /* no watchdog on Windows */
 #else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
-    struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
-    Dl_info self_info;
-    if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
-    struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
-    sigemptyset(&dump.sa_mask); sigaction(SIGUSR2, &dump, NULL);
-    struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
-    sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
-    alarm(timeout_seconds); /* 0 disables the watchdog */
+    static const HostLinuxGuest guest = {&image, &gpu_enabled};
+    host_linux_install_signals(&guest, timeout_seconds);
 #endif
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
@@ -1616,8 +1512,8 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
 #ifdef _WIN32
     start_exec_watch();
-    pokes_start(image);   /* src/pokes.cpp (C++): GOW3_POKE, the launcher's cheats and debug switches */
 #endif
+    pokes_start(image);   /* src/pokes.cpp (C++): GOW3_POKE, the launcher's cheats and debug switches */
     entered_game=1;
     struct { uint64_t argc; const char *argv[17]; } params = {(uint64_t)guest_argc, {NULL}};
     for (int i=0;i<guest_argc;++i) params.argv[i]=guest_argv[i];
@@ -1632,8 +1528,8 @@ int main(int argc, char **argv) {
     runtime_thread_widen_stack_limit();   /* the guest main thread runs fibers too */
     ((Entry)(image + entry))(&params, guest_exit);
 #else
-    /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
-    enum { MAIN_STACK=8*1024*1024 };
+    /* The guest main thread runs on a stack below 1 TiB like PS4 stacks; 16 MiB, as the Windows process stack. */
+    enum { MAIN_STACK=16*1024*1024 };
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
     if (!stack) fail("cannot allocate guest main stack");
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
