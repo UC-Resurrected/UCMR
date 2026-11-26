@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
-#include <windows.h>
+#include "test_memory.h"
 #include "../src/cheat_hook.h"
 
 static int read_difficulty(void* entry, unsigned completed) {
@@ -22,7 +22,9 @@ static int jump_blocked(void* entry, void* actor) {
 }
 
 int main() {
+#ifdef _WIN32
     _set_error_mode(_OUT_TO_STDERR);
+#endif
     const Gow3CheatHook* unlock = nullptr;
     for (const auto& hook : gow3_cheat_hooks) {
         if (hook.offset == 0xc77ea) unlock = &hook;
@@ -35,7 +37,7 @@ int main() {
         0x83,0xe1,1,0xff,0xc9,0x89,0xc8,0xc3
     };
     assert(gow3_cheat_signature_match(unlock, tail, sizeof(tail)));
-    auto* memory = static_cast<unsigned char*>(VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE));
+    auto* memory = TestCodeMemory(4096);
     assert(memory);
     std::memcpy(memory+512,tail,sizeof(tail));
     unsigned char enabled=0;
@@ -71,6 +73,6 @@ int main() {
         assert(jump_blocked(memory,actor)==int((flags&4)!=0));
         unsigned after;std::memcpy(&after,actor+0x4ac,4);assert(after==flags);
     }
-    VirtualFree(memory,0,MEM_RELEASE);
+    TestCodeFree(memory,4096);
     std::puts("PASS: live cheat hooks");
 }

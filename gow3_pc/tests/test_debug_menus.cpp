@@ -9,7 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <windows.h>
+#include "test_environment.h"
+#include "test_memory.h"
 
 namespace {
 
@@ -30,23 +31,23 @@ unsigned char &combo() { return image[kPad + 0xad]; }
 
 // one menu manager check: returns (combo byte << 8) | debug-mode byte
 unsigned check() {
-    FlushInstructionCache(GetCurrentProcess(), image + kAt, sizeof kCode);
+    TestCodeChanged(image + kAt, sizeof kCode);
     return reinterpret_cast<unsigned (*)()>(image + kAt)() & 0xffff;
 }
 
 }  // namespace
 
 int main() {
-    image = static_cast<unsigned char *>(VirtualAlloc(nullptr, kSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    image = TestCodeMemory(kSize);
     assert(image);
     std::memcpy(image + kAt, kCode, sizeof kCode);
 
     // debug mode off in the launcher: no hook, the image stays as it is
-    _putenv_s("UNCHARTED_CHEATS", "invincible");
+    SetTestEnv("UNCHARTED_CHEATS", "invincible");
     assert(debug_menus_install(image, kSize) == 0);
     assert(std::memcmp(image + kAt, kCode, sizeof kCode) == 0);
 
-    _putenv_s("UNCHARTED_CHEATS", "ammo, debug");
+    SetTestEnv("UNCHARTED_CHEATS", "ammo, debug");
     assert(debug_menus_install(image, kSize) == 1);
     assert(image[0xe909e] == 0xe9 && image[0xe90a3] == 0x90);   // jmp rel32 + nop over mov al,[rbx+0x4844]
 

@@ -8,11 +8,18 @@
 // written when it differs. The launcher builds the list (launcher/native/runtime_env.cpp).
 #include "pokes.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace pokes {
 
@@ -50,27 +57,45 @@ namespace {
 unsigned char *base;
 std::vector<Poke> held;
 
-DWORD WINAPI hold(LPVOID) {
-    const HANDLE self = GetCurrentProcess();
+// Reads / writes size bytes of this process's own memory at address; false (nothing done) where it is not mapped.
+// Windows: Read/WriteProcessMemory on the own process. Linux: /proc/self/mem, which likewise skips unmapped pages
+// (EIO) and writes through a read-only page as WriteProcessMemory does.
+#ifdef _WIN32
+bool safe_read(uintptr_t address, void *out, size_t size) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), out, size, &got) && got == size;
+}
+void safe_write(uintptr_t address, const void *data, size_t size) {
+    WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(address), data, size, nullptr);
+}
+#else
+int self_memory() {
+    static const int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    return fd;
+}
+bool safe_read(uintptr_t address, void *out, size_t size) {
+    return self_memory() >= 0 && pread(self_memory(), out, size, static_cast<off_t>(address)) == static_cast<ssize_t>(size);
+}
+void safe_write(uintptr_t address, const void *data, size_t size) {
+    if (self_memory() >= 0 && pwrite(self_memory(), data, size, static_cast<off_t>(address)) < 0) {}
+}
+#endif
+
+void hold() {
     for (;;) {
         for (const Poke &k : held) {
             uintptr_t address = reinterpret_cast<uintptr_t>(base) + static_cast<uintptr_t>(k.offset);
-            SIZE_T got = 0;
             if (k.deref) {
                 uint64_t pointer = 0;
-                if (!ReadProcessMemory(self, reinterpret_cast<LPCVOID>(address), &pointer, sizeof pointer, &got) ||
-                    got != sizeof pointer || !pointer)
-                    continue;
+                if (!safe_read(address, &pointer, sizeof pointer) || !pointer) continue;
                 address = static_cast<uintptr_t>(pointer) + static_cast<uintptr_t>(k.add);
             }
             uint32_t current = 0;
-            if (ReadProcessMemory(self, reinterpret_cast<LPCVOID>(address), &current, k.width, &got) &&
-                got == k.width && std::memcmp(&current, &k.value, k.width) != 0)
-                WriteProcessMemory(self, reinterpret_cast<LPVOID>(address), &k.value, k.width, nullptr);
+            if (safe_read(address, &current, k.width) && std::memcmp(&current, &k.value, k.width) != 0)
+                safe_write(address, &k.value, k.width);
         }
-        Sleep(250);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-    return 0;
 }
 
 }  // namespace
@@ -84,6 +109,5 @@ extern "C" void pokes_start(unsigned char *image) {
     pokes::held = pokes::parse(env);
     std::printf("Runtime: %zu memory switches kept set (GOW3_POKE: %s)\n", pokes::held.size(), env);
     std::fflush(stdout);
-    const HANDLE thread = CreateThread(nullptr, 0, pokes::hold, nullptr, 0, nullptr);
-    if (thread) CloseHandle(thread);
+    std::thread(pokes::hold).detach();
 }

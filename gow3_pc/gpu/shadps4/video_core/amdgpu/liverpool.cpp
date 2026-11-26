@@ -14,6 +14,7 @@
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/resource.h>
+#include <unistd.h> // gow3: gettid
 #endif
 #include <time.h>
 #include "gow3_copy.h"
@@ -668,7 +669,7 @@ static void TraceEopWrite(u64 address, u64 data) {
     std::printf("EOP trace: t=%.2f ms label %#llx = %#llx, counter %llu, thread %lu\n",
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(data),
-                static_cast<unsigned long long>(counter), static_cast<unsigned long>(GetCurrentThreadId()));
+                static_cast<unsigned long long>(counter), static_cast<unsigned long>(gettid())); // gow3: gow3_win_compat.h on Windows
 }
 
 // GOW3_TEST_LATE_IRQ=<ms>:<seconds> (tests): every <seconds>, the end-of-pipe interrupts of the

@@ -29,7 +29,7 @@ namespace {
 
 constexpr uint64_t kWait = 0xd97480;     // wait for a counter's value (counter, value, mode)
 constexpr uint64_t kUpdate = 0xd969c0;   // release the waiters for a counter's value (counter, value)
-constexpr uint64_t kMasterCounter = 0x1b24e70;
+[[maybe_unused]] constexpr uint64_t kMasterCounter = 0x1b24e70;   // (not used yet; the tests build u3fix with -Werror)
 
 using Wait = __attribute__((sysv_abi)) void (*)(void *, int64_t, int64_t);
 using Update = __attribute__((sysv_abi)) void (*)(void *, int64_t);
