@@ -6,7 +6,14 @@ Thank you for helping improve the project. Read the
 The rules below are ordered by priority: **legal and distribution requirements come first**, followed by
 the contribution process and development priorities. Every contribution must follow all applicable rules.
 
-## ⚖️ 1. Legal and distribution requirements — HIGHEST PRIORITY!
+## 💚 1. Wellbeing — Put yourself first!
+
+A message from the project creator: if you’re reading this, chances are, you may be thinking about contributing. Remember that
+this is a video game, and your personal life comes first. Everyone who wants to contribute is very welcome, but no
+contribution is worth harming your mental health, physical health, or prioritizing the project over yourself or your loved ones. Please contribute at a pace that feels comfortable,
+and take a break whenever you need one. ❤️
+
+## ⚖️ 2. Legal and distribution requirements — HIGH PRIORITY!
 
 This is an unofficial, non-commercial fan project, not affiliated with Sony Interactive Entertainment,
 Naughty Dog or Bluepoint Games. These requirements protect the project and take priority over convenience,
@@ -50,12 +57,12 @@ license notices.
 
 Do not add donation links, paid features, advertisements or anything sold in connection with this project.
 
-## 🛡️ 2. Community server privacy
+## 🛡️ 3. Community server privacy
 
 Do not publish the community server's IP address or host names in code, documentation, logs, screenshots
 or other contributed material.
 
-## 🔀 3. Submit contributions through pull requests
+## 🔀 4. Submit contributions through pull requests
 
 **All contributions must be submitted as a pull request (PR) from a fork.** Follow the scope and coordination
 steps in the [README](README.md#contributing), keep each PR focused on one change, and rebase your branch
@@ -64,7 +71,7 @@ on the latest `main` before submitting.
 Describe the problem, how to reproduce it, what you changed and how you tested it. Contributions must be
 reviewed and tested by the maintainer before they are merged.
 
-## 🔄 4. Develop against current supported versions
+## 🔄 5. Develop against current supported versions
 
 Keep the launcher and game installation up to date with the versions currently supported by the project.
 Base new work on the latest project code and test against that supported launcher and game combination
@@ -73,7 +80,7 @@ to reduce compatibility problems and regressions.
 State the launcher/build version and game update used for testing in your PR. When changing supported
 versions, check that the change does not regress existing supported behavior.
 
-## ⚙️ 5. C++ above everything else
+## ⚙️ 6. C++ above everything else
 
 **Everything in this project is written in C++.** Another language is accepted only where C++ is really impossible or
 clearly not practical. Pull requests that add Python, add C, or grow existing Python or C are not accepted.
@@ -97,7 +104,7 @@ keep it inside one small platform function with a Windows and a Linux version si
 spread through the code. Use `std::filesystem::path` for paths (no hard-coded `\` or drive letters), and keep new
 build steps runnable from bash.
 
-## 🎨 6. Assets: PS4 first, PS3 only when PS4 has none
+## 🎨 7. Assets: PS4 first, PS3 only when PS4 has none
 
 **Port an asset from the PS3 version only when the PS4 version does not have it.** If PS4 already has the asset
 anywhere, multiplayer or campaign, the import uses the PS4 one: it usually has better textures, and not bringing
@@ -105,7 +112,7 @@ over a second copy keeps the import smaller. For example, baseball-shirt Drake (
 as a campaign skin, so it is not ported from PS3. Before adding a PS3 asset to an import step, check PS4's data for
 the same asset.
 
-## 🧩 7. Helper source: working side by side
+## 🧩 8. Helper source: working side by side
 
 The Uncharted 3 helper's source is in [`u3mp/helper-source/`](u3mp/helper-source/README.md). Several people port
 its code at the same time, so these rules keep pull requests from colliding:
