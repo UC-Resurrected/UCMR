@@ -1923,27 +1923,11 @@ void frame_work() {
     }
 }
 
-// 2.11 The game data version on the multiplayer menu (PS3 per-frame net page update 0x447248): while the menu level
-// ("menu-temple") is loaded and ready, "%i.%02i.%03i" of 1, byte 2 and the low 16 bits of netInfo's first word,
-// scale 0.4 at (1140, 60) of the 1280x720 canvas. PS4 never fills that word: the value PS3 had (0x0009004e, as
-// online.cpp's room key) stands in, which reads "1.09.078".
-void draw_version_text() {
-    static double drawn_at = -1;
-    const double now = gamenet::clock();
-    if (now == drawn_at || net_sm() == 0) return;
-    const uint8_t *pkg = find_package(sid("menu-temple"));
-    if (!pkg || get<int32_t>(pkg + 0x30) != 7 || !(get<uint16_t>(pkg + 0x18) & 0x80)) return;
-    drawn_at = now;
-    uint32_t word = get<uint32_t>(g(kNetInfo));
-    if (word == 0) word = 0x0009004eu;
-    char text[32];
-    std::snprintf(text, sizeof text, "%i.%02i.%03i", 1, int((word >> 16) & 0xff), int(word & 0xffff));
-    hud_menu_text(1140.0f, 60.0f, 0.4f, text);
-}
+// 2.11 PS3 drew the game data version ("1.09.078") at the top right of the multiplayer menus; the owner does not
+// want it on PC (2026-11-27), so nothing draws it.
 
 U2MP_GUEST void page_handler(uint32_t *event) {
     if (!event || event[0] != 6) return;   // 6: per-frame update
-    draw_version_text();
     menus_help_bar_frame();   // help bar L1 / R1 pictures (MENUS.md 3.8.1)
     finish_leaving_game();
     leaving_step();

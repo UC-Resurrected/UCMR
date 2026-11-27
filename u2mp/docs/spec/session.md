@@ -502,7 +502,7 @@ rank/team, last seen NET_SM, the frame and rate-log counters, the net clock obje
 ### 5.3 Page handler (event pointer)
 
 Only when the pointer is non-NULL and event[0] == 6:
-0. (2026-11-25) After the menu version text: `menus_help_bar_frame()` (menus.cpp, `MENUS.md` 3.8.1: the help bar
+0. (2026-11-25) First: `menus_help_bar_frame()` (menus.cpp, `MENUS.md` 3.8.1: the help bar
    L1 / R1 pictures), even while not active.
 1. Finish leaving game (5.1), even while not active.
 2. If active, NET_SM == 18 and the Multiplayer page is not open: increase the closed-page counter; when
@@ -1244,9 +1244,8 @@ New session message types (older peers ignore them, 4.2 "12..0x0f ignored" no lo
   own`).
 - **Players Met (2.9).** Playing entered (every match and round start): the names (+0x20) of the used, not excluded
   trackers other than the local one go to `progression_note_met`.
-- **Version text (2.11).** Page handler, once per frame clock, NET_SM != 0 and package `menu-temple` in state 7
-  with flag 0x80: `hud_menu_text(1140, 60, 0.4, "%i.%02i.%03i")` of 1, bits 16..23 and bits 0..15 of netInfo +0
-  (0 there: PS3's 0x0009004e, "1.09.078").
+- **Version text (2.11).** PS3 draws the game data version ("1.09.078") at the top right of the multiplayer
+  menus. Not drawn on PC (owner, 2026-11-27): the page handler no longer draws it.
 
 ## Parity group H changes (2026-11-25, spec parity-h-session.md)
 
