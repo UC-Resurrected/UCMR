@@ -277,7 +277,8 @@ void apply_result(int16_t game, uint32_t ticks) {
 
 // ---- host: choosing and running the vote ----
 
-// Two net games of the chosen playlist whose maps this PC has. False when none qualifies.
+// Two net games of the chosen playlist whose maps every PC of the session loads alike (this PC has them; a map pack
+// map only when every member has the pack: session::net_game_same_map, PS3 0x49bdb8). False when none qualifies.
 bool pick_two_games(int16_t &a, int16_t &b) {
     const uint8_t *table = dc_lookup(kNetGamesTable);
     if (!table) return false;
@@ -293,7 +294,7 @@ bool pick_two_games(int16_t &a, int16_t &b) {
         bool accepted = any_type;
         for (int32_t t : types)
             if (t == type) accepted = true;
-        if (accepted && dlc_net_game_available(i)) pool.push_back(i);
+        if (accepted && session::net_game_same_map(i)) pool.push_back(i);
     }
     if (pool.empty()) return false;
 

@@ -55,4 +55,15 @@ constexpr bool round_runs_to_time(int32_t mode, int32_t start_players, int32_t a
     return solo_custom(mode, start_players) && alive_team != -1;
 }
 
+// Map packs of a net game's map (PS3 GetRandomNetGameIndexPair 0x49bdb8 and Start Match): a map of map pack `pack`
+// (1 or 2) is played only when every PC of the session has that pack (`packs`: the session's map-pack bits, 1 << pack,
+// ANDed for `all`, ORed for `any`, this PC included). The Ruins is the PC's one exception: the PS4 game ships its base
+// version, which a PC without map pack 1 plays (dlc.cpp), so it is played as well when no PC has the pack
+// (`has_base`); with some PCs having it and others not they would load different maps. Base maps (pack 0) always.
+constexpr bool pack_map_same_for_all(int32_t pack, bool has_base, uint32_t all, uint32_t any) {
+    if (pack != 1 && pack != 2) return true;
+    const uint32_t bit = 1u << pack;
+    return (all & bit) || (has_base && !(any & bit));
+}
+
 }  // namespace u2mp::start

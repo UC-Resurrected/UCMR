@@ -417,10 +417,11 @@ Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python im
     (DLC map titles, the MP menu texts of MENUS.md section 4) from `dlc-patch7`: no GOTY file has them. Without
     them the DLC map names and those menu labels stay blank. Needs the user's decision.
 11. **Ruins version mix**: solved 2026-11-27. With the map packs the whole map pack 1 Ruins is imported (main and
-    data paks included), as PS3 played it; without them the PS4 base Ruins stays with no map pack piece. Left: the
-    server spawn pak `ruins-multi-pak-ingame10` is the same file for both (the server sent one), and a custom game
-    hosted by a PC without map pack 1 offers the base Ruins to members that play the map pack one (runtime,
-    session.cpp `custom_start_ok` checks members only when the host has the pack).
+    data paks included), as PS3 played it; without them the PS4 base Ruins stays with no map pack piece. A session
+    plays a map pack map only when every PC has the pack, and the Ruins also when no PC has map pack 1 (all load the
+    base one); a party with and without map pack 1 never gets it (runtime: `session::net_game_same_map`, used by the
+    custom game Start Match check, the matchmaking pick and the map vote; DLC.md). Left: the server spawn pak
+    `ruins-multi-pak-ingame10` is one file for both Ruins (the server sent one, made for the map pack version).
 12. **The Temple's black water** is no conversion fault: the stage pak `treasure-multi` is the retail PS4 one, and
     its water materials have the PS3 constants, textures and planar-reflection technique exactly (checked
     2026-11-25), so no converter rule or PS3 water port changes it. It is a renderer case: PORT-RENDER.md, "The
@@ -448,8 +449,9 @@ in <id>" or "not found"):
 * Ruins: the map pack 1 one (see "What the game needs ...", DLC Ruins). PS3's `net.bin` says map pack 0 for every
   map; the server's `net-patch9.bin` makes both Ruins ids map pack 1 (facility 1, highrise / museum 2), so online
   PS3 played the Ruins only in parties that all had map pack 1, and their `dlc-map1.psarc` replaced `ruins-multi`
-  with its own. On PC, map pack 1 counts as present from its levels (dlc.cpp) and the session code compares the
-  members' packs the same way, so PCs with the pack play the map pack Ruins and PCs without it the PS4 base one.
+  with its own. On PC, map pack 1 counts as present from its levels (dlc.cpp), PCs with the pack play the map pack
+  Ruins and PCs without it the PS4 base one, and a session picks the Ruins only when all its PCs load the same one
+  (Known gaps 11).
 
 Test, 2026-11-27 (fresh `--out` folders, this PC, the converter of this commit):
 

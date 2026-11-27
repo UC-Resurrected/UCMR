@@ -80,7 +80,24 @@ static void test_in_match() {
     CHECK(!round_runs_to_time(kMatchmaking, 1, 0));
 }
 
+// Map pack maps: only when every PC has the pack; the Ruins (base version without map pack 1) also when none has.
+static void test_map_packs() {
+    const uint32_t base = 1, p1 = 1 | 2, p2 = 1 | 4, both = 1 | 2 | 4;
+    CHECK(pack_map_same_for_all(0, false, base, both));     // base maps always
+    CHECK(pack_map_same_for_all(-1, false, base, base));    // unknown map: the game decides
+    CHECK(pack_map_same_for_all(1, false, p1, p1));         // Facility, everyone has map pack 1
+    CHECK(!pack_map_same_for_all(1, false, base, p1));      // Facility, one PC lacks it
+    CHECK(!pack_map_same_for_all(1, false, base, base));    // Facility, nobody has it
+    CHECK(pack_map_same_for_all(2, false, both & p2, both)); // Highrise, everyone has map pack 2
+    CHECK(!pack_map_same_for_all(2, false, p1, both));      // Highrise, a PC with only map pack 1
+    CHECK(pack_map_same_for_all(1, true, p1, both));        // Ruins: all map pack 1 -> map pack version everywhere
+    CHECK(pack_map_same_for_all(1, true, base, base));      // Ruins: nobody has it -> base version everywhere
+    CHECK(!pack_map_same_for_all(1, true, base, p1));       // Ruins, mixed: host or member without the pack
+    CHECK(!pack_map_same_for_all(1, true, base, p2 | p1));
+}
+
 int main() {
+    test_map_packs();
     test_custom_any_mode_solo();
     test_matchmaking_minimum();
     test_playlist_minimum();

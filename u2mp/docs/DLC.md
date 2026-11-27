@@ -40,8 +40,15 @@ that the `/app0` overlay serves; there is no `dlc-map%d.psarc` on PC and nothing
 * **Custom game**: the call at `0x654f98` (dc lookup of the map table inside `0x654c80`) is
   retargeted (byte-checked) to a copy of the map table without the records of absent packs; their
   games get no map slot, exactly as an unknown map would.
-* **Matchmaking / playlists**: `dlc_net_game_available()` filters the random game of Start Match
-  (`session.cpp`) and the playlist game choice and playlist list (`menus.cpp`).
+* **Matchmaking / playlists**: `dlc_net_game_available()` filters the playlist game choice and playlist
+  list (`menus.cpp`).
+* **The same map on every PC** (`session::net_game_same_map`, rule `start::pack_map_same_for_all`): the
+  host's random game of Start Match (`session.cpp`), the map vote (`frontend3.cpp`) and the custom game
+  Start Match check take a map pack map only when every member has the pack (the members' map-pack byte,
+  PS3 0x49bdb8 / Start Match), and the Ruins also when no member has map pack 1 (all load the PS4 base
+  Ruins). A party with and without map pack 1 never gets the Ruins: in a custom game the host sees "a party
+  member lacks the map pack" when it has the pack, else the box for this PC lacking map pack 1 (it is the
+  one lacking the pack its members play). Members of older PCs that send no map-pack byte are not counted.
 
 ## Not verified
 

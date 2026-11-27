@@ -126,6 +126,9 @@ uint32_t dlc_packs();
 // dlc.cpp: the map pack of the *net-games* record's map (0 base, 1 / 2 map pack), -1 unknown; `local_ok` says
 // whether this PC can play that map (false when the pack is absent here; Ruins falls back to the base map).
 int32_t dlc_net_game_pack(int32_t index, bool &local_ok);
+// dlc.cpp: true when the *net-games* record's map is a map pack map that a PC without the pack plays as its base
+// version (the Ruins: map pack 1 replaces the PS4 base ruins-multi), so PCs with and without the pack load other maps.
+bool dlc_net_game_has_base(int32_t index);
 // menus.cpp: the playlist record's maximum party size (+0x1c) and maximum player count (+0x18, PS3 0x49a958);
 // 0 for an unknown playlist id.
 int32_t playlist_max_party(uint32_t id);
