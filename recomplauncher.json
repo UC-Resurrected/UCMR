@@ -4,7 +4,7 @@
   "name": "UCMR: Uncharted Collection Multiplayer Resurrected",
   "repo": "UC-Resurrected/UCMR",
   "start": {
-    "program": ["UCMR_Launcher.exe"]
+    "program": ["UCMR_Launcher.exe", "UCMR_Launcher"]
   },
   "folders": {
     "saves": ["{install}/analysis/uncharted-user/savedata"],
@@ -26,6 +26,10 @@
   "system": {
     "windows": {
       "version": "10",
+      "graphics": { "vulkan": "1.3" }
+    },
+    "linux": {
+      "glibc": "2.38",
       "graphics": { "vulkan": "1.3" }
     }
   }

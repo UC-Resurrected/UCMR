@@ -7,6 +7,7 @@ name: Build Linux
 on:
   push:
     branches: [main]
+    tags: ['v*']   # a release: the Linux package is added to the release the Windows build makes (linux-package)
   pull_request:
   workflow_dispatch:
 
@@ -102,17 +103,23 @@ jobs:
   # The Linux package (tools/package_linux.sh, §7.5): UCMR_linux.tar.gz with the Windows zip's layout, from every
   # push and pull request, built on Ubuntu 22.04 (glibc 2.35, the oldest system it is meant for) with a newer clang
   # from apt.llvm.org (the importers' C++20) and Qt from download.qt.io (aqtinstall; 22.04's own Qt 6.2 is too old).
-  # A test package: no private files (no helper), not part of a release yet (§13 phase 7). The check unpacks it,
-  # hides the Qt it was built with, starts the launcher without a screen until its core is ready and runs the
+  # With the private package files (as the Windows build: the helper's link, and the online programs, built here from
+  # their source) it is the player package; without them (a pull request from a fork) a test package without the helper.
+  # A pushed tag vX.Y.Z adds it to that release (§13 phase 7). The check unpacks it, hides the Qt it was built with,
+  # starts the launcher without a screen until its core is ready, asks the online program for its hello and runs the
   # importers' checks on the unpacked folder. The game runtime comes from the runtime job (gpu-tests, Ubuntu 24.04).
   linux-package:
     name: Linux package
     needs: gpu-tests   # the game runtime is built there (C++23 toolchain) and staged into this package
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    # a release also waits for the Windows build's release (up to its 150 minutes)
+    timeout-minutes: ${{ startsWith(github.ref, 'refs/tags/v') && 240 || 60 }}
+    permissions:
+      contents: write   # adding the package to a tag's release
     env:
       QT_VERSION: 6.8.3
       LLVM_VERSION: 18
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -163,10 +170,37 @@ jobs:
           name: runtime-linux
           path: dist/runtime
 
+      # The private package files (another repository, the Windows build's two secrets): a release needs them, other
+      # builds go on without them. The online programs are built from its source on this system (so they run where the
+      # launcher runs); then its apply program (apply.cpp, Linux build) puts its Linux files in. Nothing of that source
+      # may reach this public log: the builds print nothing.
+      - name: Private package files
+        env:
+          EXTRA_REPO: ${{ vars.PACKAGE_EXTRA_REPO || secrets.PACKAGE_EXTRA_REPO }}
+          EXTRA_TOKEN: ${{ secrets.PACKAGE_EXTRA_TOKEN }}
+        run: |
+          if [[ -z $EXTRA_REPO || -z $EXTRA_TOKEN ]]; then
+            [[ $IS_RELEASE == true ]] && { echo "::error::the private package files are not set up"; exit 1; }
+            echo "no private package files: building without them"
+            echo "PACKAGE_WITHOUT_HELPER=1" >> "$GITHUB_ENV"   # tools/package_linux.sh: a test package without the helper
+            exit 0
+          fi
+          files=$RUNNER_TEMP/private-files
+          git clone -q --depth 1 "https://x-access-token:${EXTRA_TOKEN}@github.com/${EXTRA_REPO}.git" "$files" > /dev/null 2>&1 ||
+            { echo "::error::the private package files could not be fetched"; exit 1; }
+          CC="clang-$LLVM_VERSION" CXX="clang++-$LLVM_VERSION" bash "$files/online-source/build.sh" > /dev/null 2>&1 ||
+            { echo "::error::the online programs did not build"; exit 1; }
+          install -m 755 "$files/online-source/build/uncharted_online" "$files/online-source/build/u2_online" \
+            "$files/launcher-files/u3mp/patcher/online/"
+          "clang++-$LLVM_VERSION" -std=c++20 -O2 "$files/apply.cpp" -o "$files/apply" > /dev/null 2>&1 ||
+            { echo "::error::the private package files' apply program did not build"; exit 1; }
+          APPLY_FILES="$files" "$files/apply" "$GITHUB_WORKSPACE"
+          rm -rf "$files"
+
       - name: Package
         run: |
           export QT_DIR=$(ls -d "$HOME/Qt/$QT_VERSION"/*gcc_64 | head -1)
-          CXX="clang++-$LLVM_VERSION" PACKAGE_WITHOUT_HELPER=1 bash tools/package_linux.sh
+          CXX="clang++-$LLVM_VERSION" bash tools/package_linux.sh
 
       - name: Contents
         run: |
@@ -191,6 +225,16 @@ jobs:
           # the launcher update's installer, which an update of this package needs (updater.cpp REQUIRED)
           "$pkg/tools/apply_update" --help | grep -q '^usage: apply_update' ||
             { echo "::error title=package::tools/apply_update is missing or does not start"; exit 1; }
+          # the online programs (private files): only the Linux ones, their libraries found, the account client's hello
+          if [[ ${PACKAGE_WITHOUT_HELPER:-} != 1 ]]; then
+            online=$pkg/u3mp/patcher/online
+            if ls "$online"/*.exe > /dev/null 2>&1; then echo "::error title=package::Windows online programs in the Linux package"; exit 1; fi
+            missing=$(ldd "$online/uncharted_online" "$online/u2_online" 2>&1 | grep 'not found\|not a dynamic' || true)
+            if [[ -n $missing ]]; then echo "::error title=package::online programs: $missing"; exit 1; fi
+            reply=$(echo '{"op":"hello"}' | timeout 30 "$online/uncharted_online" || true)
+            grep -q '"abi"' <<< "$reply" || { echo "::error title=package::the online program does not answer"; exit 1; }
+            echo "online programs: libraries found, the account client answers"
+          fi
           OUT=$pkg bash tools/importer_smoke.sh
           # the game runtime (built on Ubuntu 24.04 by the runtime job): its libraries, and a start without a game where
           # this system's C library is new enough for it
@@ -213,6 +257,23 @@ jobs:
           name: UCMR_linux
           path: dist/UCMR_linux.tar.gz
           compression-level: 0   # already compressed
+
+      # A release: the Windows build makes it (build-windows.yml, with the tag's notes); this adds the Linux package
+      # once it is there. GitHub records the file's SHA-256, which the launcher's update checks before installing.
+      - name: Release
+        if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(tr -d '[:space:]' < tools/VERSION)
+          [[ $TAG == "v$version" ]] || { echo "::error::the tag $TAG is not tools/VERSION ($version)"; exit 1; }
+          for i in $(seq 1 170); do
+            gh release view "$TAG" > /dev/null 2>&1 && break
+            sleep 60
+          done
+          gh release view "$TAG" > /dev/null 2>&1 || { echo "::error::no release $TAG (did the Windows build fail?)"; exit 1; }
+          gh release upload "$TAG" dist/UCMR_linux.tar.gz
 
   # The game runtime (gow3_pc/build.sh: gow3-probe with the GPU library and every C++ subsystem, the same CMake
   # target as Windows) and the unit tests that need no game (gow3_pc/tests/run_unit_tests.sh), with lavapipe as a
