@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
+
+#include "png.h"   // the window icon (Windows: WIC)
 #endif
 
 #include <algorithm>
@@ -539,10 +541,23 @@ struct Rgb {
 };
 
 #ifndef _WIN32
-// Linux: no PNG decoder yet (Windows decodes through WIC), so the game window keeps SDL's default icon
+// Linux: png.h decodes what WIC decodes on Windows; the RGB of each pixel, the alpha left out (as WIC's 24-bit RGB)
 bool load_rgb(const std::wstring &path, Rgb &out, std::string &error) {
-    error = "decoding " + P(path).string() + ": not on Linux yet";
-    return false;
+    std::string file;
+    png::Image image;
+    if (!port::read(P(path), file, (size_t)1 << 28) || !png::decode(file, image)) {
+        error = "cannot read " + P(path).string();
+        return false;
+    }
+    out.w = image.w;
+    out.h = image.h;
+    out.px.resize((size_t)image.w * image.h * 3);
+    for (size_t i = 0, j = 0; j < out.px.size(); i += 4, j += 3) {
+        out.px[j] = image.rgba[i];
+        out.px[j + 1] = image.rgba[i + 1];
+        out.px[j + 2] = image.rgba[i + 2];
+    }
+    return true;
 }
 #else
 bool load_rgb(const std::wstring &path, Rgb &out, std::string &error) {

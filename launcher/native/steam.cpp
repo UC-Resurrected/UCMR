@@ -33,7 +33,7 @@
 #include <fstream>
 #include <system_error>
 
-#include <zlib.h>
+#include "png.h"
 #endif
 
 #include <algorithm>
@@ -789,195 +789,28 @@ bool save_picture(Com &com, const Picture &pic, const std::wstring &path) {
     return SUCCEEDED(frame->WritePixels((UINT)pic.h, stride, (UINT)rows.size(), rows.data())) &&
            SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
 }
-#else   // Linux: PNG in and out over zlib (the same pictures WIC gives: 8-bit RGBA in, RGB or RGBA PNG out)
+#else   // Linux: PNG in and out through png.h (the same pictures WIC gives: 8-bit RGBA in, RGB or RGBA PNG out)
 struct Com {};   // no imaging library to start
-
-uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
-
-// the PNG filter's predictor of byte i of a row (a: left, b: up, c: up-left)
-uint8_t paeth(int a, int b, int c) {
-    const int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
-    return (uint8_t)(pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
-}
-
-// undoes the filters of `rows` rows of `stride` bytes (each row begins with its filter type); bpp: bytes per pixel,
-// at least 1. false on an unknown filter type.
-bool unfilter(uint8_t *data, size_t rows, size_t stride, size_t bpp) {
-    std::vector<uint8_t> zero(stride, 0);
-    const uint8_t *prior = zero.data();
-    for (size_t y = 0; y < rows; ++y) {
-        uint8_t *row = data + y * (stride + 1);
-        const uint8_t type = row[0];
-        uint8_t *x = row + 1;
-        for (size_t i = 0; i < stride; ++i) {
-            const int a = i >= bpp ? x[i - bpp] : 0, b = prior[i], c = i >= bpp ? prior[i - bpp] : 0;
-            switch (type) {
-            case 0: break;
-            case 1: x[i] = (uint8_t)(x[i] + a); break;
-            case 2: x[i] = (uint8_t)(x[i] + b); break;
-            case 3: x[i] = (uint8_t)(x[i] + ((a + b) >> 1)); break;
-            case 4: x[i] = (uint8_t)(x[i] + paeth(a, b, c)); break;
-            default: return false;
-            }
-        }
-        prior = x;
-    }
-    return true;
-}
 
 bool load_picture(Com &, const std::wstring &path, Picture &pic) {
     std::string file;
-    if (!is_file(path) || !read_file(path, file) || file.size() < 8 + 25 ||
-        file.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) != 0)
-        return false;
-    const uint8_t *d = (const uint8_t *)file.data();
-    uint32_t w = 0, h = 0;
-    int depth = 0, type = -1, interlace = 0;
-    std::vector<uint8_t> palette, packed;
-    for (size_t at = 8; at + 12 <= file.size();) {
-        const uint32_t n = be32(d + at);
-        if (n > file.size() - at - 12) return false;
-        const std::string kind(file, at + 4, 4);
-        const uint8_t *body = d + at + 8;
-        if (kind == "IHDR" && n >= 13) {
-            w = be32(body);
-            h = be32(body + 4);
-            depth = body[8];
-            type = body[9];
-            interlace = body[12];
-            if (body[10] != 0 || body[11] != 0 || interlace > 1) return false;
-        } else if (kind == "PLTE") {
-            palette.assign(body, body + n);
-        } else if (kind == "IDAT") {
-            packed.insert(packed.end(), body, body + n);
-        } else if (kind == "IEND") {
-            break;
-        }
-        at += 12 + n;
-    }
-    if (!w || !h || w > 16384 || h > 16384) return false;
-    int channels;
-    switch (type) {
-    case 0: channels = 1; break;
-    case 2: channels = 3; break;
-    case 3: channels = 1; break;
-    case 4: channels = 2; break;
-    case 6: channels = 4; break;
-    default: return false;
-    }
-    const bool depth_ok = type == 0 ? (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)
-                        : type == 3 ? (depth == 1 || depth == 2 || depth == 4 || depth == 8)
-                                    : (depth == 8 || depth == 16);
-    if (!depth_ok || (type == 3 && palette.size() < 3)) return false;
-    const size_t bits = (size_t)channels * depth, bpp = std::max<size_t>(1, bits / 8);
-    // the passes: the whole image, or Adam7's seven (start x, start y, step x, step y)
-    static const int adam7[7][4] = {{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}};
-    struct Pass { uint32_t x0, y0, dx, dy, w, h; };
-    std::vector<Pass> passes;
-    if (!interlace) {
-        passes.push_back({0, 0, 1, 1, w, h});
-    } else {
-        for (auto &a : adam7) {
-            const uint32_t x0 = (uint32_t)a[0], y0 = (uint32_t)a[1], dx = (uint32_t)a[2], dy = (uint32_t)a[3];
-            const uint32_t pw = w > x0 ? (w - x0 + dx - 1) / dx : 0, ph = h > y0 ? (h - y0 + dy - 1) / dy : 0;
-            passes.push_back({x0, y0, dx, dy, pw, ph});
-        }
-    }
-    size_t total = 0;
-    for (const Pass &p : passes)
-        if (p.w && p.h) total += (size_t)p.h * (1 + (p.w * bits + 7) / 8);
-    std::vector<uint8_t> raw(total);
-    uLongf got = (uLongf)raw.size();
-    if (uncompress(raw.data(), &got, packed.data(), (uLong)packed.size()) != Z_OK || got != raw.size()) return false;
-    pic.w = (int)w;
-    pic.h = (int)h;
-    pic.px.assign((size_t)w * h * 4, 255);
-    size_t offset = 0;
-    for (const Pass &p : passes) {
-        if (!p.w || !p.h) continue;
-        const size_t stride = (p.w * bits + 7) / 8;
-        uint8_t *data = raw.data() + offset;
-        if (!unfilter(data, p.h, stride, bpp)) return false;
-        offset += (size_t)p.h * (stride + 1);
-        for (uint32_t y = 0; y < p.h; ++y) {
-            const uint8_t *row = data + (size_t)y * (stride + 1) + 1;
-            // sample k of the row (a channel value, depth bits, the most significant first), as 8 bits
-            auto sample8 = [&](size_t k) -> uint8_t {
-                if (depth == 16) return row[k * 2];
-                if (depth == 8) return row[k];
-                const size_t bit = k * depth;
-                const unsigned v = (row[bit / 8] >> (8 - depth - bit % 8)) & ((1u << depth) - 1);
-                return type == 3 ? (uint8_t)v : (uint8_t)(v * 255 / ((1u << depth) - 1));
-            };
-            for (uint32_t x = 0; x < p.w; ++x) {
-                uint8_t *o = pic.at((int)(p.x0 + x * p.dx), (int)(p.y0 + y * p.dy));
-                const size_t k = (size_t)x * channels;
-                if (type == 3) {
-                    const size_t i = (size_t)(depth == 8 ? row[x] : sample8(x)) * 3;
-                    if (i + 2 < palette.size()) { o[0] = palette[i]; o[1] = palette[i + 1]; o[2] = palette[i + 2]; }
-                    else o[0] = o[1] = o[2] = 0;
-                } else if (channels <= 2) {
-                    o[0] = o[1] = o[2] = sample8(k);
-                } else {
-                    o[0] = sample8(k);
-                    o[1] = sample8(k + 1);
-                    o[2] = sample8(k + 2);
-                }
-            }
-        }
-    }
-    return true;   // source art is treated as fully opaque (as the Windows body: alpha 255)
+    png::Image image;
+    if (!is_file(path) || !read_file(path, file) || !png::decode(file, image)) return false;
+    pic.w = image.w;
+    pic.h = image.h;
+    pic.px = std::move(image.rgba);
+    for (size_t i = 3; i < pic.px.size(); i += 4) pic.px[i] = 255;   // source art is treated as fully opaque
+    return true;
 }
 
-void put_chunk(std::string &out, const char *kind, const std::string &body) {
-    auto u32 = [&](uint32_t v) { for (int s = 24; s >= 0; s -= 8) out += (char)(v >> s); };
-    u32((uint32_t)body.size());
-    const size_t start = out.size();
-    out.append(kind, 4);
-    out += body;
-    u32((uint32_t)crc32(0, (const Bytef *)out.data() + start, (uInt)(out.size() - start)));
-}
-
-// opaque pictures are written as 24-bit RGB, the logo (has_alpha) as RGBA; each row with the filter that leaves the
-// smallest sum of byte values (the usual choice), the whole compressed at zlib's best level
 bool save_picture(Com &, const Picture &pic, const std::wstring &path) {
-    if (pic.w <= 0 || pic.h <= 0) return false;
-    const size_t channels = pic.has_alpha ? 4 : 3, stride = (size_t)pic.w * channels;
-    std::vector<uint8_t> rows((stride + 1) * pic.h), plain(stride), prior(stride, 0), best(stride), trial(stride);
-    for (int y = 0; y < pic.h; ++y) {
-        for (int x = 0; x < pic.w; ++x)
-            for (size_t c = 0; c < channels; ++c) plain[(size_t)x * channels + c] = pic.at(x, y)[c];
-        unsigned long best_sum = ~0ul;
-        uint8_t best_type = 0;
-        for (uint8_t type = 0; type < 5; ++type) {
-            unsigned long sum = 0;
-            for (size_t i = 0; i < stride; ++i) {
-                const int a = i >= channels ? plain[i - channels] : 0, b = prior[i], c = i >= channels ? prior[i - channels] : 0;
-                const int pred = type == 0 ? 0 : type == 1 ? a : type == 2 ? b : type == 3 ? (a + b) >> 1 : paeth(a, b, c);
-                trial[i] = (uint8_t)(plain[i] - pred);
-                sum += trial[i] < 128 ? trial[i] : 256 - trial[i];
-            }
-            if (sum < best_sum) { best_sum = sum; best_type = type; best = trial; }
-        }
-        uint8_t *row = rows.data() + (size_t)y * (stride + 1);
-        row[0] = best_type;
-        std::memcpy(row + 1, best.data(), stride);
-        prior = plain;
-    }
-    std::vector<uint8_t> packed(compressBound((uLong)rows.size()));
-    uLongf size = (uLongf)packed.size();
-    if (compress2(packed.data(), &size, rows.data(), (uLong)rows.size(), Z_BEST_COMPRESSION) != Z_OK) return false;
-    std::string ihdr;
-    for (uint32_t v : {(uint32_t)pic.w, (uint32_t)pic.h})
-        for (int s = 24; s >= 0; s -= 8) ihdr += (char)(v >> s);
-    ihdr += (char)8;
-    ihdr += (char)(pic.has_alpha ? 6 : 2);
-    ihdr.append(3, '\0');
-    std::string out("\x89PNG\r\n\x1a\n", 8);
-    put_chunk(out, "IHDR", ihdr);
-    put_chunk(out, "IDAT", std::string((const char *)packed.data(), size));
-    put_chunk(out, "IEND", "");
-    return write_file(path, out);
+    png::Image image;
+    image.w = pic.w;
+    image.h = pic.h;
+    image.rgba = pic.px;
+    // opaque images are saved as 24-bit RGB; only the logo (which has has_alpha set) is saved with transparency
+    const std::string file = png::encode(image, pic.has_alpha);
+    return !file.empty() && write_file(path, file);
 }
 #endif
 
