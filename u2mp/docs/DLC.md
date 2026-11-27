@@ -18,6 +18,13 @@ header comment has the details.
 | GetDlcRequired | `0x5ab090` | trophy record `+0x20` | trophy text only |
 | licence table | net.bin `0xf5899ce4` (`dlc1.edat`, `skin-dlc2/3.edat`, ...) | | PS3 leftover, no PS4 reader |
 
+On PS3 1.10 the map pack field comes from the server: the `net.bin` of GOTY NPUA80698 and of the BCUS title
+updates `dlc-patch5/7` has 0 in every map record (0x28 bytes there), and the server live data
+`net-patch9.bin` (NPUA80698DATA2) replaces the map table with facility and both Ruins ids = 1, highrise and museum =
+2 (checked 2026-11-27). So online, PS3 offered the Ruins only to parties that all owned map pack 1, whose
+`dlc-map1.psarc` (mounted over the base archives) replaced `ruins-multi` with the map pack version: the import takes
+that Ruins whenever it imports the map packs (IMPORT.md, "Map packs from any release").
+
 So nothing on PS4 gates the maps by entitlement; the problem is the opposite one: the DLC maps are
 always listed. No entitlement is faked and no archive mount is changed (the import writes loose files
 that the `/app0` overlay serves; there is no `dlc-map%d.psarc` on PC and nothing asks for one).
@@ -27,7 +34,7 @@ that the `/app0` overlay serves; there is no `dlc-map%d.psarc` on PC and nothing
 * **Map pack present** = through the runtime's `/app0` resolution (overlays first),
   `u2data/build/main/pak22/ps4/<level>.pak` exists, `<level>-ingame10.pak` exists for the main levels,
   and `pak22_ps4.txt` has `level-name <level>` (the ruins wide level may also be a `package` line):
-  * map pack 1: `facility-multi`, `ruins-multi-wide` (the map pack Ruins, `--dlc-ruins`)
+  * map pack 1: `facility-multi`, `ruins-multi-wide` (the map pack Ruins: imported with the map packs)
   * map pack 2: `highrise-multi-2`, `museum-multi`, `museum-multi-eva`
   The result is logged once at start (`dlc: map pack N imported / not imported`).
 * **Custom game**: the call at `0x654f98` (dc lookup of the map table inside `0x654c80`) is

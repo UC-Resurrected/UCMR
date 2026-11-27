@@ -2,14 +2,16 @@
 // player's own PS3 copy and converted to the PS4 format, as an overlay folder.
 //
 //   u2import --ps4 <PS4 game folder> --ps3 <PS3 base folder> [--ps3-dlc <PS3 DLC folder>] --out <folder>
-//            [--ps3-data <PS3 game-data folder>] [--dns <IPv4>] [--groups A,B,C,D,E] [--speech-langs english,...] [--dlc-ruins]
+//            [--ps3-data <PS3 game-data folder>] [--dns <IPv4>] [--groups A,B,C,D,E] [--speech-langs english,...] [--no-dlc-ruins]
 //            [--drop-navmesh] [--only REGEX] [--ps3-elf EBOOT.elf] [--objdump PATH] [--ffmpeg PATH] [--force] [--update] [--validate]
 //        u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>   (maintainers)
 //   u2import --shipped-id          the fingerprint of the installed import (the launcher compares it with state.json)
 //
 //   --ps4      the Collection's game folder (holds u2data/) or u2data itself
 //   --ps3      PS3 Uncharted 2 (GOTY NPUA80698): USRDIR, its parent or build/main (archives + all-patches.psarc)
-//   --ps3-dlc  folder with dlc-map1/2.psarc and dlc-patch*.psarc; without it the map packs (groups C, D) are skipped
+//   --ps3-dlc  an install with dlc-map1/2.psarc (RPCS3 dev_hdd0/game/<id>, its USRDIR or build/main; the launcher picks
+//              it); without it the map packs (groups C, D) are skipped. With it the Ruins is map pack 1's
+//              (--no-dlc-ruins keeps the PS4 base Ruins). Its title updates (dlc-patch*) are read only for group F.
 //   --ps3-data the PS3 game-data folder (RPCS3 dev_hdd0/game or a <id>DATA2 folder): net-patch9.bin and the server's
 //              map spawn paks
 //   --dns      the Uncharted 2 community server DNS: the online program (u3mp/patcher/online/uncharted_online.exe
@@ -654,13 +656,18 @@ int Importer::run() {
     save();
     try {
         ps4 = std::make_unique<PS4>(a.ps4);
-        ps3 = std::make_unique<PS3>(a.ps3, a.ps3_dlc);
+        // the DLC folder's title updates only for group F (its rows come from dlc-patch7): sources.cpp
+        bool group_f = false;
+        for (const std::string &g : split(a.groups, ','))
+            if (!strip(g).empty() && toupper(uint8_t(strip(g)[0])) == 'F') group_f = true;
+        ps3 = std::make_unique<PS3>(a.ps3, a.ps3_dlc, group_f);
     } catch (const std::runtime_error &e) {
         return finish("failed", {{"error", str(e.what())}});
     }
     std::string arcs;
     for (size_t i = 0; i < ps3->archives.size(); i++) arcs += (i ? ", " : "") + basename(ps3->archives[i]);
     lg(fmt("PS3 archives: %zu (%s)", ps3->archives.size(), arcs.c_str()));
+    lg("PS3 map packs: " + (a.ps3_dlc.empty() ? std::string("none given (GOTY-only import)") : "from " + a.ps3_dlc));
     // the decrypted PS3 EBOOT.elf is required: no import without it
     const std::string elf = !a.ps3_elf.empty() ? a.ps3_elf : S(ps3->base_main.parent_path().parent_path() / "EBOOT.elf");
     bool ok = false;
@@ -690,7 +697,12 @@ int Importer::run() {
         for (const std::string &l : split(a.speech_langs, ',')) langs.insert(strip(l));
     else
         for (const auto &[k, v] : SPEECH_LANGS) langs.insert(v);
-    dlc_ruins = a.dlc_ruins && !a.ps3_dlc.empty() && !a.no_dlc_ruins;
+    // With the map packs the Ruins is map pack 1's (unless --no-dlc-ruins): PS3 1.10's server data (net-patch9.bin) marks
+    // both Ruins map ids as map pack 1 (the disc and GOTY net.bin say 0), so PS3 only played the Ruins with players who
+    // all had map pack 1, and dlc-map1.psarc, mounted over the base archives, gave every one of them its ruins-multi.
+    // The runtime counts map pack 1 as present from its levels (gow3_pc/src/u2mp/dlc.cpp), so every PC with the pack
+    // plays the same Ruins. --dlc-ruins is still accepted (it was the opt-in before).
+    dlc_ruins = !a.ps3_dlc.empty() && !a.no_dlc_ruins;
     ffmpeg = find_ffmpeg(a.ffmpeg);
     lg("ffmpeg: " + (ffmpeg.empty() ? std::string("not found (banks with MP3 samples are skipped)") : ffmpeg));
     ctx.ps3 = ps3.get();
@@ -764,6 +776,15 @@ int Importer::run() {
                 if (!pp || text_of(pp->get(k)) != text_of(parts.get(k))) why += (why.empty() ? "" : ", ") + words;
         } else if (!step_outputs_ok(s.id))
             why = "its files are not as the last run left them";
+        if (why.empty() && s.first) {   // failed and unsupported files are tried again on every run
+            long long again = 0;
+            for (const Row &r : rows)
+                if (const Value *it = item(r["key"])) {
+                    const std::string st = text_of(it->get("status"));
+                    again += st == "failed" || st == "unsupported";
+                }
+            if (again) why = fmt("%lld files failed last time", again);
+        }
         if (why.empty()) {
             lg("        no change (already applied)");
             event(obj({{"phase", str("recipe")}, {"id", str(s.id)}, {"status", str("ok")}, {"note", str("no change")}}));
@@ -1641,7 +1662,7 @@ int main(int argc, char **argv) {   // Linux: the arguments are UTF-8 already
                 std::fputs("usage: u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>\n", stderr);
                 return 2;
             }
-            const PS3 ps3(o["--ps3"], o["--ps3-dlc"]);
+            const PS3 ps3(o["--ps3"], o["--ps3-dlc"], true);
             const PS4 ps4(o["--ps4"]);
             twin_validate(ps3, ps4, P(o["--work"]));
             return 0;

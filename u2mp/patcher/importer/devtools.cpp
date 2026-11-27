@@ -97,7 +97,7 @@ int dc_info(const fs::path &path) {
 
 int dc_learn_test(bool test, const std::vector<std::string> &v) {
     if (v.size() < 5) throw std::runtime_error("usage: u2import --dc learn|test <ps3 base> <ps4 game> <schema.json> [net-patch9.bin]");
-    const PS3 ps3(v[2], "");
+    const PS3 ps3(v[2], "", false);
     const PS4 ps4(v[3]);
     const fs::path dcdir = ps4.main / "dc1" / "ps4", schema_path = P(v[4]);
     const auto pl = dc_pairs(ps3, dcdir);
