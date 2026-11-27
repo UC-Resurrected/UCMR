@@ -113,6 +113,18 @@ int main() {
               back.max == 10 && back.key == 0x0009004e && back.state == pres::kOldParty,
           "invite head round-trips");
 
+    // PS3 invite attachment (16 bytes: key, unused, party room; big-endian).
+    uint8_t p3[pres::kPs3InviteSize];
+    check(pres::encode_ps3_invite(0x0009004e, 0x0102030405060708ull, p3) == 16 && be32(p3) == 0x0009004e &&
+              be32(p3 + 4) == 0 && be32(p3 + 8) == 0x01020304 && be32(p3 + 12) == 0x05060708,
+          "PS3 invite layout");
+    check(pres::decode_ps3_invite(p3, 16, back) && back.key == 0x0009004e && back.room == 0x0102030405060708ull &&
+              back.kind == 1,
+          "PS3 invite read: a party room");
+    check(!pres::decode_ps3_invite(p3, 15, back) && !pres::decode_ps3_invite(m, sizeof m, back) &&
+              !pres::decode_old_room(p3, 16, back),
+          "the PS3 form and the PC head are never taken for each other");
+
     // PC join hint (presence comment).
     const std::string h = pres::join_hint(0x1a2b3c4d5e6full, 2, 3, 10);
     check(h == "u2mp-join 1a2b3c4d5e6f 2 3 10", "join hint text");

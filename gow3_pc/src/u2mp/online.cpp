@@ -1303,7 +1303,9 @@ void on_invite(const U2oEvent &e) {
         log("online: message from %s (type %u) ignored", from.c_str(), unsigned(m.main_type));
         return;
     }
-    if (!pres::decode_old_room(m.data, std::min<size_t>(m.data_len, sizeof m.data), d) || !d.room) {   // 32+ bytes
+    // The PC head (32+ bytes, "U2MP") or the PS3 form (16 bytes, PS3 0x43a164: key and party room).
+    const size_t len = std::min<size_t>(m.data_len, sizeof m.data);
+    if (!(pres::decode_old_room(m.data, len, d) || pres::decode_ps3_invite(m.data, len, d)) || !d.room) {
         log("online: invite from %s without a room: ignored", from.c_str());
         return;
     }
@@ -2858,11 +2860,25 @@ bool invite_friend(int i) {
     m.main_type = U2O_MSG_INVITE;
     std::snprintf(m.subject, sizeof m.subject, "Uncharted 2 invite");
     std::snprintf(m.body, sizeof m.body, "%s invites you to play Uncharted 2: Among Thieves.", session::local_name().c_str());
-    m.data_len = uint32_t(pres::encode_old_room(d, m.data));
+    // A friend known as a PC (its presence has the join hint or old data) gets the PC head (the room we are in); any
+    // other friend, a PS3 among them, the PS3 form (PS3 0x43a164: key and our party room; crossplay-ps3.md).
+    FriendPresence p;
+    const bool pc = friend_presence(friend_list[size_t(i)], p) && p.pc;
+    if (!pc) {
+        if (!party_room.id) {
+            notice("There is no party to invite to yet. Try again in a moment.");
+            return false;
+        }
+        d.kind = kKindParty;
+        d.room = party_room.id;
+        m.data_len = uint32_t(pres::encode_ps3_invite(d.key, d.room, m.data));
+    } else {
+        m.data_len = uint32_t(pres::encode_old_room(d, m.data));
+    }
     const char *npids[] = {to.c_str()};
     const uint64_t id = api.send_message(npids, 1, &m);
-    log("online: invite to %s: %s room %llx (request %llu)", to.c_str(), kind_name(d.kind), (unsigned long long)d.room,
-        (unsigned long long)id);
+    log("online: invite to %s (%s form): %s room %llx (request %llu)", to.c_str(), pc ? "PC" : "PS3", kind_name(d.kind),
+        (unsigned long long)d.room, (unsigned long long)id);
     request(id, Pending{Req::Message, d.room, d.kind, false, "invite"});
     notice(id ? "Invite sent to " + to + "." : "The invite could not be sent.");
     return id != 0;

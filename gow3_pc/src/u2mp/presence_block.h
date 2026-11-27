@@ -172,6 +172,25 @@ inline size_t encode_old_room(const OldRoom &r, uint8_t out[kLegacyV1Size]) {
     return kLegacyV1Size;
 }
 
+// ---- PS3 invite attachment (PS3 0x43a164: message main type INVITE, 16 bytes) ----------------------
+// +0 u32 build key, +4 unused (not cleared on PS3), +8 u64 party room id (0 when the sender has none); big-endian.
+constexpr size_t kPs3InviteSize = 16;
+inline size_t encode_ps3_invite(uint32_t key, uint64_t party_room, uint8_t out[kPs3InviteSize]) {
+    std::memset(out, 0, kPs3InviteSize);
+    detail::put32(out, key);
+    detail::put64(out + 8, party_room);
+    return kPs3InviteSize;
+}
+// False unless it is exactly 16 bytes (an old PC head is 32 or more and starts with "U2MP").
+inline bool decode_ps3_invite(const uint8_t *data, size_t len, OldRoom &r) {
+    r = OldRoom{};
+    if (!data || len != kPs3InviteSize) return false;
+    r.key = detail::get32(data);
+    r.room = detail::get64(data + 8);
+    r.kind = 1;   // a party room
+    return true;
+}
+
 // Old presence data as a block with the PS3 meaning. False for "this game, not in multiplayer" (state menu) and
 // for data that is not old presence. `details` is false for version 1 (only "in multiplayer" is known).
 inline bool decode_legacy(const uint8_t *data, size_t len, Block &b, OldRoom &join, bool &details) {
