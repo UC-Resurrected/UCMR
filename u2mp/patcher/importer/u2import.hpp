@@ -55,7 +55,9 @@ struct Entry {
 
 class PS3 {
 public:
-    PS3(const std::string &base, const std::string &dlc);
+    // title_updates: also mount the DLC folder's title updates (dlc-patch2/3/5/7, speech updates); only group F and
+    // the maintainers' twin validation need them (sources.cpp)
+    PS3(const std::string &base, const std::string &dlc, bool title_updates);
     std::vector<const Entry *> candidates(const std::string &key) const;   // newest source first
     std::vector<std::string> archives;
     fs::path base_main;

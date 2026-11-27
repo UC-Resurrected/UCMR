@@ -52,6 +52,7 @@ constexpr uint64_t kMatchSession = 0x1065b08;
 constexpr uint64_t kNetInfo = 0x104f1c8;
 constexpr uint64_t kNgm = 0x113b760;
 constexpr uint64_t kNpd = 0x11474f8;
+constexpr uint64_t kNpdMatchmaking = 0x1b0;   // u32 bit 0: Profile "Matchmaking" 0 Default / 1 DLC (saved)
 constexpr uint64_t kPackageTable = 0x1130390;
 constexpr uint64_t kNetImageTable = 0x1130078;
 constexpr uint64_t kGameFrame = 0x11162c4;
@@ -614,6 +615,11 @@ void request_match_skin_packages() {
         asked.emplace_back(actor);
         request_actor_package(actor);
     };
+    // Co-op: every player plays the net game's character of their rank, not their own skin (unlocks.md 5.8a).
+    if (unlocks_coop_character(0)) {
+        for (int rank = 0; rank < 3; ++rank) ask(unlocks_coop_character(rank));
+        return;
+    }
     ask(unlocks_local_skin());
     if (std::strcmp(unlocks_local_villain() ? unlocks_local_villain() : "", unlocks_local_skin() ? unlocks_local_skin() : "") != 0)
         ask(unlocks_local_villain());
@@ -1918,27 +1924,11 @@ void frame_work() {
     }
 }
 
-// 2.11 The game data version on the multiplayer menu (PS3 per-frame net page update 0x447248): while the menu level
-// ("menu-temple") is loaded and ready, "%i.%02i.%03i" of 1, byte 2 and the low 16 bits of netInfo's first word,
-// scale 0.4 at (1140, 60) of the 1280x720 canvas. PS4 never fills that word: the value PS3 had (0x0009004e, as
-// online.cpp's room key) stands in, which reads "1.09.078".
-void draw_version_text() {
-    static double drawn_at = -1;
-    const double now = gamenet::clock();
-    if (now == drawn_at || net_sm() == 0) return;
-    const uint8_t *pkg = find_package(sid("menu-temple"));
-    if (!pkg || get<int32_t>(pkg + 0x30) != 7 || !(get<uint16_t>(pkg + 0x18) & 0x80)) return;
-    drawn_at = now;
-    uint32_t word = get<uint32_t>(g(kNetInfo));
-    if (word == 0) word = 0x0009004eu;
-    char text[32];
-    std::snprintf(text, sizeof text, "%i.%02i.%03i", 1, int((word >> 16) & 0xff), int(word & 0xffff));
-    hud_menu_text(1140.0f, 60.0f, 0.4f, text);
-}
+// 2.11 PS3 drew the game data version ("1.09.078") at the top right of the multiplayer menus; the owner does not
+// want it on PC (2026-11-27), so nothing draws it.
 
 U2MP_GUEST void page_handler(uint32_t *event) {
     if (!event || event[0] != 6) return;   // 6: per-frame update
-    draw_version_text();
     menus_help_bar_frame();   // help bar L1 / R1 pictures (MENUS.md 3.8.1)
     finish_leaving_game();
     leaving_step();
@@ -2515,7 +2505,7 @@ void pick_matchmaking_game() {
     int32_t type = chosen >= 0 ? chosen : get<int32_t>(games.records + (game < 0 ? 0 : game) * 0x90 + 0x0c);
     std::vector<int32_t> candidates;
     for (int32_t i = 0; i < games.count; ++i)
-        if (get<int32_t>(games.records + i * 0x90 + 0x0c) == type && dlc_net_game_available(i)) candidates.push_back(i);
+        if (get<int32_t>(games.records + i * 0x90 + 0x0c) == type && session::net_game_same_map(i)) candidates.push_back(i);
     if (candidates.empty()) return;
     int32_t pick = candidates[size_t(std::rand()) % candidates.size()];
     guest<void(U2MP_GUEST *)(void *, int16_t, void *, int32_t)>(kSetNetGame)(ngm(), int16_t(pick), nullptr, 10);
@@ -2550,25 +2540,39 @@ U2MP_GUEST void state_send_trace(void *tracker) {
     ++calls;
 }
 
-U2MP_GUEST void button_multiplayer(void *, void *, void *) {
-    log("Multiplayer selected");
-    multiplayer_page_seen = false;
-    netheap_install();
-    netinit_prepare();
-    progression_multiplayer_entered();   // the PS3 NetInit leaderboard start-over (progression.md 1.5.19)
-    netpatch_load();
-    if (!active) {
-        voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)
-        if (!start_transport()) {
-            // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
-            log("Multiplayer could not start: network message, staying in the main menu");
-            close_transport();
-            online::on_transport_closed("Multiplayer could not start");
-            game_message_box(kNoNetworkText, 0);
-            return;
-        }
-        active = true;
-    }
+// ---- Multiplayer entry: the connecting page (PS3 PAGE_MULTIPLAYER_CONNECTING) ---------------------------------
+// On PS3 the main menu's Multiplayer button starts the network start-up and shows PAGE_MULTIPLAYER_CONNECTING: the
+// "Connecting..." box with a progress bar, which follows the start-up's step count, then the Multiplayer page (or a
+// message box over the main menu when the network cannot start). PS4 kept the page and its control: the label is
+// text ad9f50d9 and the bar shows netInfo +0x2c0 as steps of 44 (0x5ae980); nothing writes that word on PS4. Ours:
+// the button shows the page; a page handler runs our start-up over the next frames (the same calls as before, in the
+// same order), moves the bar with it and then opens the Multiplayer page. The box stays at least kConnectingShown
+// seconds so it can be seen (PS3's start-up took seconds; ours takes a few frames).
+constexpr uint32_t kPageConnecting = sid("PAGE_MULTIPLAYER_CONNECTING");
+static_assert(kPageConnecting == 0x9e1863b1u, "connecting page id");
+constexpr uint64_t kConnectSteps = 0x2c0;   // netInfo s32: start-up steps done, the bar shows steps / 44
+constexpr int32_t kConnectStepCount = 44;
+constexpr double kConnectingShown = 1.0;
+
+struct Connecting {
+    bool on = false;
+    int step = 0;
+    double since = 0.0;
+};
+Connecting connecting;
+
+void set_connect_steps(int32_t steps) { put<int32_t>(g(kNetInfo) + kConnectSteps, steps); }
+
+// The connecting page is on top: take it off (the Multiplayer page or the main menu comes back under it).
+void pop_connecting_page() {
+    uint8_t *m = menu();
+    const int32_t top = get<int32_t>(m + 0x1010);
+    uint8_t *page = top >= 0 && top <= 0x40 ? ptr_at(m + 0x9d0 + 8 * uint64_t(top)) : nullptr;
+    if (page && get<uint32_t>(page + 0x10) == kPageConnecting) guest<void(U2MP_GUEST *)(void *)>(kPopPage)(m);
+}
+
+// The rest of the Multiplayer entry once the network runs (unchanged from the direct entry).
+void enter_multiplayer() {
     g(kNetInfo)[0x1c] = 0;
     put<int32_t>(g(kNetInfo) + 0x34, 0);
     put<int16_t>(ngm() + 0x1ca0, -1);
@@ -2581,6 +2585,66 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     keep_net_package();
     preload_packages();
     show_page(kPageMultiplayer);
+}
+
+// One start-up step per frame while the connecting page is up.
+U2MP_GUEST void connecting_handler(uint32_t *event) {
+    if (!event || event[0] != 6 || !connecting.on) return;   // 6: per-frame update
+    switch (connecting.step) {
+    case 0:
+        netheap_install();
+        netinit_prepare();
+        progression_multiplayer_entered();   // the PS3 NetInit leaderboard start-over (progression.md 1.5.19)
+        netpatch_load();
+        set_connect_steps(kConnectStepCount / 2);
+        connecting.step = 1;
+        return;
+    case 1:
+        if (!active) {
+            voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)
+            if (!start_transport()) {
+                // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
+                log("Multiplayer could not start: network message, staying in the main menu");
+                connecting.on = false;
+                pop_connecting_page();
+                close_transport();
+                online::on_transport_closed("Multiplayer could not start");
+                game_message_box(kNoNetworkText, 0);
+                return;
+            }
+            active = true;
+        }
+        connecting.step = 2;
+        return;
+    default: {
+        const double shown = gamenet::clock() - connecting.since;
+        const double part = shown >= kConnectingShown ? 1.0 : shown / kConnectingShown;
+        set_connect_steps(kConnectStepCount / 2 + int32_t(part * double(kConnectStepCount / 2)));
+        if (shown < kConnectingShown) return;
+        connecting.on = false;
+        log("connecting page done (%.1f s)", shown);
+        pop_connecting_page();
+        enter_multiplayer();
+        return;
+    }
+    }
+}
+
+U2MP_GUEST void button_multiplayer(void *, void *, void *) {
+    log("Multiplayer selected");
+    if (connecting.on) return;
+    multiplayer_page_seen = false;
+    set_connect_steps(0);
+    connecting = {true, 0, gamenet::clock()};
+    // The handler stays in the table afterwards (inactive); adding it again finds it there.
+    if (!add_page_handler(reinterpret_cast<void *>(&connecting_handler))) {
+        log("connecting page: no page handler slot, entering Multiplayer directly");
+        uint32_t frame[1] = {6};
+        connecting.since -= kConnectingShown;   // no page to show: the same steps at once
+        while (connecting.on) connecting_handler(frame);
+        return;
+    }
+    show_page(kPageConnecting);
 }
 
 // ---- player rows (PS3 0x4bc728 party / lobby, 0x4bfac8 matchmaking) ----------------------------------------
@@ -2847,11 +2911,14 @@ bool custom_start_ok() {
     const int32_t pack = dlc_net_game_pack(game, local_ok);
     if (!local_ok)
         return refuse("this PC lacks the map's map pack", pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
-    // Only when this PC plays the map pack version (Ruins falls back to the base map without map pack 1).
-    if ((pack == 1 || pack == 2) && (dlc_packs() & (1u << pack)))
-        for (const Member &m : members)
-            if (m.used && m.net_id != my_id && !(m.packs & (1u << pack)))
-                return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+    // Every PC must load the same map (session::net_game_same_map): a map pack map needs the pack on every PC. The
+    // Ruins, which this PC plays as the base map without map pack 1, is refused too when a member has the pack (it
+    // would load the map pack Ruins): then this PC is the one lacking it, as on PS3, where the Ruins needed it.
+    if (!session::net_game_same_map(game)) {
+        if (dlc_packs() & (1u << pack)) return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+        return refuse("this PC lacks the map's map pack (a party member plays its map pack version)",
+                      pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
+    }
     if (players > type_max_players(type)) return refuse("too many players for the game type", kTooManyPlayers, kCustomInfo);
     if (!start::may_start(start::kCustom, type, players))
         return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
@@ -2976,6 +3043,19 @@ int member_count() {
     int n = 0;
     for (const Member &m : members) n += m.used;
     return n;
+}
+
+bool net_game_same_map(int32_t index) {
+    bool local_ok = true;
+    const int32_t pack = dlc_net_game_pack(index, local_ok);
+    if (!local_ok) return false;
+    uint32_t all = dlc_packs(), any = all;
+    for (const Member &m : members)
+        if (m.used && m.net_id != my_id && m.packs != 0xff) {   // 0xff: an older PC that did not say
+            all &= m.packs;
+            any |= m.packs;
+        }
+    return start::pack_map_same_for_all(pack, dlc_net_game_has_base(index), all, any);
 }
 
 void note_leaving() {
@@ -3243,6 +3323,9 @@ int playlist_room_slots() {
 }
 
 uint32_t mm_pack_mask() {
+    // The Profile's Matchmaking setting (NetPlayerData +0x1b0 bit 0, PS3 +0x16c, menus.cpp cond 135): only "DLC" (1)
+    // puts the map packs into the room key; "Default" (0, a new career) searches and makes the rooms every PC shares.
+    if (!(get<uint32_t>(g(kNpd) + kNpdMatchmaking) & 1u)) return 0;
     std::vector<int32_t> types;
     Table games = table_of(lookup(kNetGamesId));
     if (!playlist_game_types(types) || !games.records) return 0;

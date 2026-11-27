@@ -292,7 +292,10 @@ running ahead of the latest snapshot nor behind a floor the owning object report
    size `+0x1c`: 5 and 3). menus.cpp writes both into our records; online.cpp makes a matchmaking room that size.
 2. H5: meaning of NPD+367 bit 0 (it gates the mask) and of `0x49b858` ("the playlist uses map-pack content" is the
    reading); `parity-f` F5 calls NPD+367 bit 0 "may not search" - the two readings must be reconciled from the
-   matchmaking page's own code.
+   matchmaking page's own code. **Answered 2026-11-27**: it is the Profile's "Matchmaking" setting (Default 0 / DLC
+   1, PS3 query `0x4c09a8`, PS4 `0x65a790`, PS4 NetPlayerData `+0x1b0` bit 0). At `0x4b10d8` / `0x4b29d0` the bit
+   only chooses the key: set, `0x49b858` true and the common mask not 0 -> mask in the key; else the plain key. It
+   does not stop the search (`0x49a738` alone does that).
 3. H4: keep listing party rooms (PC extra) or follow PS3? (Owner 2026-11-25: keep.)
 4. H2: custom room create failure: PS3 abort (back to PAGE_MULTIPLAYER) or ours (play without a room)? (Owner
    2026-11-25: PS3.)
@@ -429,7 +432,8 @@ net id order as the fallback; H7 as specified; H8 no world = the PS3 network err
 - **H4**: unchanged (party room plain build key, "Party" rows).
 - **H5** (session.cpp `mm_pack_mask`; online.cpp `match_key`, `create_room`, `mm_begin`): in a playlist with a
   map-pack map the key gets mask << 12 and 0x4D the mask, on create and on search; else 0x4D = 0 (all room kinds).
-  The NetPlayerData+367 bit 0 gate is not applied (open question 2: its PS4 offset and meaning are not known).
+  Since 2026-11-27 the mask is used only when the Profile's Matchmaking setting is DLC (NetPlayerData `+0x1b0` bit 0,
+  open question 2; menus.cpp shows the row when a map pack is imported, DLC.md); Default: the plain key, 0x4D = 0 (PS3 still fills 0x4D there; no search filters on it).
 - **H6** (online.cpp `send_match_order`, `talk_all_tick`, `on_message` kOpTalkAll / kOpOrder, `migration_tick`):
   every match room member that is not the host reports once a second whether its links to every other room member
   are up (session message kOnlineMessage op 5 `{u8 all}`, sent on change or to a new host). At the match start the

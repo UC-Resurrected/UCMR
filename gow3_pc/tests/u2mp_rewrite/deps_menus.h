@@ -30,6 +30,8 @@ struct State {
     std::vector<std::string> recent;
     // dlc.cpp: net game indexes dlc_net_game_available() refuses
     std::vector<int32_t> dlc_off;
+    // dlc.cpp dlc_packs() (new build only): bit 0 base game, bits 1 / 2 map packs 1 / 2
+    uint32_t packs = 1;
     // session.cpp package_by_id: image offset of the package answered for any id (0 = NULL)
     uint64_t package = 0;
 };

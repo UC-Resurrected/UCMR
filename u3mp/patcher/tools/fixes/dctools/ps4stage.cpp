@@ -1096,9 +1096,17 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
     std::map<std::string, TexP> lm_entries;
     for (const auto &[s, t] : ps3tex)
         if (has(s, ".geom.atgi/") || has(t.path, "/lightmap0/")) {
-            const std::string base = s.substr(s.rfind('/') == std::string::npos ? 0 : s.rfind('/') + 1);
+            std::string base = s.substr(s.rfind('/') == std::string::npos ? 0 : s.rfind('/') + 1);
             std::string hx = t.path.substr(t.path.rfind('/') == std::string::npos ? 0 : t.path.rfind('/') + 1);
             hx = hx.substr(0, hx.find('.'));
+            // Uncharted 2 cooks a lightmap without the hash folder ('.../x.geom.atgi/indirect.rgbmax.tga.ndb'): the name
+            // without '.ndb' is the role lightmap_entry looks for, and the hash comes from the new path. Without this the
+            // map pack levels carried their lightmaps but every material bound the retail default-lightmap0/1, whose
+            // texels the lightmap UVs sample as random dark patches (black walls and floors)
+            if (g_u2 && ends_with(base, ".ndb")) {
+                base.resize(base.size() - 4);
+                hx = u3::fmt("%016llX", (unsigned long long)sidu("lightmaps/" + stage + "/" + base));
+            }
             const std::string path_ndb = cook_prefix() + "lightmaps/" + stage + "/" + base + "/" + hx + ".ndb";
             lm_entries[base] = convert_ps3_texture(t, path_ndb, "lightmaps/" + stage + "/" + base, 3, false);
         }

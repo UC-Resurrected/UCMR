@@ -956,7 +956,7 @@ int main() {
         friends5();
         st.party_known = true;
         st.party = {"p1", "p2"};
-    }, [](const Ns &) { cb(0x5ebde0, 0, 2, 0); call_registered(0x3fe6f70e); }, [](const Rec &r) {
+    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); call_registered(0x3fe6f70e); }, [](const Rec &r) {   // row 1: the second friend (no browse row since 2026-11-27)
         EXPECT(count_of(r, "online::friend_party 1 -> 1") == 1);
         EXPECT(count_of(r, "text_set_player [profile of ben\\PCTEXT\\p1\\p2]") == 1);
         EXPECT(count_of(r, "show_page 0x719e9fec") == 1);
@@ -964,7 +964,7 @@ int main() {
     // Friend popup of a friend already in our party (parity-e-flow2.md 2.8, fa52c63), new only: no Join / Invite
     // (Ann is online and joinable), View Profile and Remove Friend stay
     run_new("2.8 friend popup, friend in our party", [] { st.active = true; friends5(); st.party_member_friend = 0; },
-            [](const Ns &) { cb(0x5ebde0, 0, 1, 0); }, [](const Rec &r) {
+            [](const Ns &) { cb(0x5ebde0, 0, 0, 0); }, [](const Rec &r) {
         std::string p;
         for (const auto &l : r)
             if (l.rfind("ShowPopup", 0) == 0) p = l;
@@ -1193,8 +1193,11 @@ int main() {
         cb(0x5ed8b0, 6);
         cb(0x5ed8b0, 6);
     });
-    auto accept = [](const char *name, std::string text, const char *tag) {
-        run(name, [text, tag] {
+    // (2026-11-27, remaining.md 2.6) The tag is kept as typed, as PS3's keyboard gave it: its alphabet panel offers
+    // ASCII letters, digits, symbols and the space, 4 characters at most; "\" and "|" become spaces. The old build
+    // kept only letters (upper-cased) and digits, so these scenarios check the new build against the expected tag.
+    auto accept = [](const char *name, std::string text, const char *tag, std::string want) {
+        run_new(name, [text, tag] {
             st.poll_results = {1};
             st.poll_text = text;
             put<int32_t>(NET_SM, 1);
@@ -1204,15 +1207,23 @@ int main() {
             cb(0x5ed8b0, 6);
             rec("tag %s", hex(mem + CLANTAG, 8).c_str());
             ns.frame();
+        }, [want](const Rec &r) {
+            uint8_t padded[8] = {};
+            std::memcpy(padded, want.data(), want.size());
+            EXPECT(std::find(r.begin(), r.end(), "log clan tag: [" + want + "]") != r.end());
+            EXPECT(std::find(r.begin(), r.end(), "tag " + hex(padded, 8)) != r.end());
         });
     };
-    accept("2.6 full 8-byte tag, accept ab-1c9z", "ab-1c9z", "ABCDEFGH");
-    accept("2.6 accept a", "a", "XY\0\0\0\0\0\0");
-    accept("2.6 accept !! (empty tag)", "!!", "XY\0\0\0\0\0\0");
-    accept("2.6 accept UTF-8 e-acute 1", "\xc3\xa9" "1", "\0\0\0\0\0\0\0\0");
-    accept("2.6 accept 63-byte text", repeat('!', 59) + "q9Zx", "Q\0\0\0\0\0\0\0");
-    accept("2.6 accept bytes >= 0x80 and edges", "\x80\xff@[`{/:Zz09", "Q\0\0\0\0\0\0\0");
-    accept("2.6 accept empty", "", "QQ\0\0\0\0\0\0");
+    accept("2.6 full 8-byte tag, accept ab-1c9z", "ab-1c9z", "ABCDEFGH", "ab-1");
+    accept("2.6 accept a", "a", "XY\0\0\0\0\0\0", "a");
+    accept("2.6 accept !! (a tag of symbols)", "!!", "XY\0\0\0\0\0\0", "!!");
+    accept("2.6 accept UTF-8 e-acute 1 (no ASCII character: skipped)", "\xc3\xa9" "1", "\0\0\0\0\0\0\0\0", "1");
+    accept("2.6 accept 63-byte text", repeat('!', 59) + "q9Zx", "Q\0\0\0\0\0\0\0", "!!!!");
+    accept("2.6 accept bytes >= 0x80 and edges", "\x80\xff@[`{/:Zz09", "Q\0\0\0\0\0\0\0", "@[`{");
+    accept("2.6 accept empty", "", "QQ\0\0\0\0\0\0", "");
+    accept("2.6 accept spaces and case kept", " Sk ", "SK\0\0\0\0\0\0", " Sk ");
+    accept("2.6 accept backslash and bar become spaces", "a\\b|", "\0\0\0\0\0\0\0\0", "a b ");
+    accept("2.6 accept control characters skipped", "\tA\x7f" "b", "\0\0\0\0\0\0\0\0", "Ab");
     run("2.6 poll 3 and poll -1: unchanged", [] { st.poll_results = {3}; put<int32_t>(NET_SM, 2); }, [](const Ns &ns) {
         rec("edit -> %d", ns.edit() ? 1 : 0);
         ns.frame();

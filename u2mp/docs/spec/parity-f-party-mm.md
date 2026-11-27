@@ -204,7 +204,8 @@ PS3:
    "Searching Game with Criteria %i" (criteria index, PS3 `0xf22630` = PS4 tip index `0x113ddac`), NET_SM 4 then the
    search. The criteria come from the data table `b25ab071` (one row per step; the status line shows row[index]'s
    text, e.g. "Searching for Close Game" / "Optimal Game" / "Any Game"; each row also has a ping limit at +8).
-   A leader whose party may not search (PS3 `0x49a738`, or NPD flag +367 bit 0) goes straight to GATHER (F1).
+   A leader whose party may not search (PS3 `0x49a738`) goes straight to GATHER (F1). (NPD +367 bit 0, read next to
+   it, is the Profile's Matchmaking Default / DLC setting: it only picks the room key, `parity-h-session.md` H5.)
 2. 5: results listed (debug "%s, %i players %8.2f km" per room) -> 6.
 3. 6: pick the best room: skip full rooms and rooms already marked bad; score by distance, with a penalty when the
    room creator's party size bits overlap ours; keep the lowest. None: wait a random **1..3 s**, then criteria index

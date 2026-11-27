@@ -726,7 +726,7 @@ It calls (C linkage) `gow3gpu_text_input_begin` and `gow3gpu_text_input_poll`, a
 | 0x11474f8 + 0x1a8 = 0x11476a0 | clan tag, 8 bytes, NUL-padded ASCII, at most 4 characters used |
 
 Constants: at most 4 tag characters; poll buffer 64 bytes; prompt text
-`Clan Tag (up to 4 letters or digits; empty = none)`.
+`Clan Tag (up to 4 characters; empty = none)`.
 
 ### 2.4 Behaviour
 
@@ -747,9 +747,11 @@ State: an "editing" flag, initially false.
    log `clan tag: unchanged`.
 
 Storing a text:
-1. Go through the text bytes until the NUL or until 4 characters are taken. `A`-`Z` and `0`-`9`
-   are taken as they are; `a`-`z` are taken upper-cased; every other byte (including bytes >= 0x80)
-   is skipped.
+1. Go through the text bytes until the NUL or until 4 characters are taken. Bytes 0x20..0x7e are taken as
+   they are (case kept, spaces kept), except `` and `|`, which are taken as a space; every other byte (control
+   bytes, 0x7f, bytes >= 0x80) is skipped. This is PS3: its keyboard (`0x441440`) offers the alphabet panel (ASCII
+   letters, digits, symbols, space) with a limit of 4 characters, and the page turns `` and `|` into spaces
+   (2026-11-27; before, only A-Z / 0-9 were kept and letters upper-cased, so " Sk " became "SK").
 2. Write 8 bytes at 0x11476a0: the taken characters, then zeros.
 3. Log `"clan tag: [%.4s]"` with the taken characters (empty brackets when none).
 4. Call `progression_publish()`.

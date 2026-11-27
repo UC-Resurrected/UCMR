@@ -85,7 +85,7 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
 | 129 | BUTTON_POSTGAME_PARTYUP | `65e7f0` | `4b7c48` | intact |
 | 133 | PAGE_MULTIPLAYER profile panel (k23) | `65e890` | `4bddd4` | **wrap**: online id written |
 | 134 | PLAYER_OPTIONS: BUTTON_CLANTAG label | `6609e0` | `4bdc30` | intact; text 639e0fa8 added |
-| 135, 138 | PLAYER_OPTIONS matchmaking pref, (138) | `65a790`, `65a660` | | intact |
+| 135, 138 | PLAYER_OPTIONS Matchmaking Default / DLC, (138) | `65a790`, `65a660` | `4c09a8` (135) | 135 **wrap**: shown when a map pack is imported (3.3); 138 intact |
 
 ## 3. Page by page
 
@@ -109,6 +109,9 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
   (the 5th of 22 controls), the other 21 in their order; the page's default control (Matchmaking, page record
   `+0x58`) and the mode dispatcher are untouched, the cursor moves over the remaining buttons. Mode 5 and
   PAGE_NET_TROPHIES are no longer reachable (DROPPED, owner 2026-11-25: PC has no trophies).
+- **Store entry (owner report 2026-11-27):** the help bar's Store record (`0x10417a0`) uses text `90354b88` on PS3 and
+  PS4 alike; the PS3 banks say "Store", the PS4 banks "Rewards". menus.cpp gives the record our text
+  `sid("u2mp/help/store")` (texts.cpp: "Store" in every language, the PS3 words), together with its R1 token (3.8.1).
 
 ### 3.2 PAGE_LOBBY (handler `5ebac0`, PS3 `0x443bc8`)
 
@@ -149,6 +152,20 @@ Fix: the overlay (version 7) makes the five kind-6 rows kind 13, the record othe
 `+0x64` 0, `+0x68` 5 rows as Team); menudraw.cpp skips the kind-8 closed-row arrows while NET_SM > 1 (the
 campaign's chapter carousel, also kind 8, keeps them). Friendly Fire was kind 13 already. Not verified in the game.
 
+**Hidden rows and row widths of kind 13 (owner report 2026-11-27).** After the change above, Custom Game showed a
+blank line between Score Limit and Time Limit and its panel sat higher, and Find Match's panel moved up (the whole
+lobby panel grows with the left column and is centred). The page lays out a column from its rows' sizes (virtual
++0x28, `{width, height}`): each row gets the column's x and width (the widest row) and its own height, and a row of
+height 0 takes no space (`0x5a2110`). A row hidden by its condition has no label; kind 6 then measures 0 x 0
+(`0x57f370`), kind 13 one empty text line (`0x587df0`, path `0x587e74`). So each hidden converted row (Rounds in
+Deathmatch; in matchmaking all five) left a line. Second difference: the kind-13 draw (`0x587300`, `0x587359..0x58737e`)
+replaces the laid-out width with the record's width (`+0x5c`, 320 on the Profile page), so Co-op Difficulty and Taunt
+ended at 320 units while the column (and the Hero / Villain rows) is wider; on PS3 (video, 2:55) these rows reach the
+column's right edge. Fix (menudraw.cpp `install_dropdown_rows`): the size of a row with no label is 0 x 0 for the
+five converted rows (conditions 59, 60, 61, 63, 65; Friendly Fire and Team keep the shipped measure), and the draw
+keeps the laid-out width for the Profile page's drop-downs (conditions 80 Co-op Difficulty, 82 Taunt, 108, 135
+Matchmaking; the lobby's rows are unchanged). Not verified in the game.
+
 ### 3.3 PAGE_MULTIPLAYER_PLAYER_OPTIONS ("Profile"; page handler `5ed8b0` = remaining.cpp)
 
 Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boosters Slot 1/2
@@ -158,6 +175,33 @@ intact; their data is NetPlayerData (now loaded and saved). Restored texts: NET_
 (d4143b18 "Clan Tag") and the empty-tag text (639e0fa8 "None"). The clan tag button explains it is
 not available on PC (remaining.cpp). Boosters and Hero / Villain are kind-8 carousels, Co-op Difficulty, Taunt and
 Matchmaking kind-13 drop-downs: no "<>" beside a focused closed carousel in multiplayer (3.2).
+
+Boosters greyed out in a co-op custom game (owner report 2026-11-27): PS3 does the same. The booster list query (PS3
+`0x4be788`, PS4 `0x659bd0`) answers op 7 (enabled) with 0 when the lobby's current net game is a co-op type (PS3
+`0x4a0bcc`: game type 4, 8, 9 or 12; PS4 inlines the same test) and the page under the Profile is PAGE_LOBBY in
+custom game mode (net info `+0x2c4` == 2; PS3 `+0x2b4`) or page `e35f0f1a` otherwise.
+Owner decision (2026-11-27): the boosters stay selectable there anyway. menus.cpp wraps the query for cond 77 and 78
+(`query_boosters`): op 7 always answers 1, every other op is the game's answer. This differs from PS3 on purpose.
+
+Golden Guns (owner report 2026-11-27: missing under Other Settings; PS3 video 2:55 shows "Golden Guns On"). The
+rows cond 108 / 109 / 110 share the query `0x65c610`; the table entry's argument is the row's bit (108: 0x10, the
+Golden Guns label `b8a9d6ed`, values On `d1831446` / Off `32066ec9`). A row shows only when its bit is in the licence
+word `[0x104f4b0 + 0x78]` (or the region bits the query adds); PS3 got 0x10 from the golden-weapons licence (net.bin's
+licence table), PS4 never sets it, so the row had no label and stayed hidden. The setting is NetPlayerData `+0x13c`
+(op 4 reads it, op 5 writes it; inside the saved career blob), and the PS4 spawn code still uses it (`0x663494`: when
+it is 1 and the net game is not co-op, the game's weapon sets `8cf8e1cc` / `469fefc8` become the golden sets
+`e58a9398` / `556dd82a`, which net-patch9 defines). menus.cpp wraps the cond 108 entry (`query_golden_guns`): the
+query runs with bit 0x10 added and the word is put back after, so nothing else sees the bit. Not checked in the game.
+
+Matchmaking (owner request 2026-11-27: a DLC option in Profile as PS3 has it). The gap between Taunt and Golden Guns is
+this row, hidden. Cond 135, query `0x65a790` (PS3 `0x4c09a8`): label "Matchmaking" `ea2119f2`, values "Default"
+`81af6b75` (0) / "DLC" `9811415d` (1, texts.cpp); the setting is NetPlayerData `+0x1b0` bit 0 (PS3 data block
+`+0x16c`, inside the saved career blob; a new career has 0, Default). The query gives the label only while the
+owned-DLC word `[0x1115a30 + 0xa0]` is not 0: PS3's map pack entitlements set it, PS4 nothing, so on PC the row never
+showed (a PS3 without map packs shows the same gap, video 2:55). menus.cpp wraps the cond 135 entry
+(`query_matchmaking`): the query runs with the imported map packs' bits (dlc.cpp `dlc_packs`, bits 1 / 2) added and
+the word is put back after; no pack imported, no row. PS3 has this one row, not one row per map pack. What the value
+does: DLC.md, "Matchmaking: Default / DLC". Not checked in the game.
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
@@ -276,39 +320,50 @@ image offsets, file offset = address + 0x4000):
   always 6 (R1); plain "L1" / "R1" give 8 / 6 or 6 / 8 by a PS3 swap word (+0x21bc of the object in r15), "L2" / "R2"
   9 / 7 or 7 / 9 by +0x21c0. NOSWAP = "the picture of the button this entry's action is on, whatever the swap
   setting": the same codes as the PS4 font.
+- The PS4 printer has the opposite tokens too (`0xccbab7` R2 `0x2c553fae`, `0xccbdbc` L2 `0x539a5849`): `|R2|` draws
+  the R1 picture while the setting is 0 and the R2 picture otherwise, `|L2|` the L1 / L2 picture
+  (`0xccbaeb` / `0xccbf01`: the same `+0x4888` test with the two codes the other way round).
 
 Fix (runtime, menus.cpp; no import step, no new asset, no PS3 asset):
 
 1. At install: check the four records' bytes +8..+0x17 and the two token strings above. If any differ, log
    `menus: help bar shoulder records differ, Prev / Next icons left alone` and do nothing more.
-2. Keep two strings of our own: "|L1| " and "|R1| ".
-3. Every frame (from the per-frame page handler session.cpp already registers for every page): exchange = u32
-   `[0x1059640 + 0x4870]` != 0. For each of the four records: wanted = "|L1| " when (action 0xb and not exchange) or
-   (action 0xa and exchange), else "|R1| ". When the u64 at record +0 is not the address of wanted, write it (8 bytes;
-   the segment is read-only: make it writable for the write and put it back, as `netinit.cpp` `write_code` does with
-   `HostCodeWrite`) and log `menus: help bar shoulder icons %s` (`L1 / R1` or `exchanged`) once per change.
-   At the first write it also logs `menus: shoulder setting %u, exchange %u` (u32 `+0x4888`, `+0x4870`; test (a)).
+2. Keep four strings of our own: "|L1| ", "|R1| ", "|L2| ", "|R2| ".
+3. Every frame (from the per-frame page handler session.cpp already registers for every page): swapped = u32
+   `[0x1059640 + 0x4888]` == 0. For each of the four records: wanted = the token that draws the NOSWAP picture under
+   the current setting: action 0xb "|L1| " (not swapped) or "|L2| " (swapped), action 0xa "|R1| " or "|R2| ". The
+   `+0x4870` exchange word is not read (PS3's NOSWAP ignores the swap setting). When the u64 at record +0 is not the
+   address of wanted, write it (8 bytes; the segment is read-only: make it writable for the write and put it back,
+   as `netinit.cpp` `write_code` does with `HostCodeWrite`) and log `menus: help bar shoulder icons L1 / R1 (shoulder
+   setting %u: tokens %s)` (`|L1| / |R1|` or `|L2| / |R2|`) once per change of the setting.
    If a record cannot be made writable: log `menus: help bar record 0x%llx cannot be made writable (%lu), Prev /
    Next icons left alone` and stop the fix-up for the session.
 
-Built 2026-11-25 (`menus.cpp` `menus_help_bar_frame()`, called first in `session.cpp` `page_handler` after the
-version text; old-vs-new harness `menus`: scenarios HB-1 and HB-2). Not yet checked in the game.
+Built 2026-11-25, changed 2026-11-27 (owner: PS3 always shows L1 / R1, also with the L2 / R2 setting; the first
+version followed the setting and showed L2 / R2 with it at 0, the owner's `menus: shoulder setting 0, exchange 0`).
+`menus.cpp` `menus_help_bar_frame()`, called first in `session.cpp` `page_handler` after the version text; old-vs-new
+harness `menus`: scenarios HB-1 and HB-2. Not yet checked in the game.
 
-Result: "[L1] Prev [R1] Next" exactly as PS3 while the PS4 shoulder setting is on (the menu then runs Prev / Next
-from L1 / R1, as PS3); with the setting off (0, what the game's initializers `0x90dd64` / `0xdc6563` write before the
-options are applied by `0x9efa9a`, option id `0x9201cbe6`) the same entries show the L2 / R2 pictures, which are
-then the buttons that work. The PC prompt shim redraws codes 6-9 / 40-43 for keyboard
-and Xbox pads like every other button icon. If the owner wants L1 / R1 for Prev / Next whatever the setting, that is
-a change of the input mapper, not of the icons (not specified here).
+Result: "[L1] Prev [R1] Next" and "[R1] Store" / "[R1] Rewards" as PS3, whatever the PS4 shoulder setting. The PC
+prompt shim redraws codes 6-9 / 40-43 for keyboard and Xbox pads like every other button icon (code 6 / 8: the key
+bound to PS4 R1 / L1).
 
 Not covered: the PS4-only string "|R1_NOSWAP| %s" (`0xe8721f`, used once at `0x5ae6a0`) is equally undrawn.
 
-Tests: (a) read u32 `[0x1059640 + 0x4888]` and `+0x4870` in the running game (log them once at the first fix-up).
-(b) Multiplayer > Leaderboards: "△ Filter [L1] Prev [R1] Next □ Top of List" (setting on) or "[L2] / [R2]" (off);
-press the shown shoulder buttons: the board changes (Next, callback `0x64e120`: Kills -> Money -> Wins -> Co-op ->
-Kills; Prev, `0x64e0f0`: the other way). (c) Multiplayer page: the Store entry shows the R-side picture. (d) Keyboard /
-Xbox pad: the two pictures carry the bound key / Xbox labels. (e) Change the controller option in the game's
-options and come back: the pictures follow (one `menus: help bar shoulder icons` log).
+Tests: (a) Multiplayer > Leaderboards: "△ Filter [L1] Prev [R1] Next □ Top of List" with the shoulder setting on and
+off; press L1 / R1: the board changes (Next, callback `0x64e120`: Kills -> Money -> Wins -> Co-op -> Kills; Prev,
+`0x64e0f0`: the other way). (b) Multiplayer, Find Match and Custom Game pages: the Store / Rewards entry shows R1.
+(c) Keyboard / Xbox pad: the two pictures carry the bound key / Xbox labels. (d) Change the controller option in the
+game's options and come back: the pictures stay L1 / R1 (one `menus: help bar shoulder icons` log).
+Leaderboard outline (owner report 2026-11-27: a thick white frame around the table; PS3 has none). The table control
+(kind 10, draw `0x58c7a0`) asks its list for property `0xffce262d` (virtual +0x60) and, while the answer is 0, draws
+an opaque white 20-unit outline around the table and its title tab (`0x58cc72..0x58d181`, polygon `0x5b5de0`). The
+leaderboard list's getter answers 0 for everything on PS4 (`0x5b3990`); on PS3 (`0x4116a4`, vtable `0xd70098` slot
+10) it answers 1 for `0xffce262d` and for `0x348751f2`, and for `0x6a9b4a0c` a row test. menudraw.cpp
+(`install_leaderboard_outline`) puts a getter in the slot (`0x100a360 + 0x60`) that answers 1 for `0xffce262d` only.
+Not taken over: `0x348751f2` (the control's focus type then becomes 4 instead of the record flag, which changes how the
+list takes the D-pad) and `0x6a9b4a0c` (a per-row test); both stay as PS4 until the owner wants them.
+
 PAGE_NET_TROPHIES: DROPPED (owner 2026-11-25: PC has no trophies). Its only route, BUTTON_NETTROPHIES, is removed by
 the overlay (3.1); the page stays in menu.bin unused and its title MENU_TITLE_TROPHIES (85ed01cc) and the button label
 f1b9728c are no longer served. Its list LIST_STATS stays: it is the game's own code (it reads NetPlayerData), and

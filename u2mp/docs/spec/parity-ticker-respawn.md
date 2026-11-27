@@ -113,6 +113,17 @@ Status: **DONE (CHECK)** 2026-11-25. `gow3_pc/src/u2mp/ticker.cpp`: install chec
 logged once (`ticker: first text added ...` or `ticker: add left entry ...`). Rules: `overlay_rules.cpp`, test
 `u2mp-overlay-test`.
 
+Owner report 2026-11-27: the strip stayed empty on PC. A diagnostic run showed the entries in the strip, scrolling at
+40 units a second as on PS3. Cause: the strip draw prints each entry with a direct call of the text printer
+(`0x5d6b2c` -> `0xcc9a70`), as PS3 drew text; on PS4 a direct print shows nothing, because the menus' text goes into
+the 2D command arena (the renderer's text case queues it with `0xbda9c0(0x124a000, struct, text)` and calls `0xcc9a70`
+only to measure). ticker.cpp points that call at `ticker_print`, which queues the same text struct and string in the
+arena (checked: the call's target and the queue function's first 11 bytes; else `ticker: the strip's text print
+stays direct, so the strip shows no text`). The diagnostic log is gone. Colours (owner report: values blue): the arena draws a
+`|@CAARRGGBB|` code with red and blue swapped, so PS3's gold value colour F0C828 came out light blue; the text gets
+its codes as AABBGGRR before it is added (`overlay::ticker_arena_colours`, test `u2mp-overlay-test`): labels white,
+names grey (999999), values gold, as PS3.
+
 ## 2. "Respawn in [A]..." and the co-op "Tries Remaining" line
 
 ### 2.1 Where PS3 shows it

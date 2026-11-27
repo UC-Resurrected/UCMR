@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "../src/u2mp/overlay_rules.h"
 
@@ -410,6 +411,18 @@ struct Ticker {
     void free_entry(int k) { b[entry(k) + kTickerTextOff] = 0; }
 };
 
+// The ticker text's colour codes for the 2D command arena: red and blue trade places, nothing else changes.
+static void test_ticker_colours() {
+    const std::string ps3 = "|@CFFFFFFFF|Losses:|@CFF999999|      jonaschild: |@CFFF0C828|0|@CFF999999|     ";
+    CHECK(ticker_arena_colours(ps3) == "|@CFFFFFFFF|Losses:|@CFF999999|      jonaschild: |@CFF28C8F0|0|@CFF999999|     ");
+    CHECK(ticker_arena_colours("|@C80123456|x") == "|@C80563412|x");
+    CHECK(ticker_arena_colours("|@c80123456|") == "|@c80123456|");    // lower-case c: not a colour code
+    CHECK(ticker_arena_colours("|@CFF12345|x|") == "|@CFF12345|x|");  // seven digits
+    CHECK(ticker_arena_colours("|@CFF12G456|") == "|@CFF12G456|");    // not hex
+    CHECK(ticker_arena_colours("|@CFF123456") == "|@CFF123456");      // no closing bar
+    CHECK(ticker_arena_colours("") == "");
+}
+
 static void test_ticker() {
     Ticker t;
     t.put(kTickerWidth, 900.0f);
@@ -508,6 +521,7 @@ int main() {
     test_player_out();
     test_hint();
     test_ticker();
+    test_ticker_colours();
     test_voice_column();
     test_mute_action();
     std::printf("%s\n", failures ? "u2mp overlay test FAILED" : "u2mp overlay test passed");

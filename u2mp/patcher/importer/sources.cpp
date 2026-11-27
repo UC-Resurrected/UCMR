@@ -1,7 +1,8 @@
 // importer/sources.cpp: where each file of the Uncharted 2 import comes from.
 //
 // PS3: the player's GOTY copy (build/main: the base archives, the speech archives, pak22.txt; USRDIR/all-patches.psarc)
-// and an optional DLC folder (dlc-map1/2, dlc-patch2/3/5/7 as archives or unpacked folders, speech update archives).
+// and an optional DLC folder (dlc-map1/2 as archives or unpacked folders; its title updates dlc-patch2/3/5/7 and speech
+// update archives only for group F and the maintainers' twin validation).
 // Precedence as the PS3 game mounts them, newest first: dlc-patch7 > 5 > 3 > 2 > patch > dlc-map2 > dlc-map1 > base.
 // A member's key is its path under build/main without the dlc folder; a member without a folder gets the archive's
 // folder ('actor27.psarc' -> 'actor27/'). Keys compare lower-case; the member's own spelling names the output.
@@ -75,7 +76,7 @@ std::optional<fs::path> build_main(const fs::path &root) {
     return std::nullopt;
 }
 
-PS3::PS3(const std::string &base, const std::string &dlc) {
+PS3::PS3(const std::string &base, const std::string &dlc, bool title_updates) {
     const auto bm = build_main(P(base));
     if (!bm) throw std::runtime_error("no PS3 Uncharted 2 build/main folder under " + base);
     base_main = *bm;
@@ -101,9 +102,15 @@ PS3::PS3(const std::string &base, const std::string &dlc) {
     }
     add_arc(usrdir / "all-patches.psarc", "patch", "");
     if (!dlc.empty()) {
+        // The map packs only, unless title_updates: dlc-map1/2 are byte-identical in every region's install, while the
+        // title updates differ by region (BCUS and BCES dlc-patch7 are not the same file) and carry dc1 modules, a
+        // pak22.txt and text banks. The import's other inputs (the net-patch9 schema pairs, audio.bin, the registry,
+        // templates) take the newest copy of a file, so with the title updates mounted they would depend on the
+        // player's region. Without them every PC builds the same files from the GOTY copy plus the map packs.
         const fs::path dm = build_main(P(dlc)).value_or(P(dlc));
         int found = 0;
         for (const char *tag : {"dlc-map1", "dlc-map2", "dlc-patch2", "dlc-patch3", "dlc-patch5", "dlc-patch7"}) {
+            if (!title_updates && starts(tag, "dlc-patch")) continue;
             const fs::path arc = dm / (std::string(tag) + ".psarc");
             if (isfile(arc)) {
                 add_arc(arc, tag, "");
@@ -115,7 +122,7 @@ PS3::PS3(const std::string &base, const std::string &dlc) {
         }
         if (!found) log("note: no dlc-map / dlc-patch archives under " + dlc);
         const fs::path dsp = dm / "sound1" / "speech";   // the disc copy's speech update archives: DLC character lines
-        if (isdir(dsp))
+        if (title_updates && isdir(dsp))
             for (const std::string &f : listdir_sorted(dsp))
                 if (ends(f, ".psarc") && f.find("update") != std::string::npos) add_arc(dsp / P(f), "dlc-patch2", "sound1/speech/" + split(f, '-')[0] + "/");
     }

@@ -365,11 +365,14 @@ Let `target` = shown.
    switch.
 6. **Cards.** If cards are on and ready: draw the cards with `a` and `target` (4.6).
 7. **Edges.** m = menu_net_material(0x6732636e). If m is not NULL: menu_draw_quad(m, 0, 0, 1280, 720,
-   0, 0, 1, 1, alpha a, rgb a), then menu_draw_quad(m, -10, -10, 1290, 730, 0, 0, 1, 1, a, a).
+   0, 0, 1, 1, alpha a, rgb a), then menu_draw_quad(m, -10, -10, 1300, 740, 0, 0, 1, 1, a, a) (PS3: corners (-10, -10) - (1290, 730);
+   its quad call `0x8b1600` takes the two corners, menu_draw_quad a size).
 8. **Rosters.** slide = 1 - clamp((t - 2) x 0.6666667, 0, 1). Draw the roster page (4.7) with
    alpha = a x clamp(t - 3, 0, 1), x = 0, y = (slide x slide) x 200, and `dt`.
-9. **Band.** m = menu_net_material(0x270e3564). If not NULL: menu_draw_quad(m, 128, 22, 1152, 278,
-   0, 0, 1, 1, alpha a x 0.75, rgb a).
+9. **Band.** m = menu_net_material(0x270e3564). If not NULL: menu_draw_quad(m, 128, 22, 1024, 256,
+   0, 0, 1, 1, alpha a x 0.75, rgb a) (PS3: corners (128, 22) - (1152, 278), centred on the 1280-wide screen; the
+   first version passed the second corner as the size, so the band reached x 1280 and y 300 and its line ran into the
+   game description).
 10. Take the map name pointer and a copy of the 128-byte description under the text lock.
 11. **Map name.** Transform = Compose(Compose(base, identity with [0] = 1.4), C1) where C1 = identity,
     colour 0xffcd4100, then [5] = 3.0. Draw text (below) with the map name in rect {0, 70, 1280, 100}.

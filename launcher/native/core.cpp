@@ -1443,6 +1443,60 @@ std::string u2_data_folder() {
     return "";
 }
 
+// The Uncharted 2 map packs the GOTY copy lacks (u2import --ps3-dlc): RPCS3 installs every Uncharted 2 release's DLC in
+// dev_hdd0/game/<title id>/USRDIR/build/main (dlc-map1.psarc, dlc-map2.psarc, as archives or unpacked folders). The
+// folders looked in: each of the player's PS3 folders (game data, the U2 game, the U3 import's) and up to five levels
+// above it, and their dev_hdd0/game. The map pack archives are byte-identical in every region's install, so the pick
+// is simply the first title id of this fixed list (US first) that has both; the import checks every file it takes by
+// the import list's SHA-1 and reads only the map packs from that folder (never its region's title updates). Folder
+// names compare without case and dashes ("bcus-98123" is BCUS98123); "<id>DATA2" is game data, never a match.
+const char *const U2_DLC_IDS[] = {"BCUS98123", "BCUS98257", "BCUS98257F", "NPUA80698", "NPUA70051", "BCES00757",
+                                  "BCES00509", "BCES00727", "NPEA00364", "NPEA00365", "BCJS30035", "BCJS70021",
+                                  "BCJS30051", "BCAS20097", "BCAS20142", "NPHA80194", "BCKS10086", "BCKS10084"};
+struct U2Dlc { std::string id, folder; };   // empty when none is found
+U2Dlc u2_dlc_source() {
+    std::vector<std::string> roots = {text(g.config, "u2mp_ps3_data"), text(g.config, "u2mp_ps3"), text(g.config, "u3mp_ps3_u2")};
+    if (const Value *f = g.config.get("u3mp_ps3_u3")) for (auto &x : f->items) roots.push_back(text(&x));
+    std::vector<std::string> dirs;   // the folders whose subfolders may be title ids, in this order
+    for (const std::string &root : roots) {
+        if (root.empty()) continue;
+        std::string q = as_path(root);
+        for (int up = 0; up <= 5; ++up) {
+            for (const std::string &d : {q, join(join(q, "dev_hdd0"), "game")})
+                if (is_dir(d) && std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
+            const std::string p = parent_of(q);
+            if (p == q) break;
+            q = p;
+        }
+    }
+    auto key = [](std::string n) {
+        std::string k;
+        for (char c : n) if (c != '-') k += (char)toupper((unsigned char)c);
+        return k;
+    };
+    auto has = [](const std::string &main, const char *part) {
+        return is_file(join(main, std::string(part) + ".psarc")) || is_dir(join(main, part));
+    };
+    std::vector<std::pair<std::string, std::string>> titles;   // (key, folder) of every subfolder, folder order
+    for (const std::string &d : dirs) {
+        std::vector<std::string> names;
+        std::error_code ec;
+        for (port::fs::directory_iterator it(port::path_utf8(d), ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code e;
+            if (it->is_directory(e)) names.push_back(port::utf8(it->path().filename()));
+        }
+        std::sort(names.begin(), names.end());   // NTFS lists names sorted; Linux in no order
+        for (const std::string &n : names) titles.push_back({key(n), join(d, n)});
+    }
+    for (const char *id : U2_DLC_IDS)
+        for (const auto &[k, folder] : titles) {
+            if (k != id) continue;
+            const std::string main = join(join(join(folder, "USRDIR"), "build"), "main");
+            if (has(main, "dlc-map1") && has(main, "dlc-map2")) return {id, folder};
+        }
+    return {};
+}
+
 // the Uncharted 2 import (u2mp/patcher/importer, C++): u2mp/bin/u2import.exe of the package
 std::string u2import_exe() { return join(join(join(g.root, "u2mp"), "bin"), port::program_name("u2import.exe")); }
 
@@ -1469,8 +1523,12 @@ void u2_import(bool silent, const std::string &reason = "") {
     port::ensure_dir(port::path_utf8(out));
 #endif
     std::vector<std::string> cmd = {exe, "--ps4", game_dir(), "--ps3", ps3, "--out", out};
-    const std::string data = u2_data_folder();   // GOTY data only: the game data folder, no map pack folder
+    const std::string data = u2_data_folder();   // the game data folder (net-patch9 and the spawn paks: GOTY's first)
     if (!data.empty()) { cmd.push_back("--ps3-data"); cmd.push_back(data); }
+    // the map packs GOTY lacks, from any release's RPCS3 install (the import logs the folder: "PS3 map packs: from ...");
+    // none found: a GOTY-only import as before
+    const U2Dlc dlc = u2_dlc_source();
+    if (!dlc.folder.empty()) { cmd.push_back("--ps3-dlc"); cmd.push_back(dlc.folder); }
     // the Uncharted 2 community server DNS: the import downloads the game data (NPUA80698DATA2) through it
     const std::string dns = strip(text(g.config, "u2mp_dns"));
     if (!dns.empty()) { cmd.push_back("--dns"); cmd.push_back(dns); }
@@ -2472,6 +2530,7 @@ Value mp_state(const std::string &tab) {
         u2.set("step", Value::text(g.u2.step));
         u2.set("progress", progress_pair(g.u2));
         u2.set("found", Value::text(u2_data_folder()));
+        u2.set("dlc", Value::text(u2_dlc_source().id));   // the title id the map packs come from, "" when none
         u2.set("dir", Value::text(u2_dir()));
         mp.set("u2", u2);
     }

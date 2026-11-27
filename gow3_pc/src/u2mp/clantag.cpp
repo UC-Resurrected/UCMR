@@ -57,16 +57,16 @@ void publish_tag() {
     online::member_data_changed();
 }
 
-// Keeps only what a tag may hold: letters (upper-cased) and digits, at most four of them.
+// Keeps the tag as typed, as PS3 did: its keyboard (alphabet panel, 4 characters) gave ASCII letters, digits, symbols
+// and spaces, case kept, and the page turned "\" and "|" into spaces. Anything else (control or non-ASCII bytes, which
+// that keyboard could not type) is skipped.
 void store_tag(const char *text, size_t size) {
     char tag[kTagBytes] = {};
     size_t taken = 0;
     for (size_t i = 0; i < size && text[i] && taken < kTagChars; ++i) {
         const char c = text[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
-            tag[taken++] = c;
-        else if (c >= 'a' && c <= 'z')
-            tag[taken++] = char(c - 'a' + 'A');
+        if (c < 0x20 || c > 0x7e) continue;
+        tag[taken++] = c == '\\' || c == '|' ? ' ' : c;
     }
     std::memcpy(image.at<char>(kClanTag), tag, kTagBytes);
     log("clan tag: [%.4s]", tag);
@@ -79,7 +79,7 @@ bool edit_clan_tag() {
     if (g_editing) return true;
     const char *stored = image.at<const char>(kClanTag);
     const std::string current(stored, strnlen(stored, kTagBytes));
-    if (!gow3gpu_text_input_begin(current.c_str(), "Clan Tag (up to 4 letters or digits; empty = none)")) {
+    if (!gow3gpu_text_input_begin(current.c_str(), "Clan Tag (up to 4 characters; empty = none)")) {
         log("clan tag: no text input available");
         return false;
     }

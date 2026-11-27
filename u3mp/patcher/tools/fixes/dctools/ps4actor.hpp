@@ -102,6 +102,9 @@ struct TMat {
     uint32_t x3, tail;
 };
 std::vector<TMat> tmpl_materials(const Pak &q);
+// a PS3 pak's MATERIAL_TABLE_1: each material's texture names in table order (missing textures left out; a repeated
+// material name: the last). Read only, for the Uncharted 2 twin skins (u2mp twin.cpp) and the maintainers.
+std::map<std::string, std::vector<std::string>> ps3_material_texture_names(const Pak &p);
 
 // BC1 texels (PS3 linear order, all mips) of a constant colour (clear: alpha 0), and the mip count
 std::pair<Bytes, uint32_t> bc1_flat(uint32_t w, uint32_t h, const uint32_t rgb[3], bool clear = false);

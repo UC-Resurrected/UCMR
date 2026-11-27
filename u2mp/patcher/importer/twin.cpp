@@ -16,6 +16,7 @@
 // into new pages, and the login / VRAM table page is rebuilt.
 #include "actor.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -251,6 +252,23 @@ G geometry(const Pak &q) {
 }
 std::string mat_key(const std::string &n) { return n.substr(0, n.find(',')); }
 
+// a texture path without its cook (the folder up to texture1/ or texture2/) and without the cook hash after the source
+// file name: 'z:/big2/.../texture1/art/x/y-color.tga/2A78820BA3B82517.ndb' -> 'art/x/y-color.tga' (lower case), so a
+// PS3 cook and a PS4 cook of one picture compare equal; "" for a path of another form
+std::string texture_identity(const std::string &full) {
+    std::string s = full;
+    for (char &c : s) c = char(std::tolower(uint8_t(c)));
+    std::replace(s.begin(), s.end(), '\\', '/');
+    size_t at = std::string::npos;
+    for (const char *k : {"/texture1/", "/texture2/"})
+        if (const size_t p = s.rfind(k); p != std::string::npos && (at == std::string::npos || p > at)) at = p + std::strlen(k);
+    if (at != std::string::npos) s = s.substr(at);
+    const size_t slash = s.rfind('/');
+    if (slash == std::string::npos) return "";
+    s = s.substr(0, slash);
+    return s.find('.') == std::string::npos ? "" : s;
+}
+
 const G::M *twin_material(const std::map<std::string, const G::M *> &cmats, const std::string &name) {
     auto it = cmats.find(mat_key(name));
     if (it != cmats.end()) return it->second;
@@ -446,8 +464,10 @@ void rekey_artgroup(const fs::path &path) {
 }
 
 std::string TwinStats::note() const {
-    return fmt("twin %s: %zu/%zu LOD0 submeshes from PS4 (%.0f%% of triangles), %zu/%zu materials from PS4", twin.c_str(), swapped, submeshes, 100 * share,
-               twin_materials, materials);
+    std::string r = fmt("twin %s: %zu/%zu LOD0 submeshes from PS4 (%.0f%% of triangles), %zu/%zu materials from PS4", twin.c_str(), swapped, submeshes,
+                        100 * share, twin_materials, materials);
+    for (size_t i = 0; i < retextured.size(); i++) r += (i ? ", " : "; re-textures kept from PS3: ") + retextured[i];
+    return r;
 }
 Value TwinStats::json() const {
     Value s;
@@ -456,7 +476,8 @@ Value TwinStats::json() const {
     auto n = [](size_t v) { return num((long long)v); };
     return obj({{"twin", str(twin)}, {"submeshes", n(submeshes)}, {"swapped", n(swapped)}, {"loose", n(loose)}, {"share", s}, {"materials", n(materials)},
                 {"twin_materials", n(twin_materials)}, {"artgroup_keys_fixed", n(artgroup_keys_fixed)}, {"textures_added", n(textures_added)},
-                {"geometry_textures_added", n(geometry_textures_added)}, {"size", n(size)}, {"cbuffer_capacity_raised", n(cbuffer_capacity_raised)}});
+                {"geometry_textures_added", n(geometry_textures_added)}, {"size", n(size)}, {"cbuffer_capacity_raised", n(cbuffer_capacity_raised)},
+                {"retextured", n(retextured.size())}});
 }
 
 // ------------------------------------------------------------------------------------------------ the twin build
@@ -533,8 +554,30 @@ std::variant<TwinStats, std::string> twin_build(const fs::path &ps3_mp, const fs
         const double share_raw = double(tris_swapped) / double(tris ? tris : 1);
         std::map<std::string, const G::M *> cmats;
         for (const G::M &m : cg.mats) cmats[mat_key(m.name)] = &m;
+        // An MP material that only shares the twin's material path (another variant: mp-year-one, ...) is the twin's
+        // material only when it draws the same pictures. One that binds a PS3 texture the PS3 twin does not have is a
+        // re-texture (Anniversary Drake's shirt, drake-year-one-color, on the hero cloth): it keeps its converted
+        // record with its own PS3 textures; the twin's would draw the campaign outfit instead.
+        std::set<std::string> twin3_tex;
+        for (const PakTexture &t : tw3.p.textures()) twin3_tex.insert(texture_identity(t.path));
+        for (const PakTexture &t : C.textures()) twin3_tex.insert(texture_identity(t.path));   // the twin's PS4-only maps (AO ...)
+        std::map<std::string, std::vector<std::string>> lbinds;
+        for (const actor::TMat &m : actor::tmpl_materials(L))
+            for (const auto &b : m.binds) lbinds[m.name].push_back(b.full);
+        std::map<std::string, std::string> retextured;   // L material -> the first texture the twin lacks
+        for (const G::M &m : lg.mats) {
+            const G::M *cm = twin_material(cmats, m.name);
+            if (!cm || mat_key(cm->name) == mat_key(m.name)) continue;
+            for (const std::string &full : lbinds[m.name]) {
+                const std::string id = texture_identity(full);
+                if (id.empty() || starts(id, "art/general/") || twin3_tex.count(id)) continue;
+                retextured[m.name] = id;
+                break;
+            }
+        }
+        auto twin_of = [&](const G::M &m) -> const G::M * { return retextured.count(m.name) ? nullptr : twin_material(cmats, m.name); };
         size_t twin_materials = 0;
-        for (const G::M &m : lg.mats) twin_materials += twin_material(cmats, m.name) != nullptr;
+        for (const G::M &m : lg.mats) twin_materials += twin_of(m) != nullptr;
         if (swap.empty()) {
             std::error_code ec;
             fs::remove(lpath, ec);
@@ -598,7 +641,7 @@ std::variant<TwinStats, std::string> twin_build(const fs::path &ps3_mp, const fs
         std::map<std::string, std::pair<BlobP, int64_t>> noff;
         std::set<std::string> bound;
         for (const G::M &m : lg.mats) {
-            const G::M *cm = twin_material(cmats, m.name);
+            const G::M *cm = twin_of(m);
             if (!cm) continue;
             for (const std::string &x : cbinds.at(cm->name)) bound.insert(x);
             const Bytes crec(C.d.begin() + std::ptrdiff_t(C.pbase(cm->page) + cm->off), C.d.begin() + std::ptrdiff_t(C.pbase(cm->page) + cm->off + MREC));
@@ -801,6 +844,7 @@ std::variant<TwinStats, std::string> twin_build(const fs::path &ps3_mp, const fs
         st.share = std::stod(fmt("%.3f", share_raw));   // round(share, 3)
         st.materials = lg.mats.size();
         st.twin_materials = twin_materials;
+        for (const auto &[n, why] : retextured) st.retextured.push_back(material_base(n) + ":" + material_variant(n) + " (" + why + ")");
         st.artgroup_keys_fixed = keys_fixed;
         st.textures_added = add_tex.size();
         st.geometry_textures_added = cent.size();

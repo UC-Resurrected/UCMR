@@ -496,6 +496,10 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
         if (const TMat *m = by_base(base)) return *m;
         if (base.size() > 5 && base.compare(base.size() - 5, 5, "/vest") == 0)
             if (const TMat *m = by_base(base.substr(0, base.size() - 5) + "/body")) return *m;
+        // another variant of a template object (Anniversary Drake's 'hero-main-outfit-cloth/mp-year-one' against the
+        // twin's 'hero-main-outfit-cloth:default'): that object's material, its shader and constants, re-bound to the
+        // PS3 textures below (not exact: base_any keeps the variant); before, the cost scoring picked the hair material
+        if (const TMat *m = by_base(material_base(mname)); m && material_base(mname) != base) return *m;
         if (mname.find("shadowblocker") != std::string::npos && !sb_tmpl.empty()) return *sb_tmpl[0];
         if (main_tmpl.empty()) throw Stop("IndexError: the template has no main material");
         if (!character) return *main_tmpl[0];

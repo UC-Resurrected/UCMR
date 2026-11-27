@@ -36,6 +36,10 @@ std::string local_name();
 int rank();   // this PC's rank badge index (profile panel)
 // Players in the party, this PC included; 0 when not in one.
 int member_count();
+// Host: every PC of the session loads the same map for *net-games* record `index` (PS3 0x49bdb8 / Start Match: a map
+// pack map only when every member has the pack; the Ruins, which a PC without map pack 1 plays as the base map, when
+// every member has map pack 1 or none has). Members that sent no map-pack byte (older PCs) are not counted.
+bool net_game_same_map(int32_t index);
 // Online: the player with this net id is on our transport but not in our party (a stranger of a matchmaking room).
 bool party_stranger(uint32_t net_id);
 // The player with this net id is a member of our party (voice mute rules, spec parity-j-voice-medals.md J3): off the

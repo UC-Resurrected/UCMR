@@ -556,6 +556,17 @@ std::vector<const TMat *> am_pool(const std::vector<TMat> &tmats, const std::str
 
 }  // namespace
 
+std::map<std::string, std::vector<std::string>> ps3_material_texture_names(const Pak &p) {
+    const AmTable t = am_read_materials(p);
+    std::map<std::string, std::vector<std::string>> out;
+    for (const auto &[name, idx] : t.mats) {
+        std::vector<std::string> v;
+        for (uint32_t i : idx) v.push_back(t.texs[i].second);
+        out[name] = v;
+    }
+    return out;
+}
+
 // BC1 texels (PS3 linear order, all mips) of a constant colour
 std::pair<Bytes, uint32_t> bc1_flat(uint32_t w, uint32_t h, const uint32_t rgb[3], bool clear) {
     const uint32_t c = ((rgb[0] >> 3) << 11) | ((rgb[1] >> 2) << 5) | (rgb[2] >> 3);

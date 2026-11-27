@@ -280,7 +280,8 @@ plus a start-over for a list object that never fetched (the first page-shown han
 button reads "Leaderboards" and the footer "Prev" / "Top of List" as on PS3 (`TEXTS.md`). Built 2026-11-25 (not yet
 checked in the game): the footer's L1 / R1 pictures. The menu data asks for `|L1-NOSWAP|` / `|R1-NOSWAP|`, tokens the PS4 text printer lacks;
 the PS4 icon font has the pictures (codes 8 / 6). Fix in `MENUS.md` 3.8.1 (menus.cpp points the four records at
-"|L1| " / "|R1| "; no asset or import change).
+"|L1| " / "|R1| ", or "|L2| " / "|R2| " while the PS4 shoulder setting is 0, so the pictures are always L1 / R1 as
+PS3; no asset or import change).
 
 ## 5. Assets
 
