@@ -2151,6 +2151,10 @@ Value page_u2mp(const State &state) {
                                           "multiplayer, then choose RPCS3's dev_hdd0/game folder."
                                         : found + (config_set(state, "u2mp_ps3_data").empty() ? "  (found by itself)" : ""),
                           DIM, CARD, 9));
+    // the map packs GOTY lacks, from another release's RPCS3 install in that dev_hdd0/game (core.cpp u2_dlc_source)
+    const std::string dlc = mp.get("dlc") ? text_of(*mp.get("dlc")) : "";
+    setup.push_back(label(p + "line:dlc", dlc.empty() ? "DLC map packs: not found." : "DLC map packs: found in " + dlc + ".",
+                          DIM, CARD, 9));
     setup.push_back(row(p + "row:ps3_elf", "2. Choose the decrypted EBOOT",
                         "Required: the decrypted EBOOT.elf of your own copy of the game.",
                         buttons_box(p, "ps3_elf", {{"choose", "Choose file"}, {"clear", "Clear"}})));
