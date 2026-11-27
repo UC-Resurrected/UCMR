@@ -334,6 +334,18 @@ jobs:
       - name: Small FFmpeg
         run: CC=clang bash tools/build_ffmpeg.sh
 
+      # the GPU code needs the Vulkan headers the Windows build has (MSYS2 vulkan-headers, 1.4.350): Ubuntu's are older
+      # (no vk::DriverId::eMesaKosmickrisp, vk::PipelineBinaryKeyKHR, ...); the system's loader stays the one linked
+      - name: Vulkan headers
+        run: |
+          git clone -q --depth 1 -b "$VULKAN_HEADERS" https://github.com/KhronosGroup/Vulkan-Headers.git "$HOME/vulkan-headers"
+          grep -m1 'define VK_HEADER_VERSION ' "$HOME/vulkan-headers/include/vulkan/vulkan_core.h"
+          # searched before the system's /usr/include by every C/C++ compile of the later steps (the unit tests and the
+          # package's runtime build compile too)
+          echo "CPATH=$HOME/vulkan-headers/include" >> "$GITHUB_ENV"
+        env:
+          VULKAN_HEADERS: v1.4.350
+
       - name: Build the runtime
         run: |
           export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib64/pkgconfig:$PWD/downloads/ffmpeg-8.1.1-min-linux/lib/pkgconfig"
