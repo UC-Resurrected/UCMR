@@ -8,7 +8,8 @@ set -uo pipefail
 cd -- "$(dirname -- "$0")/.."
 build=${1:?build folder, e.g. out/gpu}
 shift
-build=$(cd -- "$build" && pwd)
+given=$build
+build=$(cd -- "$given" && pwd) || { echo "no build folder $given in gow3_pc" >&2; exit 1; }
 exe=
 case $(uname -s) in MINGW*|MSYS*) exe=.exe ;; esac
 tests=("$@")

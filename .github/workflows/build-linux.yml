@@ -406,7 +406,7 @@ jobs:
           grep -q 'readback PASS' vulkan.log || { echo "::error title=gow3-probe::Vulkan check failed"; exit 1; }
 
       - name: Unit tests
-        run: bash gow3_pc/tests/run_unit_tests.sh gow3_pc/out/gpu
+        run: bash gow3_pc/tests/run_unit_tests.sh out/gpu   # the build folder relative to gow3_pc (the script works from there)
 
       - name: Stage the runtime for the package
         run: |
