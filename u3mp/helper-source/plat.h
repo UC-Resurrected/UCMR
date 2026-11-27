@@ -1,7 +1,7 @@
 /* plat.h - the ONLY door between the U3 helper (u3_lan_profiles.c, agc_port.inc, kr_port.inc) and the
  * operating system. One source tree builds for both targets:
  *
- *     PC  (BilalReloaded runtime, Windows)   build_u3_pool_blob.py ... (default)          -> plat_pc.inc
+ *     PC  (UCMR runtime, Windows and Linux)  u3_helper_build (default)                -> plat_pc.inc
  *     PS4 (fake-signed big3 SELF in a PKG)   build_u3_pool_blob_plat.py --cflags -DU3_PLAT_PS4 -> plat_ps4.inc
  *
  * RULE FOR ALL FUTURE HELPER CODE
@@ -51,7 +51,15 @@ static inline int64_t plat_rename(ProfileState *s,const char *from,const char *t
  *                PC: the x001 probe, Winsock shims when sceNetSocket answers 0x80410133. PS4: native.
  * plat_sock_ready   1 when the raw socket functions below can be used from a helper thread.
  * plat_sys_bind     resolves alloc/thread/sleep/utc/resolve/tls once; 1 when all are available.
- * plat_thread_ready 1 once plat_sys_bind found the thread function (the UPnP thread checks it). */
+ * plat_thread_ready 1 once plat_sys_bind found the thread function (the UPnP thread checks it).
+ * PLAT_BIND(s)   kind 44 too, before plat_init, with the profile state: PC (v7.267) reads the runtime's host function
+ *                table through s->open / s->read / s->close (u3x_host_bind, u3x_fixes.cpp); PS4: nothing. */
+#ifdef U3_PLAT_PS4
+#define PLAT_BIND(s) ((void)(s))
+#else
+__attribute__((visibility("hidden"))) int u3x_host_bind(uintptr_t open,uintptr_t read,uintptr_t close);
+#define PLAT_BIND(s) ((void)u3x_host_bind((s)->open,(s)->read,(s)->close))
+#endif
 static int plat_init(uintptr_t base);
 static void plat_net_pick(void);
 static int plat_sock_ready(void);
@@ -112,8 +120,8 @@ static void plat_tls_close(PlatTls *t);
 #ifdef U3_PLAT_PS4
 #define PLAT_THREAD_ATTR
 #define PLAT_THREAD_RET void *
-#else
-#define PLAT_THREAD_ATTR __attribute__((ms_abi,force_align_arg_pointer))
+#else   /* v7.267: the runtime's host table starts the thread and calls it with the System V ABI on Windows and Linux */
+#define PLAT_THREAD_ATTR __attribute__((force_align_arg_pointer))
 #define PLAT_THREAD_RET uint32_t
 #endif
 typedef PLAT_THREAD_RET (PLAT_THREAD_ATTR *plat_thread_fn)(void *arg);

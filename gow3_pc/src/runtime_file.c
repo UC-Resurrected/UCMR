@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <time.h>
 #include "runtime.h"
+#include "uncharted_host.h"   /* UNCHARTED_HOST_PATH: the U3 helper's host function table */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -383,6 +384,21 @@ static int game_path(const char *p) {
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
+    if (guest && !strcmp(guest,UNCHARTED_HOST_PATH)) {
+        /* The U3 helper asks for the host function table (uncharted_host.h): a read-only descriptor holding its address. */
+        const int host=runtime_host_api_fd();
+        if (host<0) return -EMFILE;
+        pthread_mutex_lock(&lock);
+        for (int i=3;i<MAX_FILES;++i) if (!files[i].used) {
+            files[i]=(File){.used=1,.host=host};
+            snprintf(files[i].path,sizeof(files[i].path),"%s",guest);
+            pthread_mutex_unlock(&lock);
+            return i;
+        }
+        pthread_mutex_unlock(&lock);
+        close(host);
+        return -EMFILE;
+    }
     if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));

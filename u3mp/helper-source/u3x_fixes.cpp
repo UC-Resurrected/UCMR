@@ -55522,3 +55522,31 @@ FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
 }  // extern "C"
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
 // ===== v7.254 fam end =====
+// ===== v7.267 host table (docs/WINDOWS-DEPENDENCIES.md §4.10, phase 5) =====
+// The runtime's host function table (gow3_pc/src/uncharted_host.h) for the PC platform layer (plat_pc.inc), the same on
+// Windows and Linux. Its address is read at kind 44 (PLAT_BIND in plat.h) through the runtime's own sceKernelOpen /
+// sceKernelRead / sceKernelClose of /dev/uncharted_host: 8 bytes. Version 1, at least 208 bytes; an older runtime has no
+// such file, and the PC layer then finds no host functions (no network, as without Winsock).
+namespace {
+U3X_RO const char host_path[] = "/dev/uncharted_host";
+constexpr uint32_t HOST_VERSION = 1, HOST_SIZE = 208;
+U3X_BSS const void *g_host;
+}  // namespace
+extern "C" {
+U3X_FN int u3x_host_bind(uintptr_t open, uintptr_t read, uintptr_t close) {
+    if (g_host) return 1;
+    if (!open || !read || !close) return 0;
+    const int64_t fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(open)(host_path, 0, 0);
+    if (fd < 0) return 0;
+    uint64_t address = 0;
+    const int64_t n = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(read)(static_cast<int>(fd), &address, 8);
+    reinterpret_cast<int64_t (*)(int)>(close)(static_cast<int>(fd));
+    if (n != 8 || !ptr_ok(reinterpret_cast<const void *>(address))) return 0;
+    const uint32_t *table = reinterpret_cast<const uint32_t *>(address);
+    if (table[0] != HOST_VERSION || table[1] < HOST_SIZE) return 0;
+    g_host = table;
+    return 1;
+}
+U3X_FN const void *u3x_host(void) { return g_host; }
+}  // extern "C"
+// ===== v7.267 host table end =====
