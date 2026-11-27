@@ -192,3 +192,17 @@ game-owned content mask (`+0x38 = 1`), and is inserted after its character's row
 and Sir Francis Drake, Drake - Dirty and Beat-up, and the remaining GOTY skins use the same path. The campaign
 packages share the MP skeleton (LOD0 only); not yet spawned in a match. The table order changed: every PC needs
 this build.
+
+PS3 store lists (owner report 2026-11-27: PS3 Hero 30/30, Villain 30/30; ours 17 / 20). The PS4 table has PS3's first
+29 heroes and 29 villains in PS3 order, but with add-on licence masks (`+0x38`: dlc1 0x2000, skin-dlc2 0x4000,
+skin-dlc3 0x8000, sony-skins 0x1000, rika-pinkerton 0x800, ...); the store and Profile lists show an item only when
+its mask meets the licence word (`[0x104f4b0 + 0x78]` with the region bits), which PS4 never fills, so the add-on
+skins were hidden. The GOTY server data gives all 60 PS3 skins mask 1. The copy now gives every hero / villain row
+mask 1, puts PS3's 30th items last (`costume-hero-skeleton-sir-francis` after `mp-hero-year-1`,
+`costume-hero-sol-med-b-1a` after `mp-hero-u1-merc-brsr-1a`) and the PC extras of #34 (`mp-hero-nd`,
+`mp-hero-frosty`, `hero-dirty-beatup`, `mp-hero-pirate-nd`, `mp-hero-lazarevic-fat`, `mp-hero-flynn-frosty`,
+`costume-hero-lazarevic-healed`) after the PS3 items, each with its purchase bit (owner to decide keep or drop).
+The PS4 game has `actor27/ps4/costume-hero-skeleton-sir-francis.pak` (a campaign costume); the boot log still lists
+it as missing because the record's package name reads `costume-hero-skeleton-sir-franci`: the 33-character name is cut
+to 31 characters plus the NUL somewhere on the way into the skin record (not found yet). PS3 has its own model
+(`mp-hero-sir-francis`, BCUS98123 data); with the PS4 asset present it is not needed (PS4 assets first).

@@ -918,14 +918,18 @@ void build_store_copy() {
         const char *after;
         uint32_t bit;
     };
+    // The hero / villain lists are PS3's (the GOTY server data): its 29 rows of the PS4 table, then its 30th item
+    // (Sir Francis Drake for heroes, the costume soldier for villains). The PC extras (#34) come after the PS3 items
+    // (after = nullptr: appended in skin table order), each keeping its purchase bit.
     static constexpr StorePlacement kPlacements[] = {
-        {"mp-hero-nd", "mp-hero-red", 137},
-        {"mp-hero-pirate-nd", "mp-hero-pirate", 138},
-        {"mp-hero-lazarevic-fat", "mp-hero-pinkerton", 122},
-        {"mp-hero-flynn-frosty", "mp-hero-lazarevic-fat", 128},
-        {"mp-hero-frosty", "mp-hero-rika", 125},
-        {"costume-hero-lazarevic-healed", "mp-hero-lazarevic", 15},
-        {"costume-hero-skeleton-sir-francis", "mp-hero-skeleton-marco", 14},
+        {"mp-hero-nd", nullptr, 137},
+        {"mp-hero-pirate-nd", nullptr, 138},
+        {"mp-hero-lazarevic-fat", nullptr, 122},
+        {"mp-hero-flynn-frosty", nullptr, 128},
+        {"mp-hero-frosty", nullptr, 125},
+        {"costume-hero-lazarevic-healed", nullptr, 15},
+        {"costume-hero-skeleton-sir-francis", "mp-hero-year-1", 14},
+        {"costume-hero-sol-med-b-1a", "mp-hero-u1-merc-brsr-1a", 0},
     };
 
     int target_original = 0, target_added = 0;
@@ -1002,9 +1006,7 @@ void build_store_copy() {
             for (const ExtraSkin &e : kExtraSkins)
                 if (e.villain == villain) offer(e.id, reinterpret_cast<const uint8_t *>(e.package));
         }
-        if (wanted.empty()) continue;
-
-        struct StoreRow {
+        struct StoreRow {   // the list is rebuilt also with nothing to add: the original rows get mask 1 below
             const uint8_t *src;
             StoreWish wish;
         };
@@ -1033,6 +1035,10 @@ void build_store_copy() {
             uint8_t *item = list + 0x50 * k;
             if (rows[k].src) {
                 std::memcpy(item, rows[k].src, 0x50);
+                // The PS4 rows carry add-on licence masks (+0x38: dlc1, skin-dlc2 / 3, sony-skins, ...) that hide
+                // every add-on skin on PC; the GOTY data gives each of these skins mask 1 (game-owned), so PS3
+                // lists them all.
+                wr32(item, 0x38, 1);
                 continue;
             }
             // Price, rank and texts come from the last original item; the row is its own game-owned skin.
