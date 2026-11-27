@@ -402,6 +402,15 @@ void Inputs::add_ps3_u3(const std::vector<fs::path> &folders, bool scan) {
         if (!ps3.count(k))
             for (const Kind &x : KINDS)
                 if (std::string(x.name) == k) problems.push_back(std::string("no PS3 Uncharted 3 ") + k + " found (" + x.desc + ")");
+    if (!ps3.count("update")) {
+        // the common case: a disc (or disc image) and a separate 1.19 EBOOT.elf, but no installed update: say where it
+        // comes from and which folder to add (RPCS3 installs it under dev_hdd0/game/<the disc's title id>)
+        std::string id = ps3.count("disc") ? ps3_sfo["disc"]["TITLE_ID"] : "";
+        if (id.empty()) id = "<your disc's title id, e.g. BCES01670 or BLUS30815>";
+        problems.push_back("the PS3 1.19 update's data (dlc-patch13.psarc and dlc-patch18.psarc) is needed; an EBOOT.elf "
+                           "alone does not contain it. Install the Uncharted 3 PS3 update 1.19 in RPCS3 (File > Install "
+                           "Packages/Raps), then add RPCS3's dev_hdd0/game/" + id + " folder to the PS3 folders and import again");
+    }
     for (const char *k : {"data2", "dlcmaps"})
         if (!ps3.count(k)) notes.push_back(std::string("no PS3 Uncharted 3 ") + k + " found; the steps that need it will be skipped");
 }
