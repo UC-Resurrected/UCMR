@@ -205,7 +205,9 @@ void make_record(Playlist &p, uint32_t id, uint32_t name, uint32_t desc, uint32_
     put<uint8_t>(p.bytes + 0x6c, uint8_t(ps3_index));
 }
 
-// The PS3 playlists. Name and description are text ids, pictures are names under
+// The PS3 playlists, in the order of the PS3 list (the GOTY server data's playlist table: The Lab, Deathmatch,
+// Elimination, Plunder, Objectives, Ranked, All Competitive Modes, Co-op Objective, Co-op Arena), then the two co-op
+// playlists of ours the PS3 list does not have. Name and description are text ids, pictures are names under
 // general/net/playlists/, types are the game types' name text ids.
 struct PlaylistDef {
     const char *key;
@@ -213,28 +215,31 @@ struct PlaylistDef {
     uint32_t desc;   // 0: the first game type's description
     const char *pictures[3];
     uint32_t types[8];
-    int8_t ps3_index = -1;   // index in the PS3 playlist list when it differs from this order
+    int8_t ps3_index;   // index in the PS3 playlist list (9, 10: after it), also when a playlist before is skipped
 };
 
 constexpr uint32_t kDeathmatch = 0xa30341e7, kTeamDeathmatch = 0x8dfdede9, kPlunder = 0x3d9470a5,
                    kTurf = 0x0544e6f6, kKoh = 0x13f76fcc, kObjA = 0x71ede2dc, kObjB = 0xf625a024,
-                   kElimination = 0x3b8de400;
+                   kElimination = 0x3b8de400, kCoopObjective = 0xc072e0a6, kSurvival = 0x2959eca4,
+                   kGoldRush = 0xe9995f4c, kCoopArena3 = 0xf0a21209;
 
 const PlaylistDef kDefs[] = {
-    {"all-competitive", sid("u2mp/playlist/all-competitive"), sid("u2mp/playlist/all-competitive/desc"),
-     {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
-    {"ranked", 0x47b24464, 0x57fc82aa, {"mlg"},
-     {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
-    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}, 1},
-    {"elimination", kElimination, sid("u2mp/playlist/elimination/desc"), {"elimination"}, {kElimination}},
-    {"objectives", 0x4bf30e73, 0x675ef552, {"objective"}, {kPlunder, kTurf, kKoh, kObjA, kObjB}},
-    {"plunder", kPlunder, 0x32cc1acb, {"plunder"}, {kPlunder}},
-    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {0x5136a578}},
-    {"coop-arena", 0x2ee192ab, 0, {"coop", "survival", "default"}, {0x2ee192ab}},
-    {"gold-rush", 0x00248bb5, 0, {"default", "survival", "coop"}, {0x00248bb5, 0xe9995f4c}},
-    {"survival", 0x2959eca4, 0, {"survival", "default", "coop"}, {0x2959eca4, 0xb81a7c18}},
     {"the-lab", sid("u2mp/playlist/the-lab"), sid("u2mp/playlist/the-lab/desc"), {"the-lab", "default"},
-     {kDeathmatch, kTeamDeathmatch}},
+     {kDeathmatch, kTeamDeathmatch}, 0},
+    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}, 1},
+    {"elimination", kElimination, sid("u2mp/playlist/elimination/desc"), {"elimination"}, {kElimination}, 2},
+    {"plunder", kPlunder, 0x32cc1acb, {"plunder"}, {kPlunder}, 3},
+    {"objectives", 0x4bf30e73, 0x675ef552, {"objective"}, {kPlunder, kTurf, kKoh, kObjA, kObjB}, 4},
+    {"ranked", 0x47b24464, 0x57fc82aa, {"mlg"},
+     {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 5},
+    {"all-competitive", sid("u2mp/playlist/all-competitive"), sid("u2mp/playlist/all-competitive/desc"),
+     {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 6},
+    // The co-op playlists list net games of these game types on PS3 (Co-op Objective: the "Co-op" type; Co-op Arena:
+    // Survival, Gold Rush and the third arena type, f0a21209); their names are not game type names.
+    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {kCoopObjective}, 7},
+    {"coop-arena", 0x2ee192ab, 0xe1ae2796, {"coop", "survival", "default"}, {kSurvival, kGoldRush, kCoopArena3}, 8},
+    {"gold-rush", 0x00248bb5, 0, {"default", "survival", "coop"}, {0x00248bb5, 0xe9995f4c}, 9},
+    {"survival", 0x2959eca4, 0, {"survival", "default", "coop"}, {0x2959eca4, 0xb81a7c18}, 10},
 };
 
 uint32_t picture_id(const char *name) { return sid(("general/net/playlists/" + std::string(name)).c_str()); }
@@ -382,22 +387,9 @@ U2MP_GUEST void query_playlist(uint8_t *q) {
     if (get<int16_t>(abs_at(kNgm + 0x1ca0)) < 0) applied = 0;   // left Multiplayer: apply again next time
     call(original_playlist, q);
 
-    if (op_of(q) == 3 && get<uint32_t>(q + 8) == 0x25) {
-        const uint32_t row = get<uint32_t>(q + 4);
-        if (row < uint32_t(built)) {
-            // An image from the net image table, looked up by id.
-            put<uint32_t>(q + 0x08, 3);
-            put<uint64_t>(q + 0x10, 0);
-            put<uint32_t>(q + 0x18, 0);
-            put<uint32_t>(q + 0x1c, playlists[row].picture());
-            put<uint32_t>(q + 0x20, 1);
-            put<int32_t>(q + 0x24, -1);
-            put<uint32_t>(q + 0x28, 0);
-            put<int32_t>(q + 0x2c, -1);
-            put<float>(q + 0x30, 1.0f);
-        }
-        return;
-    }
+    // op 3: the game's answer stays (image type 0x25 with the playlist id, as PS3): menuimages.cpp draws the
+    // picture in PS3's box and the game type icons under it.
+    if (op_of(q) == 3) return;
     if (op_of(q) != 4 || built == 0) return;
     if (get<int32_t>(q + 4) < 0) {   // the saved choice is not one of ours: take the first playlist
         put<uint32_t>(abs_at(kNpd + 0x104), playlists[0].id());
@@ -555,22 +547,22 @@ const char *keep(char (&cell)[256], const std::string &text) {
 int32_t friends_row(int32_t count) {
     if (!friends_sel.empty()) {
         const int i = online::friend_index(friends_sel);
-        if (i >= 0) friends_cur = 1 + i;
+        if (i >= 0) friends_cur = i;
     }
     if (count <= 0) return -1;
     return friends_cur < 0 ? 0 : friends_cur >= count ? count - 1 : friends_cur;
 }
 void store_friend_row(int32_t row, int n) {
     friends_cur = row;
-    friends_sel = row >= 1 && row - 1 < n ? online::friend_name(row - 1) : std::string();
+    friends_sel = row >= 0 && row < n ? online::friend_name(row) : std::string();
 }
 
-// Online: row 0 "Browse Online Games" and the friend rows in the PS3 layout (name in column 0, the status block
-// in column 3, status dot and row icon), then the friend requests; PC additions kept: the title with the online
-// count, the browse row, the request rows.
+// Online: the friend rows in the PS3 layout (name in column 0, the status block in column 3, status dot and row
+// icon), then the friend requests; PC additions kept: the title with the online count, the request rows, one hint
+// row while there are no friends. PS3 has no "Browse Online Games" row in this list (owner 2026-11-27): removed.
 void query_friends_online(uint8_t *q) {
     const int n = online::friend_count();
-    const int32_t count = n == 0 ? 2 : 1 + n;
+    const int32_t count = n == 0 ? 1 : std::max(n, 0);
     const int32_t row = get<int32_t>(q + 4);
     switch (op_of(q)) {
     case 1: {
@@ -589,15 +581,14 @@ void query_friends_online(uint8_t *q) {
         }
         const int c = column == 0 ? 0 : 1;
         online::FriendView v;
-        if (row == 0) set_text(q, column == 0 ? "Browse Online Games" : kNothing);
-        else if (n == 0) set_text(q, column == 0 ? "No RPCN friends yet. Add friends in the launcher." : kNothing);
-        else if (online::friend_view(row - 1, v)) set_text(q, keep(friend_cells[row][c], column == 0 ? v.npid : friend_status(v)));
-        else set_text(q, keep(friend_cells[row][c], column == 0 ? online::friend_name(row - 1) : online::request_state(row - 1)));
+        if (n == 0) set_text(q, column == 0 ? "No RPCN friends yet. Add friends in the launcher." : kNothing);
+        else if (online::friend_view(row, v)) set_text(q, keep(friend_cells[row][c], column == 0 ? v.npid : friend_status(v)));
+        else set_text(q, keep(friend_cells[row][c], column == 0 ? online::friend_name(row) : online::request_state(row)));
         break;
     }
     case 3: {
         online::FriendView v;
-        if (row < 1 || !online::friend_view(row - 1, v)) break;
+        if (row < 0 || !online::friend_view(row, v)) break;
         const uint32_t element = get<uint32_t>(q + 0x50);
         auto image = [q](uint32_t type, uint32_t value) {
             put<uint32_t>(q + 8, type);
@@ -610,7 +601,7 @@ void query_friends_online(uint8_t *q) {
             put<float>(q + 0x30, 1.0f);
         };
         if (element == kElementStatusDot) image(0x20, v.party_member ? 2 : v.online ? 1 : 0);
-        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.level, 1)));
+        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.mode, 1)));
         else if (element == 0 && v.this_game) image(0x21, 0);
         break;   // the avatar (0x2138a9b2): RPCN has none
     }
@@ -631,7 +622,7 @@ U2MP_GUEST void query_friends(uint8_t *q) {
         static int traced = 0;
         if (traced < 96 && op_of(q) != 1) {
             log("friends query: op %u row %d cur %d rows %d", op_of(q), get<int32_t>(q + 4), friends_cur,
-                online::friend_count() == 0 ? 2 : 1 + online::friend_count());
+                online::friend_count() == 0 ? 1 : std::max(online::friend_count(), 0));
             ++traced;
         }
         query_friends_online(q);
@@ -720,6 +711,51 @@ U2MP_GUEST void query_join_list(uint8_t *q) {
         plain_list(q, 0, join_cur, [](int32_t) { return kNothing; });
 }
 
+// ---- booster slots (cond 77, 78) -------------------------------------------------------------------------
+// The booster list query answers op 7 (row enabled) with 0 while the lobby's net game is a co-op type and the Profile
+// is open over the custom game lobby; PS3 does the same (MENUS.md 3.3). The owner wants the boosters selectable
+// there too (2026-11-27), so op 7 always answers 1 here; everything else is the game's query.
+uint64_t original_boosters = 0;
+U2MP_GUEST void query_boosters(uint8_t *q) {
+    call(original_boosters, q);
+    if (op_of(q) == 7) put<int32_t>(q + 4, 1);
+}
+
+// ---- Golden Guns (cond 108) --------------------------------------------------------------------------------
+// The Profile's option rows 108 / 109 / 110 share one query (0x65c610, its table argument the row's bit: 0x10 Golden
+// Guns). A row shows only when its bit is in the licence word [0x104f4b0 + 0x78] (or a region bit): on PS3 the
+// golden-weapons licence gave 0x10 (net.bin's licence table, dlc.cpp), on PS4 nothing sets it, so the row had no
+// label and stayed hidden. The setting itself is NetPlayerData +0x13c (saved with the career), and the PS4 spawn code
+// still gives the golden weapon sets of net-patch9 when it is 1 (0x663494). The query runs with the bit added and the
+// word put back after.
+constexpr uint64_t kLicenceWord = 0x104f4b0 + 0x78;
+constexpr uint32_t kGoldenGunsBit = 0x10;
+uint64_t original_golden_guns = 0;
+U2MP_GUEST void query_golden_guns(uint8_t *q) {
+    uint8_t *licences = abs_at(kLicenceWord);
+    const uint32_t kept = get<uint32_t>(licences);
+    put<uint32_t>(licences, kept | kGoldenGunsBit);
+    call(original_golden_guns, q);
+    put<uint32_t>(licences, kept);
+}
+
+// ---- Matchmaking: Default / DLC (cond 135) -----------------------------------------------------------------
+// The Profile's Other Settings row between Taunt and Golden Guns (query 0x65a790, PS3 0x4c09a8): label "Matchmaking",
+// values "Default" (0) and "DLC" (1), the setting NetPlayerData +0x1b0 bit 0 (PS3 data block +0x16c), saved with the
+// career. The game gives the row its label only while the owned-DLC word [0x1115a30 + 0xa0] is not 0; on PS3 the map
+// pack entitlements set it, on PS4 nothing does, so the row stayed hidden and left the gap. The query runs with the
+// imported map packs' bits (dlc_packs, bits 1 and 2) in that word and the word put back after; no pack imported: the
+// row stays hidden as on a PS3 without map packs. What the value does: session.cpp mm_pack_mask.
+constexpr uint64_t kOwnedDlcWord = 0x1115a30 + 0xa0;
+uint64_t original_matchmaking = 0;
+U2MP_GUEST void query_matchmaking(uint8_t *q) {
+    uint8_t *owned = abs_at(kOwnedDlcWord);
+    const uint32_t kept = get<uint32_t>(owned);
+    put<uint32_t>(owned, kept | (dlc_packs() & 0x6u));
+    call(original_matchmaking, q);
+    put<uint32_t>(owned, kept);
+}
+
 // ---- diagnostic trace of the Profile page queries ---------------------------------------------------------
 
 constexpr uint32_t kTracedConds[] = {105, 77, 78, 134, 40, 41, 80, 82, 135, 108, 109, 110};
@@ -742,13 +778,17 @@ template <size_t... N> constexpr auto make_tracers(std::index_sequence<N...>) {
 
 // ---- help bar shoulder icons (MENUS.md 3.8.1) ------------------------------------------------------------
 // Four help-bar records (0x18 bytes, read-only data: u64 +0 token string, u32 +8 menu action, ...) carry the tokens
-// "|L1-NOSWAP| " / "|R1-NOSWAP| ", which the PS4 text printer no longer knows, so no picture was drawn. They are
-// pointed at our "|L1| " / "|R1| " instead: action 0xb (previous) gets L1 and 0xa (next) R1, the other way round
-// while the PS4 exchange word is set.
+// "|L1-NOSWAP| " / "|R1-NOSWAP| ", which the PS4 text printer no longer knows, so no picture was drawn. On PS3 they
+// always draw the L1 / R1 picture, whatever the controller setting. The PS4 printer has no such token: its "|L1|" /
+// "|R1|" draw the L2 / R2 pictures while the shoulder setting is 0 and its "|L2|" / "|R2|" then draw L1 / R1. So the
+// records get the token that draws L1 (action 0xb, previous) or R1 (0xa, next) under the current setting.
 
-constexpr uint64_t kShoulderSetting = 0x1059640 + 0x4888;    // u32: 0 = L2 / R2 run Prev / Next
-constexpr uint64_t kShoulderExchange = 0x1059640 + 0x4870;   // u32: != 0 exchanges Prev / Next
+constexpr uint64_t kShoulderSetting = 0x1059640 + 0x4888;    // u32: 0 = the printer swaps L1 / L2 and R1 / R2
 constexpr uint8_t kActionPrev = 0xb;   // the other records' action is 0xa (next)
+// The Multiplayer pages' Store entry: PS3 and PS4 both use text 90354b88, which reads "Store" in the PS3 text banks and
+// "Rewards" in the PS4 ones. The record gets our text "Store" (texts.cpp, every language), as PS3 shows it.
+constexpr uint64_t kStoreRecord = 0x10417a0;
+constexpr uint32_t kStoreText = sid("u2mp/help/store");
 
 struct HelpRecord {
     uint64_t offset;
@@ -764,10 +804,11 @@ const char kTokenL1NoSwap[] = "|L1-NOSWAP| ";   // at 0xe8957b
 const char kTokenR1NoSwap[] = "|R1-NOSWAP| ";   // at 0xe8956e
 const char kIconL1[] = "|L1| ";
 const char kIconR1[] = "|R1| ";
+const char kIconL2[] = "|L2| ";
+const char kIconR2[] = "|R2| ";
 
 bool help_bar_ok = false;
-bool help_bar_values_logged = false;
-int help_bar_logged = -1;   // the exchange state last logged (-1: none yet)
+int help_bar_logged = -1;   // the shoulder setting state last logged (-1: none yet)
 
 void check_help_bar() {
     help_bar_ok = false;
@@ -839,6 +880,24 @@ int32_t playlist_max_players(uint32_t id) {
     return 0;
 }
 
+int playlist_type_icons(uint32_t id, uint32_t *icons, int max) {
+    const Playlist *p = nullptr;
+    for (int k = 0; k < built && !p; ++k)
+        if (playlists[k].id() == id) p = &playlists[k];
+    if (!p || max <= 0) return 0;
+    void *sym = dc_lookup(kDcGameTypes);
+    if (!sym) return 0;
+    const DcTable types = read_table(sym);
+    if (types.count <= 0 || !types.records) return 0;
+    int n = 0;
+    for (int32_t t = 0; t < types.count && n < max; ++t) {   // game type order, each type once
+        bool listed = false;
+        for (int i = 0; i < p->type_count() && i < 8; ++i) listed = listed || p->type(i) == t;
+        if (listed) icons[n++] = get<uint32_t>(types.records + 0x44 * t + 8);
+    }
+    return n;
+}
+
 int32_t playlist_index(uint32_t id) {
     for (int k = 0; k < built; ++k) {
         if (playlists[k].id() != id) continue;
@@ -850,14 +909,15 @@ int32_t playlist_index(uint32_t id) {
 
 void menus_help_bar_frame() {
     if (!help_bar_ok) return;
-    const bool exchange = get<uint32_t>(abs_at(kShoulderExchange)) != 0;
+    const bool swapped = get<uint32_t>(abs_at(kShoulderSetting)) == 0;   // the printer draws |L2| as L1 then
     bool written = false;
     for (const HelpRecord &r : kHelpRecords) {
-        const bool l1 = (r.tail[0] == kActionPrev) != exchange;
-        const uint64_t wanted = reinterpret_cast<uint64_t>(l1 ? kIconL1 : kIconR1);
+        const char *token = r.tail[0] == kActionPrev ? (swapped ? kIconL2 : kIconL1) : (swapped ? kIconR2 : kIconR1);
+        const uint64_t wanted = reinterpret_cast<uint64_t>(token);
         uint8_t *p = abs_at(r.offset);
-        if (get<uint64_t>(p) == wanted) continue;
-        const HostCodeWrite writable(p, 8);   // read-only data: writable for the write, then put back
+        const uint32_t text = r.offset == kStoreRecord ? kStoreText : get<uint32_t>(p + 0xc);
+        if (get<uint64_t>(p) == wanted && get<uint32_t>(p + 0xc) == text) continue;
+        const HostCodeWrite writable(p, 0x10);   // read-only data: writable for the write, then put back
         if (!writable.ok()) {
             log("menus: help bar record 0x%llx cannot be made writable (%lu), Prev / Next icons left alone",
                 (unsigned long long)r.offset, writable.error());
@@ -865,17 +925,13 @@ void menus_help_bar_frame() {
             return;
         }
         put<uint64_t>(p, wanted);
+        put<uint32_t>(p + 0xc, text);
         written = true;
     }
-    if (!written) return;
-    if (!help_bar_values_logged) {
-        help_bar_values_logged = true;
-        log("menus: shoulder setting %u, exchange %u", get<uint32_t>(abs_at(kShoulderSetting)),
-            get<uint32_t>(abs_at(kShoulderExchange)));
-    }
-    if (int(exchange) == help_bar_logged) return;
-    help_bar_logged = int(exchange);
-    log("menus: help bar shoulder icons %s", exchange ? "exchanged" : "L1 / R1");
+    if (!written || int(swapped) == help_bar_logged) return;
+    help_bar_logged = int(swapped);
+    log("menus: help bar shoulder icons L1 / R1 (shoulder setting %u: tokens %s)",
+        get<uint32_t>(abs_at(kShoulderSetting)), swapped ? "|L2| / |R2|" : "|L1| / |R1|");
 }
 
 void install_menus(int &installed) {
@@ -903,6 +959,10 @@ void install_menus(int &installed) {
         {55, 0x6562d0, "PLAYLIST", query_playlist, &original_playlist},
         {39, 0x65bcd0, "LIST_PLAYERSMET", query_players_met, &original_met},
         {104, 0x65f3f0, "voice volume slider", query_volume, &original_volume},
+        {77, 0x659bd0, "LIST_BOOSTERS0", query_boosters, &original_boosters},
+        {78, 0x659bd0, "LIST_BOOSTERS1", query_boosters, &original_boosters},
+        {108, 0x65c610, "Golden Guns", query_golden_guns, &original_golden_guns},
+        {135, 0x65a790, "Matchmaking", query_matchmaking, &original_matchmaking},
     };
     for (const Wrap &w : wraps) {
         uint8_t *e = find_entry(w.cond);

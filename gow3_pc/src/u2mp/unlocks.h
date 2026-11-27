@@ -26,7 +26,12 @@ uint32_t unlocks_skin_fingerprint();
 const char *unlocks_local_skin();
 const char *unlocks_local_villain();
 
-// Re-applies each net slot's character index and the local slot's art to the 10-entry per-slot table.
+// Re-applies each net slot's character index and the local slot's art to the 10-entry per-slot table. In a co-op
+// game each slot instead gets the net game's character of its co-op rank (tracker +0x198), as on PS3.
 void unlocks_apply_slot_skins();
+
+// The actor package of co-op rank `rank` (0..2) in the current net game, NULL outside a co-op game (or when the
+// character is not in the skin table).
+const char *unlocks_coop_character(int rank);
 
 }  // namespace u2mp

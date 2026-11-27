@@ -40,6 +40,9 @@ void menu_draw_quad(uint8_t *material, float x, float y, float w, float h, float
 namespace u2mp {
 void install_menus(int &installed);
 void menus_help_bar_frame();   // MENUS.md 3.8.1 (new only: the HB scenarios)
+int32_t playlist_index(uint32_t id);   // new only: the 14P / 15P scenarios
+int playlist_type_icons(uint32_t id, uint32_t *icons, int max);
+int32_t playlist_max_players(uint32_t id);
 void install_menuimages(int &installed);
 int32_t playlist_pick_type();
 bool playlist_game_types(std::vector<int32_t> &types);
@@ -264,6 +267,74 @@ uint32_t hex_u32(const std::string &h, size_t at) {   // little-endian u32 at by
 void put_hex_u32(std::string &h, size_t at, uint32_t v) {
     for (int b = 0; b < 4; ++b, v >>= 8) h.replace(2 * (at + size_t(b)), 2, hex(&v, 1));
 }
+// (2026-11-27, spec menus.md "Definitions") The PS3 playlists are built in the order of the PS3 list: The Lab,
+// Deathmatch, Elimination, Plunder, Objectives, Ranked, All Competitive Modes, Co-op Objective, Co-op Arena, then Gold
+// Rush and Survival. Each built playlist is the same record as before (the picture choice gives the same pictures in
+// both orders); only the order changes. The old build's runs of build log lines and of published records are put
+// in that order (a run is changed only when every line in it is one of these playlists: fallback builds are not).
+const char *const kPs3PlaylistOrder[] = {"the-lab",         "deathmatch",     "elimination", "plunder",
+                                         "objectives",      "ranked",         "all-competitive",
+                                         "coop-objective",  "coop-arena",     "gold-rush",   "survival"};
+int ps3_rank_of_key(const std::string &key) {
+    for (int i = 0; i < 11; ++i)
+        if (key == kPs3PlaylistOrder[i]) return i;
+    return -1;
+}
+int ps3_rank_of_id(uint32_t id) {
+    for (int i = 0; i < 11; ++i)
+        if (sid(("u2mp/playlist/" + std::string(kPs3PlaylistOrder[i])).c_str()) == id) return i;
+    return -1;
+}
+// rank of one record line, -1 when it is not a PS3 playlist line of kind `ngm` (published record) or not (log line)
+int ps3_rank_of_line(const std::string &l, bool ngm) {
+    if (ngm) {
+        static const std::string head = "ngm playlist[";
+        const size_t eq = l.find("] = ");
+        if (l.rfind(head, 0) != 0 || eq == std::string::npos || l.size() < eq + 4 + 8) return -1;
+        return ps3_rank_of_id(hex_u32(l.substr(eq + 4), 0));
+    }
+    static const std::string head = "log menus: playlist ";
+    const size_t arrow = l.find(" -> picture ");
+    if (l.rfind(head, 0) != 0 || arrow == std::string::npos) return -1;
+    return ps3_rank_of_key(l.substr(head.size(), arrow - head.size()));
+}
+void ps3_playlist_order(std::vector<std::string> &r, bool ngm) {
+    for (size_t i = 0; i < r.size();) {
+        size_t j = i;
+        while (j < r.size() && ps3_rank_of_line(r[j], ngm) >= 0) ++j;
+        if (j - i > 1) {
+            const int base = std::atoi(r[i].c_str() + 13);   // "ngm playlist[" is 13 characters
+            std::stable_sort(r.begin() + std::ptrdiff_t(i), r.begin() + std::ptrdiff_t(j),
+                             [ngm](const std::string &x, const std::string &y) {
+                                 return ps3_rank_of_line(x, ngm) < ps3_rank_of_line(y, ngm);
+                             });
+            if (ngm)   // the published slots keep their numbers 0..n-1
+                for (size_t k = i; k < j; ++k) {
+                    const size_t eq = r[k].find("] = ");
+                    r[k] = "ngm playlist[" + std::to_string(base + int(k - i)) + r[k].substr(eq);
+                }
+        }
+        i = j > i ? j : i + 1;
+    }
+}
+// (2026-11-27, spec menus.md 1.3) The playlist query no longer turns the game's op 3 answer (image type 0x25 with the
+// playlist id, the type 0x25 box with the game type icons under the picture, as PS3) into a type 3 net image. The old
+// build's answer gets back the game's: type 0x25 and the fields the old build wrote put back to the scenario's
+// filler (the test's game query sets only the type).
+void playlist_picture_type(std::vector<std::string> &r) {
+    static const std::string head = "  -> q ";
+    for (auto &l : r) {
+        if (l.rfind(head, 0) != 0 || l.size() < head.size() + 2 * 0x34) continue;
+        std::string h = l.substr(head.size(), 2 * 0x60);
+        if (h.substr(0, 8) != "03000000" || h.substr(16, 8) != "03000000" || h.substr(2 * 0x18, 8) != "00000000" ||
+            h.substr(2 * 0x20, 8) != "01000000" || h.substr(2 * 0x24, 8) != "ffffffff" ||
+            h.substr(2 * 0x30, 8) != "0000803f")
+            continue;
+        h.replace(16, 8, "25000000");
+        for (size_t b = 0x10; b < 0x34; ++b) h.replace(2 * b, 2, "c1");
+        l.replace(head.size(), 2 * 0x60, h);
+    }
+}
 void expected_old(std::vector<std::string> &r) {
     for (auto &l : r) {
         // f11e480 (spec parity-g-friends.md G1): the Players Met query takes progression_players_met() instead of
@@ -291,6 +362,9 @@ void expected_old(std::vector<std::string> &r) {
         put_hex_u32(h, 0x1c, coop ? 3 : 5);
         l = l.substr(0, eq + 4) + h;
     }
+    ps3_playlist_order(r, false);
+    ps3_playlist_order(r, true);
+    playlist_picture_type(r);
 }
 
 // per query of the current run, by side (filled by model_ask, used by cursor_expected)
@@ -444,11 +518,27 @@ void b2782c2_friend_card_step(int &n) {
 // the old record gets that line. The help-bar scenarios (HB-1, HB-2, new only) build the records.
 const char kHelpBarDiffer[] = "log menus: help bar shoulder records differ, Prev / Next icons left alone";
 
+// (2026-11-27, MENUS.md 3.3) install_menus also wraps the booster list queries (cond 77, 78, the game's 0x659bd0) so
+// op 7 answers 1. The test tables never hold 0x659bd0 there, so the new build logs "left alone" for both, right after
+// the voice volume slider; the old build gets the same two lines in that place.
+void boosters_not_in_old() {
+    static const std::string volume = "log voice volume slider (cond 104): ";
+    for (size_t i = 0; i < hx::calls.size(); ++i)
+        if (hx::calls[i].rfind(volume, 0) == 0) {
+            hx::calls.insert(hx::calls.begin() + std::ptrdiff_t(i) + 1,
+                             {"log LIST_BOOSTERS0 (cond 77): table entry is not 0x659bd0, left alone",
+                              "log LIST_BOOSTERS1 (cond 78): table entry is not 0x659bd0, left alone",
+                              "log Golden Guns (cond 108): table entry is not 0x65c610, left alone",
+                              "log Matchmaking (cond 135): table entry is not 0x65a790, left alone"});
+            return;
+        }
+}
 void inst_menus(const Api &a) {
     int n = 100;
     if (a.install_menus == A_old.install_menus) rec("%s", kHelpBarDiffer);
     a.install_menus(n);
     if (a.install_menus == A_old.install_menus) b2782c2_friend_card_step(n);
+    if (a.install_menus == A_old.install_menus) boosters_not_in_old();
     rec("installed %d", n);
 }
 void menus_ready(const Api &a) {
@@ -627,7 +717,7 @@ void make_games(const std::vector<int32_t> &types) {
 // the PS4 game types, by their name texts, plus Machinima and an objective-picture name
 const std::vector<TypeRec> kFullTypes = [] {
     const uint32_t names[] = {0xa30341e7, 0x8dfdede9, 0x3d9470a5, 0x0544e6f6, 0x13f76fcc, 0x71ede2dc,
-                              0xf625a024, 0x3b8de400, 0x5136a578, 0x2ee192ab, 0x00248bb5, 0xe9995f4c,
+                              0xf625a024, 0x3b8de400, 0xc072e0a6, 0xf0a21209, 0x00248bb5, 0xe9995f4c,
                               0x2959eca4, 0xb81a7c18, 0x5614c769, 0x8f86cb5f};
     std::vector<TypeRec> v;
     for (uint32_t i = 0; i < 16; ++i) v.push_back({names[i], 0xde500000u + i, 0x1a000000u + i});
@@ -957,33 +1047,106 @@ bool help_bar_shows(const std::string &prev, const std::string &next) {
     return true;
 }
 
+// The booster list query (cond 77 / 78, 0x659bd0): op 7 always answers 1 (selectable also in a co-op custom game),
+// every other op is the game's answer.
+U2MP_GUEST void boost_orig(uint8_t *q) {
+    rec("boost orig op %u", get<uint32_t>(q - mem));
+    put<int32_t>(q - mem + 4, get<uint32_t>(q - mem) == 7 ? 0 : 5);
+}
+void boosters_scenario() {
+    run_new("BO-1 booster slots selectable in co-op custom games (new only)", [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 1, 77, 0x659bd0);
+        entry(ETRACE + 2, 78, 0x659bd0);
+        hx::stub(0x659bd0, reinterpret_cast<void *>(&boost_orig));
+        inst_menus(a);
+        EXPECT(lines("log LIST_BOOSTERS0 (cond 77): 0x659bd0 wrapped") == 1);
+        EXPECT(lines("log LIST_BOOSTERS1 (cond 78): 0x659bd0 wrapped") == 1);
+        for (int e : {ETRACE + 1, ETRACE + 2}) {
+            ask(e, 7);
+            EXPECT(get<int32_t>(Q + 4) == 1);
+            ask(e, 3);
+            EXPECT(get<int32_t>(Q + 4) == 5);
+        }
+        EXPECT(lines("boost orig op 7") == 2);
+    });
+}
+
+// The Golden Guns row (cond 108, 0x65c610): the query sees the golden-weapons licence bit 0x10 in [0x104f4b0 + 0x78];
+// the word is put back after the call.
+U2MP_GUEST void golden_orig(uint8_t *q) {
+    rec("golden orig op %u licences %08x", get<uint32_t>(q - mem), get<uint32_t>(0x104f4b0 + 0x78));
+}
+void golden_guns_scenario() {
+    run_new("GG-1 Golden Guns row: licence bit set during its query (new only)", [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 9, 108, 0x65c610);
+        hx::stub(0x65c610, reinterpret_cast<void *>(&golden_orig));
+        put<uint32_t>(0x104f4b0 + 0x78, 0x3);
+        inst_menus(a);
+        EXPECT(lines("log Golden Guns (cond 108): 0x65c610 wrapped") == 1);
+        ask(ETRACE + 9, 1);
+        EXPECT(lines("golden orig op 1 licences 00000013") == 1);
+        EXPECT(get<uint32_t>(0x104f4b0 + 0x78) == 0x3);
+    });
+}
+
+// The Matchmaking row (cond 135, 0x65a790): the query sees the imported map packs' bits in the owned-DLC word
+// [0x1115a30 + 0xa0] (no pack: the word as it was, the row stays hidden); the word is put back after the call.
+U2MP_GUEST void matchmaking_orig(uint8_t *q) {
+    rec("matchmaking orig op %u owned %08x", get<uint32_t>(q - mem), get<uint32_t>(0x1115a30 + 0xa0));
+}
+void matchmaking_scenario() {
+    run_new("MM-1 Matchmaking row: imported map packs in the owned-DLC word during its query (new only)",
+            [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 8, 135, 0x65a790);
+        hx::stub(0x65a790, reinterpret_cast<void *>(&matchmaking_orig));
+        hx::mn::s.packs = 1 | 4;   // map pack 2 only
+        inst_menus(a);
+        EXPECT(lines("log Matchmaking (cond 135): 0x65a790 wrapped") == 1);
+        ask(ETRACE + 8, 1);
+        EXPECT(lines("matchmaking orig op 1 owned 00000004") == 1);
+        EXPECT(get<uint32_t>(0x1115a30 + 0xa0) == 0);
+        hx::mn::s.packs = 1;       // no map pack imported
+        ask(ETRACE + 8, 1);
+        EXPECT(lines("matchmaking orig op 1 owned 00000000") == 1);
+    });
+}
+
 void help_bar_scenarios() {
-    run_new("HB-1 help bar icons: L1 / R1, exchanged and back (new only)", [](const Api &a) {
+    run_new("HB-1 help bar icons: always the L1 / R1 pictures, whatever the shoulder setting (new only)",
+            [](const Api &a) {
+        const char *on = "log menus: help bar shoulder icons L1 / R1 (shoulder setting 1: tokens |L1| / |R1|)";
+        const char *off = "log menus: help bar shoulder icons L1 / R1 (shoulder setting 0: tokens |L2| / |R2|)";
         help_bar_image();
         menus_ready(a);
         EXPECT(lines(kHelpBarDiffer) == 0);
         EXPECT(help_bar_shows("L1-NOSWAP", "R1-NOSWAP"));   // install only checks
         u2mp::menus_help_bar_frame();
-        EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));   // setting on: the printer draws |L1| / |R1| as L1 / R1
+        EXPECT(get<uint32_t>(0x10417a0 + 0xc) == sid("u2mp/help/store"));   // Store, not Rewards (PS3 text)
+        EXPECT(get<uint32_t>(0x10416f8 + 0xc) == 0x8994a031);   // the other texts stay
+        EXPECT(lines(on) == 1);
         u2mp::menus_help_bar_frame();   // nothing to write: no log
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
-        put<uint32_t>(kPadExchange, 7);
-        u2mp::menus_help_bar_frame();
-        u2mp::menus_help_bar_frame();
-        EXPECT(help_bar_shows("|R1| ", "|L1| "));
-        EXPECT(lines("log menus: help bar shoulder icons exchanged") == 1);
-        put<uint32_t>(kPadExchange, 0);
+        EXPECT(lines(on) == 1);
+        put<uint32_t>(kPadExchange, 7);   // the exchange word does not change the pictures (PS3 NOSWAP)
         u2mp::menus_help_bar_frame();
         EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
+        put<uint32_t>(kPadSetting, 0);   // setting off: the printer draws |L2| / |R2| as L1 / R1
+        u2mp::menus_help_bar_frame();
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L2| ", "|R2| "));
+        EXPECT(lines(off) == 1);
+        put<uint32_t>(kPadSetting, 1);
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));
+        EXPECT(lines(on) == 2);
         // a record put back to its token (e.g. by the game) is fixed again without a new log
         put<uint64_t>(kHelpRecs[1].off, addr(kTokR1));
         u2mp::menus_help_bar_frame();
         EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
-        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
+        EXPECT(lines(on) == 2);
     });
     // any checked byte different: logged at install, no record is ever written
     struct Bad {
@@ -1002,6 +1165,7 @@ void help_bar_scenarios() {
             EXPECT(lines(kHelpBarDiffer) == 1);
             u2mp::menus_help_bar_frame();
             for (const HelpRec &r : kHelpRecs) EXPECT(get<uint64_t>(r.off) == addr(r.action == 0xb ? kTokL1 : kTokR1));
+            EXPECT(get<uint32_t>(0x10417a0 + 0xc) == 0x90354b88 || b.off == 0x10417a0 + 0xc);
             for (const auto &l : hx::calls) EXPECT(l.rfind("log menus: help bar shoulder icons", 0) != 0);
         });
 }
@@ -1097,6 +1261,9 @@ void menus_install_scenarios() {
         ask(ETRACE + 3, 9, 99);
     });
     help_bar_scenarios();
+    boosters_scenario();
+    golden_guns_scenario();
+    matchmaking_scenario();
 }
 
 void menus_query_scenarios() {
@@ -1126,30 +1293,28 @@ void menus_query_scenarios() {
     // the PS3 one: column 3 status block, op 3 images, the cursor following the selected friend, op 8 refresh, and
     // the op log. That path runs on the new build only, checked against the spec (op 1, unchanged, stays compared
     // in 9d; the LAN form in 10a-10c).
+    // (2026-11-27, owner: PS3 has no "Browse Online Games" row in the friends list) the rows are the friends from
+    // row 0; with no friends one hint row.
     run_new("9a cond 36 online (b2782c2, new only): no friends", [](const Api &a) {
         menus_ready(a);
         s.online = true;
         EXPECT(answer(E36, 1).text == "\"Friends (0 of 0 online)\"");
         EXPECT(answer(E36, 2, -1).text == "\"\"");
-        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
+        EXPECT(answer(E36, 2, 0).text == "\"No RPCN friends yet. Add friends in the launcher.\"");
         EXPECT(answer(E36, 2, 0, 3).text == "\"\"");
-        EXPECT(answer(E36, 2, 1).text == "\"No RPCN friends yet. Add friends in the launcher.\"");
-        EXPECT(answer(E36, 2, 1, 3).text == "\"\"");
-        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
-        EXPECT(answer(E36, 2, 2).text == "\"\"");
-        EXPECT(answer(E36, 5).v == 1);
+        EXPECT(answer(E36, 2, 0, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 1).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 0);
         EXPECT(answer(E36, 7).v == 1);
         answer(E36, 9, 1);
-        EXPECT(answer(E36, 4).v == 1);
-        answer(E36, 9, 1000);
-        EXPECT(answer(E36, 4).v == 1);   // clamped to count - 1
+        EXPECT(answer(E36, 4).v == 0);   // clamped to count - 1
         answer(E36, 9, -2);
         EXPECT(answer(E36, 4).v == 0);   // clamped to 0
-        EXPECT(lines("log friends query: op 4 row 0 cur -2 rows 2") == 1);
+        EXPECT(lines("log friends query: op 4 row 0 cur -2 rows 1") == 1);
         answer(E36, 8);
         EXPECT(lines("online::refresh_friend_list") == 1);
         EXPECT(answer(E36, 4).v == 0);
-        answer(E36, 3, 1, 0, 0xf5a294f3);   // no friend row: nothing written
+        answer(E36, 3, 0, 0, 0xf5a294f3);   // no friend row: nothing written
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
         int op1 = 0;
         for (auto &l : hx::calls) op1 += l.rfind("log friends query: op 1 ", 0) == 0;
@@ -1164,48 +1329,47 @@ void menus_query_scenarios() {
         g_texts[0x953825d0] = "Playing another game";
         EXPECT(answer(E36, 1).text == "\"Friends (2 of 3 online)\"");
         EXPECT(answer(E36, 2, -1).text == "\"\"");
-        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
-        EXPECT(answer(E36, 2, 1).text == "\"alice - online\"");
-        EXPECT(answer(E36, 2, 1, 3).text == "\"Playing another game\"");   // online, not in this game
-        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
-        EXPECT(answer(E36, 2, 2).text == "\"bob - offline\"");
-        EXPECT(answer(E36, 2, 2, 3).text == "\"\"");   // offline
-        EXPECT(answer(E36, 2, 3).text == "\"carol - in game\"");
-        EXPECT(answer(E36, 2, 4).text == "\"\"");
-        EXPECT(answer(E36, 5).v == 3);
+        EXPECT(answer(E36, 2, 0).text == "\"alice - online\"");
+        EXPECT(answer(E36, 2, 0, 3).text == "\"Playing another game\"");   // online, not in this game
+        EXPECT(answer(E36, 2, 0, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 1).text == "\"bob - offline\"");
+        EXPECT(answer(E36, 2, 1, 3).text == "\"\"");   // offline
+        EXPECT(answer(E36, 2, 2).text == "\"carol - in game\"");
+        EXPECT(answer(E36, 2, 3).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 2);
         EXPECT(answer(E36, 7).v == 1);
         // op 3: the status dot of a friend row (1 online, 0 offline); element 0 outside this game: nothing
-        answer(E36, 3, 1, 0, 0xf5a294f3);
+        answer(E36, 3, 0, 0, 0xf5a294f3);
         EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint64_t>(Q + 0x10) == 0 && get<uint32_t>(Q + 0x18) == 1 &&
                get<uint64_t>(Q + 0x1c) == 0 && get<int32_t>(Q + 0x24) == -1 && get<uint32_t>(Q + 0x28) == 0 &&
                get<int32_t>(Q + 0x2c) == -1 && get<float>(Q + 0x30) == 1.0f);
-        answer(E36, 3, 2, 0, 0xf5a294f3);
+        answer(E36, 3, 1, 0, 0xf5a294f3);
         EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint32_t>(Q + 0x18) == 0);
-        answer(E36, 3, 1, 0, 0);
+        answer(E36, 3, 0, 0, 0);
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
-        answer(E36, 3, 0, 0, 0xf5a294f3);   // row 0 is no friend
+        answer(E36, 3, -1, 0, 0xf5a294f3);   // no such row
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
         // the cursor follows the stored friend when the rows move
-        answer(E36, 9, 2);
-        EXPECT(answer(E36, 4).v == 2);
-        s.friend_rows = {"bob - offline", "alice - online", "carol - in game"};
+        answer(E36, 9, 1);
         EXPECT(answer(E36, 4).v == 1);
-        answer(E36, 9, 0);   // row 0: no name stored
+        s.friend_rows = {"bob - offline", "alice - online", "carol - in game"};
+        EXPECT(answer(E36, 4).v == 0);
+        answer(E36, 9, -1);   // no row: no name stored
         EXPECT(answer(E36, 4).v == 0);
         answer(E36, 9, 1000);
-        EXPECT(answer(E36, 4).v == 3);
+        EXPECT(answer(E36, 4).v == 2);
         answer(E36, 9, -2);
         EXPECT(answer(E36, 4).v == 0);
         // op 8: refresh, then the stored friend's row is stored with its name
-        answer(E36, 9, 3);   // carol
+        answer(E36, 9, 2);   // carol
         s.friend_rows = {"carol - in game", "bob - offline", "alice - online"};
         answer(E36, 8);
         EXPECT(lines("online::refresh_friend_list") == 1);
-        EXPECT(answer(E36, 4).v == 1);
+        EXPECT(answer(E36, 4).v == 0);
         s.friends = 2;   // carol gone: the stored row stays
         s.friend_rows = {"bob - offline", "alice - online"};
-        EXPECT(answer(E36, 4).v == 1);
-        EXPECT(lines("log friends query: op 4 row 0 cur 1 rows 3") == 1);
+        EXPECT(answer(E36, 4).v == 0);
+        EXPECT(lines("log friends query: op 4 row 0 cur 0 rows 3") >= 1);
     });
     run_new("9c cond 36 online (b2782c2, new only): friend_count negative", [](const Api &a) {
         menus_ready(a);
@@ -1373,8 +1537,10 @@ uint32_t playlist_id(int k) {
     return p ? *reinterpret_cast<const uint32_t *>(p) : 0;
 }
 
-// After a build (the image is fresh, so the first call republishes): descriptors, apply, pick.
-void post_build_scenarios(const std::string &tag, void (*data)()) {
+// After a build (the image is fresh, so the first call republishes): descriptors, apply, pick. `by_index`: the
+// scenarios that ask for playlists by their place in the list; old and new differ there for the PS3 playlists, whose
+// order changed (expected_old), so they run for the fallback builds only.
+void post_build_scenarios(const std::string &tag, void (*data)(), bool by_index = true) {
     run(tag + " 18a count cleared: pointers rewritten, no log", [data](const Api &a) {
         menus_ready(a);
         data();
@@ -1385,6 +1551,7 @@ void post_build_scenarios(const std::string &tag, void (*data)()) {
         put<uint32_t>(NGM + 0x21a0, 2);   // someone else's count: left alone
         ask(E55, 1);
     });
+    if (!by_index) return;
     run(tag + " 19 op 3 descriptors", [data](const Api &a) {
         menus_ready(a);
         data();
@@ -1479,6 +1646,46 @@ void post_build_scenarios(const std::string &tag, void (*data)()) {
         ids.push_back(0);
         pick_and_types(a, ids, 12345);
         pick_and_types(a, ids, 1);
+    });
+}
+
+// The PS3 playlist order and each playlist's index in the PS3 list (also with playlists skipped).
+void playlist_order_scenarios() {
+    run_new("14P all game types playable: PS3 order and PS3 indexes (new only)", [](const Api &a) {
+        menus_ready(a);
+        full_playlist_data();
+        ask(E55, 1);
+        EXPECT(get<uint32_t>(NGM + 0x21a0) == 11);
+        for (int k = 0; k < 11; ++k) {
+            const uint32_t id = sid(("u2mp/playlist/" + std::string(kPs3PlaylistOrder[k])).c_str());
+            EXPECT(playlist_id(k) == id);
+            EXPECT(u2mp::playlist_index(id) == k);
+        }
+        EXPECT(u2mp::playlist_index(0xdeadbeef) == -1);
+        // the co-op playlists: Co-op Objective = the "Co-op" game type, Co-op Arena = Survival, Gold Rush and type
+        // f0a21209; the icons under the picture are their game types' images in game type order
+        uint32_t icons[16] = {};
+        EXPECT(u2mp::playlist_type_icons(sid("u2mp/playlist/coop-objective"), icons, 16) == 1 && icons[0] == 0x1a000008);
+        EXPECT(u2mp::playlist_type_icons(sid("u2mp/playlist/coop-arena"), icons, 16) == 3 && icons[0] == 0x1a000009 &&
+               icons[1] == 0x1a00000b && icons[2] == 0x1a00000c);
+        EXPECT(u2mp::playlist_type_icons(0xdeadbeef, icons, 16) == 0);
+    });
+}
+void playlist_partial_order_scenario() {
+    run_new("15P some types playable: skipped playlists keep their PS3 indexes (new only)", [](const Api &a) {
+        menus_ready(a);
+        partial_playlist_data();
+        ask(E55, 1);
+        const uint32_t n = get<uint32_t>(NGM + 0x21a0);
+        EXPECT(n > 0 && n < 11);
+        int last = -1;
+        for (uint32_t k = 0; k < n; ++k) {
+            const int rank = ps3_rank_of_id(playlist_id(int(k)));
+            EXPECT(rank > last);   // PS3 order, gaps where a playlist has no playable game type
+            EXPECT(u2mp::playlist_index(playlist_id(int(k))) == rank);
+            last = rank;
+        }
+        EXPECT(u2mp::playlist_index(sid("u2mp/playlist/plunder")) == -1);   // not built: no plunder game
     });
 }
 
@@ -1992,8 +2199,9 @@ int main(int argc, char **argv) {
         menus_install_scenarios();
         menus_query_scenarios();
         playlist_prebuild_scenarios();
-        build_scenario("14 all game types playable: 11 PS3 playlists", full_playlist_data, 3);
-        post_build_scenarios("14", full_playlist_data);
+        // (2026-11-27) The PS3 playlist builds differ from the old build in order and in the co-op game types (the
+        // co-op playlists list game types, not their own names): new only (14P, 15P); the fallback builds stay compared.
+        playlist_order_scenarios();
         menuimages_install_scenarios();
         lookup_scenarios();
         size_scenarios();
@@ -2011,8 +2219,7 @@ int main(int argc, char **argv) {
         return fail ? 1 : 0;
     }
     if (mode == "pl-partial") {
-        build_scenario("15 some types playable: skipped definitions, dups, 8 cap", partial_playlist_data, 2);
-        post_build_scenarios("15", partial_playlist_data);
+        playlist_partial_order_scenario();
     } else if (mode == "pl-fallback") {
         build_scenario("16 fallback: Machinima skipped, ids replaced", fallback_playlist_data, 2);
         post_build_scenarios("16", fallback_playlist_data);

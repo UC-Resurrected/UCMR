@@ -9,9 +9,13 @@
 //   u2import --hk-tables --ps3-elf <EBOOT.elf> --ps4 <game folder> --out <u2hkclasses.json> [--objdump <path>]
 //   u2import --twin-build <ps3 mp skin.pak> <ps3 twin.pak> <ps4 twin.pak> <out.pak>
 //   u2import --psarc list <file.psarc> | --psarc extractall <file.psarc> <folder>
+//   u2import --materials <pak>   a pak's materials and their textures (PS3 MATERIAL_TABLE_1, PS4 GEOMETRY_1 bindings)
+//   u2import --texture-stats <pak>   per texture: format, size, share of black colour blocks, brightest endpoint
 #include "actor.hpp"
 #include "dcconv.hpp"
+#include "texcodec.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace u2imp {
@@ -97,7 +101,7 @@ int dc_info(const fs::path &path) {
 
 int dc_learn_test(bool test, const std::vector<std::string> &v) {
     if (v.size() < 5) throw std::runtime_error("usage: u2import --dc learn|test <ps3 base> <ps4 game> <schema.json> [net-patch9.bin]");
-    const PS3 ps3(v[2], "");
+    const PS3 ps3(v[2], "", false);
     const PS4 ps4(v[3]);
     const fs::path dcdir = ps4.main / "dc1" / "ps4", schema_path = P(v[4]);
     const auto pl = dc_pairs(ps3, dcdir);
@@ -192,6 +196,63 @@ std::optional<int> dev_command(const std::vector<std::string> &v) {
             return 1;
         }
         out(pyrepr(std::get<TwinStats>(r).json()));
+        return 0;
+    }
+    if (v[0] == "--materials") {   // a pak's materials and the textures they bind (PS3: MATERIAL_TABLE_1; PS4: GEOMETRY_1)
+        if (v.size() < 2) {
+            std::fputs("usage: u2import --materials <pak>\n", stderr);
+            return 2;
+        }
+        const Pak p(P(v[1]));
+        if (p.ps3) {
+            for (const auto &[name, texs] : u3::actor::ps3_material_texture_names(p)) {
+                out(name);
+                for (const std::string &t : texs) out("    " + t);
+            }
+        } else {
+            for (const u3::actor::TMat &m : u3::actor::tmpl_materials(p)) {
+                out(m.name + "  [" + m.shader + "]");
+                for (const auto &b : m.binds) out("    " + b.pname + " = " + b.full);
+            }
+        }
+        return 0;
+    }
+    if (v[0] == "--texture-stats") {   // per texture: format, size, the share of black colour blocks, the brightest endpoint
+        if (v.size() < 2) {
+            std::fputs("usage: u2import --texture-stats <pak>\n", stderr);
+            return 2;
+        }
+        const Pak p(P(v[1]));
+        for (const u3::PakTexture &t : p.textures()) {
+            std::string kind;
+            int bpb = 0, coff = 0;
+            if (p.ps3) {
+                if (const auto f = u3::tc::ps3_format(t); f && f->compressed) kind = f->kind, bpb = f->bpb, coff = f->kind == "DXT1" ? 0 : 8;
+                else if (f) kind = f->kind;
+            } else if (auto it = u3::tc::DXGI.find(t.format); it != u3::tc::DXGI.end()) {
+                kind = it->second.first;
+                if (kind.rfind("BC1", 0) == 0) bpb = 8;
+                else if (kind.rfind("BC2", 0) == 0 || kind.rfind("BC3", 0) == 0) bpb = 16, coff = 8;
+            }
+            size_t blocks = 0, black = 0;
+            unsigned bright = 0;
+            if (bpb) {
+                // every block of every stored mip (the order does not matter here): its two 565 colour endpoints
+                const Bytes d = p.vram_bytes(t.vramOffset, t.vramSize);
+                for (size_t o = 0; o + size_t(bpb) <= d.size(); o += size_t(bpb)) {
+                    unsigned top = 0;
+                    for (int e = 0; e < 2; e++) {
+                        const unsigned c = unsigned(d[o + size_t(coff + 2 * e)]) | unsigned(d[o + size_t(coff + 2 * e + 1)]) << 8;
+                        top = std::max({top, ((c >> 11) & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31});
+                    }
+                    blocks++;
+                    black += top < 12;
+                    bright = std::max(bright, top);
+                }
+            }
+            out(fmt("%-22s %5ux%-5u black %5.1f%% max %3u  ", kind.empty() ? "?" : kind.c_str(), t.width, t.height,
+                    blocks ? 100.0 * double(black) / double(blocks) : 0.0, bright) + t.path);
+        }
         return 0;
     }
     if (v[0] == "--psarc") {

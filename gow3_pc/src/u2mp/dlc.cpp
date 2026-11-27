@@ -169,11 +169,13 @@ bool pack_available(int32_t pack) {
 // Ruins (map ids d9be0a6d, 37be4d69) is marked map pack 1 in net.bin, but the base game ships it: the PS4
 // game and GOTY both have the base ruins-multi with its spawn pak. Without the map pack it is offered as
 // the base map (assets audit 2026-11-09, GOTY-only import); with the map pack it is the flooded one.
+bool is_ruins(uint32_t map) { return map == 0xd9be0a6du || map == 0x37be4d69u; }
+
 bool map_available(const uint8_t *rec) {
     const uint32_t map = *reinterpret_cast<const uint32_t *>(rec);
     const int32_t pack = *reinterpret_cast<const int32_t *>(rec + MAP_PACK);
     if (pack_available(pack)) return true;
-    if (map == 0xd9be0a6du || map == 0x37be4d69u) {
+    if (is_ruins(map)) {
         static int base_ruins = -1;
         if (base_ruins < 0) {
             base_ruins = guest_file_exists(std::string(kRoot) + "pak22/ps4/ruins-multi.pak") ? 1 : 0;
@@ -246,6 +248,12 @@ int32_t dlc_net_game_pack(int32_t index, bool &local_ok) {
         return *reinterpret_cast<const int32_t *>(rec + MAP_PACK);
     }
     return -1;
+}
+
+bool dlc_net_game_has_base(int32_t index) {
+    auto *games = static_cast<DcTable *>(dc_lookup(kNetGames));
+    if (!games || !games->records || index < 0 || index >= games->count) return false;
+    return is_ruins(*reinterpret_cast<const uint32_t *>(games->records + NG_STRIDE * uint64_t(index) + NG_MAP));
 }
 
 void install_dlc(int &installed) {

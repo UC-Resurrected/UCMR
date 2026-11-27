@@ -6,6 +6,7 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/unlocks.md.
 
 #include "unlocks.h"
+#include "coop_rules.h"
 #include "host_memory.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
@@ -52,6 +53,8 @@ constexpr uint32_t kBoosterSym = sid("*net-boosters*");
 static_assert(kBoosterSym == 0x916e03b0u, "booster table id");
 constexpr uint32_t kCharAttrSym = sid("*net-skins*");
 static_assert(kCharAttrSym == 0x42d1ec02u, "character attributes id");
+constexpr uint32_t kNetGamesSym = sid("*net-games*");
+static_assert(kNetGamesSym == 0x3b9a067du, "net games table id");
 constexpr uint32_t kHeroSection = 0x681022f5;
 constexpr uint32_t kVillainSection = 0x4252add5;
 constexpr uint32_t kRootType = 0x916aa605;
@@ -126,6 +129,7 @@ int32_t g_skin_count = 0;
 uint8_t *g_slot_table = nullptr;  // the 10-entry per-slot table the game reads
 char g_slot_art[10][48];
 const char *g_record_pkg[10] = {};  // records 0..9's own packages (their +8 names the slot art)
+int32_t g_coop_shown[10] = {-2, -2, -2, -2, -2, -2, -2, -2, -2, -2};  // co-op character index last logged per slot
 uint8_t *g_store = nullptr;  // store copy with the added skin items
 uint8_t *g_boosters = nullptr;  // net-patch9's own booster table
 int32_t g_booster_count = 0;
@@ -308,14 +312,21 @@ char *heap_text(const char *s, size_t len) {
     return copy;
 }
 
+// A name left in 4-byte-swapped words (each word's bytes reversed): whole words reversed until the first NUL of the
+// result. `len` is the stored bytes' strnlen. A name whose length is not a multiple of 4 ends in a word whose real
+// characters sit behind its NUL bytes ('s\0\0\0' stored as '\0\0\0s'), so that word, the one at `len`, is read too:
+// reversing only `len` bytes cut 'costume-hero-skeleton-sir-francis' to '...-sir-franci', a package that does not
+// exist, and Sir Francis Drake loaded no model of his own.
 char *heap_swap4(const char *s, size_t len) {
-    auto *copy = static_cast<char *>(netheap_alloc(len + 1, 16));
-    if (!copy) return nullptr;
-    for (size_t i = 0; i < len; i += 4) {
-        const size_t n = len - i < 4 ? len - i : 4;
-        for (size_t j = 0; j < n; ++j) copy[i + j] = s[i + n - 1 - j];
-    }
-    copy[len] = 0;
+    std::string t;
+    bool end = false;
+    for (size_t i = 0; i <= len && i < 64 && !end; i += 4)
+        for (int j = 3; j >= 0 && !end; --j) {
+            if (s[i + size_t(j)] == 0) end = true;
+            else t += s[i + size_t(j)];
+        }
+    auto *copy = static_cast<char *>(netheap_alloc(t.size() + 1, 16));
+    if (copy) std::memcpy(copy, t.c_str(), t.size() + 1);
     return copy;
 }
 
@@ -580,6 +591,49 @@ void *spawn_lookup(const char *site, void *table, const char *name) {
     return r;
 }
 
+// Co-op characters (5.8a): the current net game's type and its three co-op characters (*net-games* record +0x70).
+struct CoopGame {
+    int32_t type = 0;
+    uint32_t chars[coop::kRanks] = {};
+};
+
+// Position of a skin id in the merged table (-1 when absent).
+int32_t merged_position(uint32_t id) {
+    const uint8_t *recs = g_skins ? rdptr(g_skins, 8) : nullptr;
+    for (int32_t i = 0; recs && id && i < g_skin_count; ++i)
+        if (rd32(recs + 0x30 * uint64_t(i), 0x10) == id) return i;
+    return -1;
+}
+
+// True in a co-op net game whose three characters are all in the merged skin table; false otherwise (outside
+// multiplayer, a competitive game, no list, or a character the table lacks: then every player keeps their own skin).
+bool coop_game(CoopGame &g) {
+    if (!g_skins || rds32(game(kNetState)) < 2) return false;
+    const uint8_t *games = dc_find(kNetGamesSym);
+    if (!games) return false;
+    int16_t index;
+    std::memcpy(&index, game(kNgm + 0x1ca0), sizeof index);
+    const uint8_t *records = rdptr(games, 8);
+    if (!records || index < 0 || index >= rds32(games)) return false;
+    const uint8_t *record = records + 0x90 * uint64_t(index);
+    const uint8_t *list = rdptr(record, 0x70);
+    if (!list) return false;
+    g.type = rds32(record, 0x0c);
+    for (int r = 0; r < coop::kRanks; ++r) g.chars[r] = rd32(list, 4 * size_t(r));
+    for (int r = 0; r < coop::kRanks; ++r) {
+        const uint32_t id = coop::preset_id(g.type, g.chars, r);
+        if (id == 0) return false;
+        if (merged_position(id) >= 0) continue;
+        static uint32_t said = 0;
+        if (said != id) {
+            said = id;
+            log("skins: co-op character %08x (rank %d) is not in the skin table; players keep their own skins", id, r);
+        }
+        return false;
+    }
+    return true;
+}
+
 // A remote skin can be a different table position or a package the other PC did not import. Use the
 // local character's skin instead of passing NULL into the NetCharacter factory.
 const char *first_loaded_skin() {
@@ -598,7 +652,9 @@ const char *fallback_skin_name() {
 }
 U2MP_GUEST void *spawn_lookup_a(void *table, const char *name) {
     void *r = spawn_lookup("0x663280", table, name);
-    if (r && name && *name) g_local_skin = name;
+    // A co-op character is the net game's, not the player's own choice (5.8a).
+    CoopGame coop;
+    if (r && name && *name && !coop_game(coop)) g_local_skin = name;
     return r;
 }
 U2MP_GUEST void *spawn_lookup_b(void *table, const char *name) {
@@ -869,14 +925,18 @@ void build_store_copy() {
         const char *after;
         uint32_t bit;
     };
+    // The hero / villain lists are PS3's (the GOTY server data): its 29 rows of the PS4 table, then its 30th item
+    // (Sir Francis Drake for heroes, the costume soldier for villains). The PC extras (#34) come after the PS3 items
+    // (after = nullptr: appended in skin table order), each keeping its purchase bit.
     static constexpr StorePlacement kPlacements[] = {
-        {"mp-hero-nd", "mp-hero-red", 137},
-        {"mp-hero-pirate-nd", "mp-hero-pirate", 138},
-        {"mp-hero-lazarevic-fat", "mp-hero-pinkerton", 122},
-        {"mp-hero-flynn-frosty", "mp-hero-lazarevic-fat", 128},
-        {"mp-hero-frosty", "mp-hero-rika", 125},
-        {"costume-hero-lazarevic-healed", "mp-hero-lazarevic", 15},
-        {"costume-hero-skeleton-sir-francis", "mp-hero-skeleton-marco", 14},
+        {"mp-hero-nd", nullptr, 137},
+        {"mp-hero-pirate-nd", nullptr, 138},
+        {"mp-hero-lazarevic-fat", nullptr, 122},
+        {"mp-hero-flynn-frosty", nullptr, 128},
+        {"mp-hero-frosty", nullptr, 125},
+        {"costume-hero-lazarevic-healed", nullptr, 15},
+        {"costume-hero-skeleton-sir-francis", "mp-hero-year-1", 14},
+        {"costume-hero-sol-med-b-1a", "mp-hero-u1-merc-brsr-1a", 0},
     };
 
     int target_original = 0, target_added = 0;
@@ -953,9 +1013,7 @@ void build_store_copy() {
             for (const ExtraSkin &e : kExtraSkins)
                 if (e.villain == villain) offer(e.id, reinterpret_cast<const uint8_t *>(e.package));
         }
-        if (wanted.empty()) continue;
-
-        struct StoreRow {
+        struct StoreRow {   // the list is rebuilt also with nothing to add: the original rows get mask 1 below
             const uint8_t *src;
             StoreWish wish;
         };
@@ -984,6 +1042,10 @@ void build_store_copy() {
             uint8_t *item = list + 0x50 * k;
             if (rows[k].src) {
                 std::memcpy(item, rows[k].src, 0x50);
+                // The PS4 rows carry add-on licence masks (+0x38: dlc1, skin-dlc2 / 3, sony-skins, ...) that hide
+                // every add-on skin on PC; the GOTY data gives each of these skins mask 1 (game-owned), so PS3
+                // lists them all.
+                wr32(item, 0x38, 1);
                 continue;
             }
             // Price, rank and texts come from the last original item; the row is its own game-owned skin.
@@ -1334,8 +1396,52 @@ uint32_t unlocks_skin_fingerprint() { return g_fingerprint.load(); }
 const char *unlocks_local_skin() { return g_local_skin.empty() ? nullptr : g_local_skin.c_str(); }
 const char *unlocks_local_villain() { return g_local_villain.empty() ? nullptr : g_local_villain.c_str(); }
 
+const char *unlocks_coop_character(int rank) {
+    CoopGame g;
+    if (!coop_game(g)) return nullptr;
+    const int32_t at = merged_position(coop::preset_id(g.type, g.chars, rank));
+    return at >= 0 ? record_package(rdptr(g_skins, 8), at) : nullptr;
+}
+
+// 5.8a: in a co-op game every player plays the net game's character of their co-op rank (tracker +0x198), as on
+// PS3: the slot's skin index is that character's own record, whatever skin the player equipped for competitive.
+static bool apply_coop_characters(uint8_t *base) {
+    CoopGame g;
+    if (!coop_game(g)) return false;
+    int32_t (&shown)[10] = g_coop_shown;
+    const uint8_t *recs = rdptr(g_skins, 8);
+    std::string changed;
+    for (int k = 0; k < 10; ++k) {
+        uint8_t *slot = base + 0x2c0 * uint64_t(k);
+        const int32_t id = int32_t(rd32(slot, 0x120));
+        const int32_t rank = rds32(slot, 0x198);
+        const int32_t at = id >= 1 && id <= 10 ? merged_position(coop::preset_id(g.type, g.chars, rank)) : -1;
+        if (at >= 0) {
+            if (at < 10) {
+                // Records 0..9 name slot art buffers; this one names its own package while a slot plays it.
+                std::snprintf(g_slot_art[at], sizeof g_slot_art[at], "%s",
+                              g_record_pkg[at] ? g_record_pkg[at] : "mp-hero");
+                wrptr(g_slot_table + 0x10 + 0x30 * uint64_t(at), 8, g_slot_art[at]);
+            }
+            wr32(slot, 0x138, uint32_t(at));
+        }
+        if (at == shown[k]) continue;
+        shown[k] = at;
+        if (at < 0) continue;
+        char b[96];
+        std::snprintf(b, sizeof b, " net id %d rank %d '%s' (index %d);", id, rank, or_dash(record_package(recs, at)),
+                      at);
+        changed += b;
+    }
+    if (!changed.empty()) log("skins: co-op characters (game type %d):%s", g.type, changed.c_str());
+    return true;
+}
+
 void unlocks_apply_slot_skins() {
     if (!g_slot_table) return;
+    uint8_t *slots = game(kNgm + 0x10);
+    if (apply_coop_characters(slots)) return;
+    for (int32_t &s : g_coop_shown) s = -2;   // the next co-op game logs its characters again
     const char *local_hero = unlocks_local_skin();
     const char *local_villain = unlocks_local_villain();
     uint8_t *base = game(kNgm + 0x10);

@@ -8,6 +8,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 namespace u2mp::overlay {
 static_assert(std::bit_cast<uint32_t>(kPerTick) == 0x3c5a740eu, "1/75 as a float (the PS3 overlay's multiplier)");
@@ -217,6 +218,21 @@ bool ticker_finished(const unsigned char *ticker) {
 bool ticker_visible(const unsigned char *ticker, int32_t frame_clock) {
     const float now = float(frame_clock) * (1.0f / 300.0f);
     return std::fabs(double(now) - double(f32_at(ticker, kTickerDrawn))) < kTickerVisibleSeconds;
+}
+
+std::string ticker_arena_colours(const std::string &text) {
+    auto hex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
+    std::string out = text;
+    for (size_t i = 0; i + 12 <= out.size(); ++i) {
+        if (out.compare(i, 3, "|@C") != 0 || out[i + 11] != '|') continue;
+        bool digits = true;
+        for (size_t k = i + 3; k < i + 11; ++k) digits = digits && hex(out[k]);
+        if (!digits) continue;
+        std::swap(out[i + 5], out[i + 9]);   // AA RR GG BB -> AA BB GG RR
+        std::swap(out[i + 6], out[i + 10]);
+        i += 11;
+    }
+    return out;
 }
 
 }  // namespace u2mp::overlay

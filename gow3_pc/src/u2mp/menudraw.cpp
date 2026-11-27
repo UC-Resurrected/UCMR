@@ -31,13 +31,20 @@
 // sizes at their setup 0xc79d40 (guest frame-heap memory, as before) and guards 0xbdc190 so that a
 // quad that still does not fit is dropped instead of written past the end.
 //
+// Also (install_dropdown_rows): hidden lobby option rows take no space and the Profile option rows span their
+// column, as PS3 (control kind 13, below). And (install_leaderboard_outline): the leaderboard table has no white
+// outline, as PS3.
+//
 // Also (install_carousel_hint): the picture carousels (control kind 8) draw no "<>" beside a focused, closed
 // row while a multiplayer session is up, as PS3 (u2mp/docs/MENUS.md 3.2).
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
+#include <iterator>
 
+#include "host_memory.h"
 #include "u2mp_internal.h"
 
 namespace u2mp {
@@ -272,11 +279,189 @@ void install_carousel_hint(int &installed) {
     ++installed;
 }
 
+// ---- drop-down rows (control kind 13) as PS3 lays them out ---------------------------------------------------------
+// The page lays out each column from the rows' sizes (virtual +0x28 of the control: {width, height}): every row gets
+// the column's x and width (the widest row) and the height its size gives, and a row of height 0 takes no space
+// (0x5a2110). Two PS4 differences from PS3 for kind 13 (class 0x586b80, MENUS.md 3.2), fixed for the multiplayer rows
+// named by their query condition (record +0x34):
+//  - Size 0x587df0: a row with no label (hidden by its condition) still measures one empty text line, where the
+//    list row it replaces (kind 6, size 0x57f370) measures 0 x 0. The overlay made the lobby's Variation, Score
+//    Limit, Rounds, Time Limit and Co-op Difficulty rows kind 13 (they were kind 6 on PS3 and PS4), so each hidden one
+//    left a blank line: the gap between Score Limit and Time Limit, and a taller panel (higher on the screen) for
+//    Find Match, where all five are hidden. For these rows the size is 0 x 0 again when there is no label.
+//  - Draw 0x587300: the row is drawn at its menu record's width (+0x5c) instead of the width the layout gave it. On
+//    PS3 the Profile page's Co-op Difficulty, Taunt, Matchmaking and Golden Guns rows span their column (as wide as
+//    the Hero / Villain rows), so these rows keep the laid-out width.
+constexpr uint64_t kSizeLabelTest = 0x587e27;   // test rax,rax; je 0x587e74; cmp byte [rax],0; je 0x587e74
+constexpr uint64_t kSizeLabelled = 0x587e31;    // a label: measure the row
+constexpr uint64_t kSizeEmpty = 0x587e74;       // no label: one empty text line
+constexpr uint64_t kSizeReturn = 0x588195;      // stack check and return of the size (rax = the result r15)
+constexpr uint64_t kDrawWidth = 0x587359;       // mov rax,[r14+0x80]: the record, for its width
+constexpr uint64_t kDrawRecordWidth = 0x587360; // test rax,rax: the record's width replaces the laid-out one
+constexpr uint64_t kDrawWidthDone = 0x58738e;   // rect at [rbp-0x1c0], width in xmm0
+constexpr uint32_t kHiddenRowConds[] = {59, 60, 61, 63, 65};   // Variation, Score Limit, Time Limit, Rounds, Co-op Diff.
+constexpr uint32_t kColumnRowConds[] = {80, 82, 108, 135};     // Co-op Difficulty, Taunt, Golden Guns, Matchmaking
+
+// A little x86-64 writer for the stubs below: bytes, short conditional jumps to labels, rel32 jumps into the image.
+struct Code {
+    unsigned char *at;
+    size_t n = 0;
+    bool ok = true;
+    void bytes(std::initializer_list<unsigned char> b) {
+        for (unsigned char c : b) at[n++] = c;
+    }
+    void u32(uint32_t v) {
+        std::memcpy(at + n, &v, 4);
+        n += 4;
+    }
+    size_t jcc8(unsigned char op) {   // returns the place of the rel8, filled by land()
+        bytes({op, 0});
+        return n - 1;
+    }
+    void land(size_t rel8_at) {
+        const ptrdiff_t d = ptrdiff_t(n) - ptrdiff_t(rel8_at + 1);
+        if (d < 0 || d > 127) ok = false;
+        at[rel8_at] = static_cast<unsigned char>(d);
+    }
+    void jmp(uint64_t image_offset) {
+        int32_t r = 0;
+        bytes({0xe9});
+        ok = ok && rel32(at + n + 4, image.base + image_offset, &r);
+        u32(uint32_t(r));
+    }
+};
+
+// cmp ecx,imm32 / je <label> for each condition; returns the rel8 places
+template <size_t N> void jump_if_cond(Code &c, const uint32_t (&conds)[N], size_t (&to)[N]) {
+    for (size_t i = 0; i < N; ++i) {
+        c.bytes({0x81, 0xf9});
+        c.u32(conds[i]);
+        to[i] = c.jcc8(0x74);
+    }
+}
+
+void install_dropdown_rows(int &installed) {
+    // mov rdi,[r12+0x18]; mov rax,[rdi]; call [rax+0x28] (the label); test rax,rax; je +0x48; cmp byte [rax],0; je +0x43
+    static const unsigned char size_want[] = {0x49, 0x8b, 0x7c, 0x24, 0x18, 0x48, 0x8b, 0x07, 0xff, 0x50, 0x28,
+                                              0x48, 0x85, 0xc0, 0x74, 0x48, 0x80, 0x38, 0x00, 0x74, 0x43};
+    // vmovss xmm0,[rbp-0x104]; vmovss [r15+4],xmm0; mov rax,[r13]; cmp rax,[rbp-0x30]
+    static const unsigned char return_want[] = {0xc5, 0xfa, 0x10, 0x85, 0xfc, 0xfe, 0xff, 0xff, 0xc4, 0xc1, 0x7a,
+                                                0x11, 0x47, 0x04, 0x49, 0x8b, 0x45, 0x00, 0x48, 0x3b, 0x45, 0xd0};
+    // vmovups xmm1,[r14+0x90]; mov rax,[r14+0x80]; test rax,rax; je +0x1b; mov eax,[rax+0x5c]
+    static const unsigned char draw_want[] = {0xc4, 0xc1, 0x78, 0x10, 0x8e, 0x90, 0x00, 0x00, 0x00, 0x49, 0x8b,
+                                              0x86, 0x80, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x74, 0x1b, 0x8b,
+                                              0x40, 0x5c};
+    // vmovaps [rbp-0x1c0],xmm1; vmovss xmm0,[r14+0xc]; mov eax,[r14+0xb0]
+    static const unsigned char done_want[] = {0xc5, 0xf8, 0x29, 0x8d, 0x40, 0xfe, 0xff, 0xff, 0xc4, 0xc1, 0x7a,
+                                              0x10, 0x46, 0x0c, 0x41, 0x8b, 0x86, 0xb0, 0x00, 0x00, 0x00};
+    static_assert(kSizeLabelTest == 0x587e1c + 11 && kDrawWidth == 0x587350 + 9, "patch sites inside the patterns");
+    if (!image.matches(0x587e1c, size_want, sizeof size_want) ||
+        !image.matches(kSizeReturn - 14, return_want, sizeof return_want) ||
+        !image.matches(0x587350, draw_want, sizeof draw_want) ||
+        !image.matches(kDrawWidthDone - 14, done_want, sizeof done_want)) {
+        log("menu draw: drop-down size 0x587df0 / draw 0x587300 differ, hidden rows and row widths left as on PS4");
+        return;
+    }
+    unsigned char *size_stub = near_stub(0x80), *draw_stub = near_stub(0x60);
+    if (!size_stub || !draw_stub) {
+        log("menu draw: no stub memory for the drop-down rows");
+        return;
+    }
+
+    // Size: a label goes on as before; no label: 0 x 0 for the hidden-row conditions, else the empty line.
+    Code s{size_stub};
+    s.bytes({0x48, 0x85, 0xc0});                           // test rax,rax
+    const size_t no_label = s.jcc8(0x74);                  // je empty
+    s.bytes({0x80, 0x38, 0x00});                           // cmp byte [rax],0
+    const size_t empty_label = s.jcc8(0x74);               // je empty
+    s.jmp(kSizeLabelled);
+    s.land(no_label);
+    s.land(empty_label);
+    s.bytes({0x49, 0x8b, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00});   // mov rax,[r12+0x80]   the menu record
+    s.bytes({0x48, 0x85, 0xc0});                                 // test rax,rax
+    const size_t no_record = s.jcc8(0x74);                       // je as_shipped
+    s.bytes({0x8b, 0x48, 0x34});                                 // mov ecx,[rax+0x34]   its condition
+    size_t hidden[std::size(kHiddenRowConds)];
+    jump_if_cond(s, kHiddenRowConds, hidden);
+    s.land(no_record);
+    s.jmp(kSizeEmpty);                                           // as_shipped
+    for (size_t h : hidden) s.land(h);
+    s.bytes({0x49, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00});         // mov qword [r15],0    width and height 0
+    s.jmp(kSizeReturn);
+
+    // Draw: for the column rows keep the laid-out rect and use its width; else the record's width as before.
+    Code d{draw_stub};
+    d.bytes({0x49, 0x8b, 0x86, 0x80, 0x00, 0x00, 0x00});         // mov rax,[r14+0x80]   (the instruction replaced)
+    d.bytes({0x48, 0x85, 0xc0});                                 // test rax,rax
+    const size_t none = d.jcc8(0x74);                            // je as_shipped
+    d.bytes({0x8b, 0x48, 0x34});                                 // mov ecx,[rax+0x34]
+    size_t column[std::size(kColumnRowConds)];
+    jump_if_cond(d, kColumnRowConds, column);
+    d.land(none);
+    d.jmp(kDrawRecordWidth);                                     // as_shipped (rax = the record)
+    for (size_t c : column) d.land(c);
+    d.bytes({0xc5, 0xf8, 0x29, 0x8d, 0x40, 0xfe, 0xff, 0xff});   // vmovaps [rbp-0x1c0],xmm1   the laid-out rect
+    d.bytes({0xc5, 0xf0, 0x12, 0xc1});                           // vmovhlps xmm0,xmm1,xmm1    xmm0 = its width
+    d.jmp(kDrawWidthDone);
+
+    int32_t to_size = 0, to_draw = 0;
+    if (!s.ok || !d.ok || !rel32(image.base + kSizeLabelTest + 5, size_stub, &to_size) ||
+        !rel32(image.base + kDrawWidth + 5, draw_stub, &to_draw)) {
+        log("menu draw: no stub in range for the drop-down rows");
+        return;
+    }
+    unsigned char *site = image.base + kSizeLabelTest;   // 10 bytes: jmp stub, 5 nops
+    site[0] = 0xe9;
+    std::memcpy(site + 1, &to_size, 4);
+    std::memset(site + 5, 0x90, 5);
+    site = image.base + kDrawWidth;   // 7 bytes: jmp stub, 2 nops
+    site[0] = 0xe9;
+    std::memcpy(site + 1, &to_draw, 4);
+    std::memset(site + 5, 0x90, 2);
+    log("menu draw: drop-down rows: hidden lobby option rows take no space, Profile option rows span their column");
+    ++installed;
+}
+
+// ---- leaderboard list: no white outline -----------------------------------------------------------------------
+// The table control (kind 10, draw 0x58c7a0) asks its list object for named properties (virtual +0x60: row, id).
+// While the answer to 0xffce262d is 0 it draws an opaque white 20-unit outline around the table and its title tab
+// (0x58cc72..0x58d181, polygon 0x5b5de0). The leaderboard list (class vtable 0x100a360) answers every property with 0
+// on PS4 (0x5b3990); on PS3 its getter (0x4116a4) answers 1 for 0xffce262d, so PS3 draws no outline. The slot gets a
+// getter that does the same for that property and keeps 0 for every other one, as PS4.
+constexpr uint64_t kLeaderboardPropertySlot = 0x100a360 + 0x60;
+constexpr uint64_t fLeaderboardProperty = 0x5b3990;   // xor eax,eax; ret
+constexpr uint32_t kPropertyNoOutline = 0xffce262d;
+
+U2MP_GUEST uint32_t leaderboard_property(void *, int32_t, uint32_t id) { return id == kPropertyNoOutline ? 1u : 0u; }
+
+void install_leaderboard_outline(int &installed) {
+    static const unsigned char ret0[] = {0x31, 0xc0, 0xc3};
+    uint64_t slot = 0;
+    std::memcpy(&slot, image.base + kLeaderboardPropertySlot, 8);
+    if (slot != uint64_t(uintptr_t(image.base + fLeaderboardProperty)) ||
+        !image.matches(fLeaderboardProperty, ret0, sizeof ret0)) {
+        log("menu draw: leaderboard list property slot 0x%llx differs, outline left as on PS4",
+            (unsigned long long)kLeaderboardPropertySlot);
+        return;
+    }
+    const HostCodeWrite writable(image.base + kLeaderboardPropertySlot, 8);   // read-only data
+    if (!writable.ok()) {
+        log("menu draw: leaderboard list property slot cannot be made writable (%lu)", writable.error());
+        return;
+    }
+    const uint64_t host = uint64_t(uintptr_t(&leaderboard_property));
+    std::memcpy(image.base + kLeaderboardPropertySlot, &host, 8);
+    log("menu draw: leaderboard table drawn without the white outline (property 0x%08x, as PS3)", kPropertyNoOutline);
+    ++installed;
+}
+
 }  // namespace
 
 void install_menudraw(int &installed) {
     install_streams(installed);   // first: more surviving 2D commands need room in the streams
     install_carousel_hint(installed);
+    install_dropdown_rows(installed);
+    install_leaderboard_outline(installed);
 
     static const unsigned char mov_size[] = {0xbf, 0x00, 0x00, 0x03, 0x00, 0xe8};
     static const unsigned char or_flags[] = {0x48, 0x0d, 0x00, 0x00, 0x0c, 0x00};

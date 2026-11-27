@@ -24,6 +24,20 @@ constexpr uint64_t fTickerDraw = 0x5d6860;       // scroll and draw, called by t
 constexpr uint64_t kFrameClock = 0x1116180 + 0x104;
 constexpr float kRefreshSeconds = 10.0f;
 
+// The strip draw prints each entry with a direct call of the text printer (call at 0x5d6b2c to 0xcc9a70), as PS3
+// drew text. On PS4 a direct print shows nothing: menu text goes into the 2D command arena (the renderer's text
+// case queues it with 0xbda9c0 and calls 0xcc9a70 only to measure), so the entries scrolled but stayed invisible.
+// The call goes to ticker_print instead, which queues the same text struct and string in the arena.
+constexpr uint64_t kTickerPrintCall = 0x5d6b2c;
+constexpr uint64_t fPrintText = 0xcc9a70;
+constexpr uint64_t fQueueText = 0xbda9c0;   // (arena, text struct, string)
+constexpr uint64_t kTextArena = 0x124a000;
+
+U2MP_GUEST void ticker_print(void *text_struct, const char *text) {
+    reinterpret_cast<void(U2MP_GUEST *)(void *, void *, const char *)>(image.base + fQueueText)(
+        image.base + kTextArena, text_struct, text);
+}
+
 bool ready = false;
 float next_refresh = 0.0f;
 bool first_add_logged = false;
@@ -74,6 +88,12 @@ void install_ticker(int &installed) {
     }
     ready = true;
     installed += 1;
+    // the queue function's start (push rbp; mov rbp,rsp; push r15; push r14; push r12; push rbx), as loading.cpp checks
+    if (check_bytes({fQueueText, "55 48 89 e5 41 57 41 56 41 54 53"}) &&
+        retarget_call(kTickerPrintCall, fPrintText, reinterpret_cast<void *>(&ticker_print), "ticker text print"))
+        installed += 1;
+    else
+        log("ticker: the strip's text print stays direct, so the strip shows no text");
     log("ticker: PAGE_MULTIPLAYER stats ticker refresh ready (add 0x%llx, object 0x%llx; PS3 0x447248 / 0x42da98)",
         (unsigned long long)fTickerAdd, (unsigned long long)kTicker);
 }
@@ -89,7 +109,8 @@ void ticker_refresh() {
         return;
     next_refresh = now + kRefreshSeconds;
 
-    const std::string text = online::stats_ticker_text();
+    // PS3's colours (labels white, names grey, values gold) in the arena's colour order (ticker_print queues it there)
+    const std::string text = overlay::ticker_arena_colours(online::stats_ticker_text());
     if (text.empty()) return;
     if (text.size() >= overlay::kTickerTextMax) {   // the builder keeps it below 511 characters; never overflow
         log("ticker: text of %zu bytes is too long for an entry, not added", text.size());

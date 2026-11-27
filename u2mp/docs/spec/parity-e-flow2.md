@@ -363,8 +363,12 @@ detach = connected), session.cpp frame work (`session.md` 5.8) and peer events (
   (`NETINIT.md`, `PORT-NETPATCH.md`).
 - CONNECTING page: PS3 shows a progress page (`0x02661537`) after 1 s while NetInit is below 80 %, then loads the
   profile, NetGameManager::Init, the NAT type, the "net" package, and shows PAGE_MULTIPLAYER, or pops with message
-  box `0x0ebd7bba` (NAT check failed) / `0x61a3662e` (network error). session.cpp skips the page (init is immediate);
-  no progress page is needed.
+  box `0x0ebd7bba` (NAT check failed) / `0x61a3662e` (network error). Since 2026-11-27 (owner: show it as PS3)
+  session.cpp shows the page from the Multiplayer button: PS4 kept it (label text `ad9f50d9` "Connecting...", the
+  bar = netInfo +0x2c0 as steps of 44, `0x5ae980`; nothing else writes that word). A page handler runs our start-up
+  over the next frames (heap, netinit, leaderboard start-over and net-patch9, then the transport), moves the bar
+  (22, then up to 44) and opens PAGE_MULTIPLAYER after at least 1 s; no network: the page goes and the message box
+  `0x88a082af` shows over the main menu, as before. The PSN / online login itself is unchanged (online program).
 - EULA status callback: no PC counterpart.
 - NP Basic event handler: friend/presence/message events -> online.cpp.
 - Heartbeat reply (player count, daily player count, location, next interval): no PC server; PAGE_MULTIPLAYER shows

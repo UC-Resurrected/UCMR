@@ -20,6 +20,9 @@ void install_loading(int &installed);
 bool playlist_game_types(std::vector<int32_t> &types);
 // The position of playlist `id` in the PS3 playlist list, or -1.
 int32_t playlist_index(uint32_t id);
+// The icon image ids (game type record +8) of playlist `id`'s game types, in game type order, at most `max`;
+// 0 when it is not one of ours (menuimages.cpp draws them under the playlist picture, image type 0x25).
+int playlist_type_icons(uint32_t id, uint32_t *icons, int max);
 
 namespace session {
 // Session message types >= kFrontendMessages are frontend3's (session.cpp forwards them).

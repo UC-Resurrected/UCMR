@@ -29,6 +29,7 @@ if (( ${#tests[@]} == 0 )); then
         tsc-clock-test pokes-test name-dictionary-test debug-menus-test u3-tonemap-test u3-job-trace-test
         u2mp-net-test u2mp-voice-test u2mp-progression-test u2mp-events-test u2mp-roster-test u2mp-gamenet-test
         u2mp-cinema-test u2mp-peer-rules-test u2mp-overlay-test u2mp-clantag-test u2mp-start-rules-test
+        u2mp-presence-test u2mp-coop-rules-test
     )
 fi
 # test arguments (data files, relative to gpu/)

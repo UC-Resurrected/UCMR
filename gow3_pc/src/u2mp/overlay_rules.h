@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace u2mp::overlay {
 
@@ -163,5 +164,10 @@ int ticker_free_entry(const unsigned char *ticker);
 bool ticker_finished(const unsigned char *ticker);
 // 1.6: the strip was drawn within the last 0.1 s; `frame_clock` is the s32 frame clock (300 per second).
 bool ticker_visible(const unsigned char *ticker, int32_t frame_clock);
+
+// The colour codes of a ticker text ("|@CAARRGGBB|": alpha, red, green, blue, as PS3 draws them) for the PS4 2D
+// command arena, which draws a code's red and blue swapped (PS3's gold F0C828 came out light blue). Every "|@C"
+// followed by eight hex digits and "|" gets AABBGGRR; everything else is copied unchanged.
+std::string ticker_arena_colours(const std::string &text);
 
 }  // namespace u2mp::overlay

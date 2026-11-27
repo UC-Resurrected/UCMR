@@ -15,9 +15,9 @@ The launcher runs it (`u2mp\bin\u2import.exe` of the package). By hand:
 
 ```
 u2import --ps4 "<CUSA02320 folder>" --ps3 "<NPUA80698 folder>"
-         [--ps3-dlc "<RPCS3 dev_hdd0/game/BCUS98123/USRDIR>"] --out "<overlay folder>"
+         [--ps3-dlc "<RPCS3 dev_hdd0/game/<id>>"] --out "<overlay folder>"
          [--ps3-data "<RPCS3 dev_hdd0/game/<id>DATA2>"] [--groups A,B,C,D,E]
-         [--speech-langs english,french,sam-spanish,brazilian] [--dlc-ruins | --no-dlc-ruins]
+         [--speech-langs english,french,sam-spanish,brazilian] [--no-dlc-ruins]
          [--drop-navmesh] [--validate] [--force] [--only REGEX] [--ps3-elf EBOOT.elf] [--objdump PATH] [--ffmpeg PATH]
 u2import --overlay <game folder> <overlay folder> [--update <update folder>]   the menu overlay (the launcher)
 u2import --shipped-id                                                          the import's fingerprint (the launcher)
@@ -32,10 +32,13 @@ u2import --dc convert <schema.json> <ps3 module.bin> <out.bin>   |   u2import --
 u2import --hk-tables --ps3-elf <EBOOT.elf> --ps4 <game folder> --out <u2hkclasses.json> [--objdump <path>]
 u2import --twin-build <ps3 mp skin.pak> <ps3 twin.pak> <ps4 twin.pak> <out.pak>
 u2import --psarc list <file.psarc>   |   u2import --psarc extractall <file.psarc> <folder>
+u2import --materials <pak>           a pak's materials and the textures they bind (PS3 or PS4)
+u2import --texture-stats <pak>       per texture: format, size, share of black colour blocks
 ```
 
 * PS3 sources: the GOTY release NPUA80698 1.10 (base archives + `all-patches.psarc`) for game data, the map packs
-  (`dlc-map1/2.psarc`) from the BCUS98123 install, and the server-only spawn paks / `net-patch9.bin` from a
+  (`dlc-map1/2.psarc`) from any release's RPCS3 install the launcher finds (see "Map packs from any release"), and
+  the server-only spawn paks / `net-patch9.bin` from a
   `*DATA2` folder (see "What the game needs to see the new content"). For a row the import takes the import-list source first, then a GOTY or
   map-pack copy, and a BCUS title update (`dlc-patch2/3/5/7`) only when nothing else has the file; every input is
   checked by SHA-1. The 23 group A/B/E rows that the inventory took from `dlc-patch2` (Fort, Pinkerton, Rika,
@@ -251,6 +254,12 @@ tags, artgroup). Then, in that pak:
   against `:default`, `:lod0`, `:fma` ...), gets the twin's record (and its textures; twin textures the converter
   did not carry over, e.g. `default-mask.tga/<hash>.ndb.error`, are copied with their GEOMETRY_1 texture entries).
   Materials the twin has no counterpart for (re-textures such as chloe-heist, skeleton glow) stay converted from PS3.
+  A material matched only by its path (another variant) whose converted record binds a texture neither the PS3 nor
+  the PS4 twin has is a re-texture too and stays converted (since 2026-11-27, `SKIN_VERSION` twin3): Anniversary
+  Drake's `hero-main-outfit-cloth/mp-year-one` with `drake-year-one-color` got the campaign shirt before, so the
+  skin looked like plain Drake. Such a material is converted on the template's material of the same object (its
+  shader and constants, the PS3 textures re-bound), not on the cost-scored one (the hair material, before). The log
+  names them (`re-textures kept from PS3: ...`); in the 2026-11-27 run only mp-hero-year-1 has one.
 * a PS3-only skin with no material name match (the DLC characters) takes each PS3 material's own textures from its
   `MATERIAL_TABLE_1`, and a donor PS4 material chosen by the texture kinds and the material's part (skin, cloth,
   metal, eyes ...). The PS3 character suffixes `_c` / `_n` / `_s` (and Killzone's `_clr` / `_nmt` / `_spc`) are
@@ -328,9 +337,10 @@ Test run (2026-11-07, `--only mp-hero`, 49 skins):
 * **DLC Ruins**: map pack 1 ships another `ruins-multi` (78 MB main pak, DLC `-ingame10` with the heli and plank
   bridge) than the PS4 one under the same name; the PS4 `ruins-multi` / `-ingame10` are the base-game version
   (390 KB data pak, no DLC props; the PS4 registry entry nevertheless lists the DLC actors, as the PS3 map pack 1
-  `.txt` does). The import keeps the PS4 one (rule: PS4 first) unless `--dlc-ruins`. It always adds the map pack
-  pieces PS4 lacks: `ruins-multi-wide`, `sky-ruins-multi`, `ruins-multi-npc` (+ -ingame10), the DLC props and
-  `ruins-multi.bnk`; the PS4 net.bin (like the GOTY one) names them for the Ruins map. See "Known gaps" 11.
+  `.txt` does). With the map packs (`--ps3-dlc`) the import takes map pack 1's `ruins-multi` / `-ingame10` (since
+  2026-11-27 by default; `--no-dlc-ruins` keeps the PS4 base one), with the pieces PS4 lacks: `ruins-multi-wide`,
+  `sky-ruins-multi`, `ruins-multi-npc` (+ -ingame10), the DLC props and `ruins-multi.bnk`. Without the map packs
+  the PS4 base Ruins stays and none of the map pack pieces is added. Why: see "Map packs from any release".
 
 ## Validation (reference pairs, 2026-11-07, `--validate`)
 
@@ -401,7 +411,15 @@ Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python im
    retail material record (often none shares a name), so their shaders may differ from PS3; the ARTGROUP /
    LEVEL_PATS login order varies in retail and follows PS3. Not verified in game.
 5. **Level materials without a retail twin**: these get the closest retail background material (path,
-   texture roles), not their own shader. They may look different in game.
+   texture roles), not their own shader, with the PS3 material's own textures (a texture the PS3 material borrows
+   from another level, e.g. Facility's `war-rubble-01-color`, comes as its remastered PS4 copy). They may look
+   different in game. Lightmaps: U2 cooks a level lightmap without the hash folder
+   (`<level>.geom.atgi/indirect.rgbmax.tga.ndb`); until converter 5 (2026-11-27) the stage converter carried it but
+   bound every material to the retail `default-lightmap0/1`, which the lightmap UVs sampled as random dark patches
+   (the map packs' black walls and floors). Now facility-multi, ruins-multi, museum-multi, highrise-multi-2 and
+   ruins-multi-wide bind their own lightmaps as retail levels do; museum-multi-eva and the other -wide levels have
+   no PS3 lightmap and stay vertex lit. No texture of the converted map pack levels is black itself
+   (`u2import --texture-stats`).
 6. **Region script opcodes**: retail re-encodes some `LoadStatic` (0x3f) instructions as 0x42 and keeps
    others. The rule is unknown, so the import keeps 0x3f (1 of 2 in stage-multi; 7 of 292 blocks differ in
    treasure-multi). Spawners, splines and feature db match retail exactly.
@@ -414,16 +432,59 @@ Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python im
     spawn paks excepted). The only input still taken from a BCUS title update is the 233 networking text ids
     (DLC map titles, the MP menu texts of MENUS.md section 4) from `dlc-patch7`: no GOTY file has them. Without
     them the DLC map names and those menu labels stay blank. Needs the user's decision.
-11. **Ruins version mix**: by default the PS4 (base-game) `ruins-multi` main and data paks are kept, while the map
-    pack 1 `ruins-multi-wide`, `sky-ruins-multi`, `ruins-multi-npc` and the server spawn pak
-    `ruins-multi-pak-ingame10` are added. On PS3 these pieces only ever ran with the map pack 1 main pak
-    (`--dlc-ruins`). Whether the DLC backdrop, NPC data and spawners fit the base-game layout is not verified;
-    if not, either `--dlc-ruins` becomes the default again or the DLC ruins pieces are left out (then dlc.cpp, which
-    takes `ruins-multi-wide` as the map pack 1 marker, needs another marker).
+11. **Ruins version mix**: solved 2026-11-27. With the map packs the whole map pack 1 Ruins is imported (main and
+    data paks included), as PS3 played it; without them the PS4 base Ruins stays with no map pack piece. A session
+    plays a map pack map only when every PC has the pack, and the Ruins also when no PC has map pack 1 (all load the
+    base one); a party with and without map pack 1 never gets it (runtime: `session::net_game_same_map`, used by the
+    custom game Start Match check, the matchmaking pick and the map vote; DLC.md). Left: the server spawn pak
+    `ruins-multi-pak-ingame10` is one file for both Ruins (the server sent one, made for the map pack version).
 12. **The Temple's black water** is no conversion fault: the stage pak `treasure-multi` is the retail PS4 one, and
     its water materials have the PS3 constants, textures and planar-reflection technique exactly (checked
     2026-11-25), so no converter rule or PS3 water port changes it. It is a renderer case: PORT-RENDER.md, "The
     Temple: black water".
+
+## Map packs from any release (owner decision, 27 November 2026)
+
+GOTY (NPUA80698) has no map packs. When the player has any Uncharted 2 release installed in RPCS3, the launcher
+passes its folder as `--ps3-dlc` (`launcher/native/core.cpp` `u2_dlc_source`; the U2 page shows "DLC map packs: found
+in <id>" or "not found"):
+* where: `dev_hdd0/game/<id>`, looked for in each of the player's PS3 folders (game data, the U2 game, the U3
+  import's), up to five levels above them, and their `dev_hdd0/game`. Folder names compare without case and dashes;
+  `<id>DATA2` folders are game data, never a map pack source.
+* which: the first of BCUS98123, BCUS98257(F), NPUA80698, NPUA70051, BCES00757, BCES00509, BCES00727, NPEA00364,
+  NPEA00365, BCJS30035, BCJS70021, BCJS30051, BCAS20097, BCAS20142, NPHA80194, BCKS10086, BCKS10084 that has both
+  `USRDIR/build/main/dlc-map1` and `dlc-map2` (`.psarc` or unpacked). The map pack archives are byte-identical
+  across regions (BCUS98123 and BCES00757 checked: same SHA-1 for both), so the pick does not change a file; every
+  file taken is still checked by its import-list SHA-1.
+* what: only `dlc-map1/2`. The folder's title updates (`dlc-patch2/3/5/7`, speech updates) are read only for group
+  F. They differ by region and carry dc1 modules, a `pak22.txt` and text banks, and several steps take the newest
+  copy of a file: with the BCUS98123 title updates mounted, `net-patch9.bin` (the skin table every PC of a match
+  shares) came out different (SHA-1 `fd1920a6...` against `67461a12...` from GOTY alone or BCES00757). Without them
+  the GOTY-only, BCUS98123 and BCES00757 imports write the same bytes for every file they share, and the BCUS98123
+  and BCES00757 overlays are identical (1,649 files).
+* Ruins: the map pack 1 one (see "What the game needs ...", DLC Ruins). PS3's `net.bin` says map pack 0 for every
+  map; the server's `net-patch9.bin` makes both Ruins ids map pack 1 (facility 1, highrise / museum 2), so online
+  PS3 played the Ruins only in parties that all had map pack 1, and their `dlc-map1.psarc` replaced `ruins-multi`
+  with its own. On PC, map pack 1 counts as present from its levels (dlc.cpp), PCs with the pack play the map pack
+  Ruins and PCs without it the PS4 base one, and a session picks the Ruins only when all its PCs load the same one
+  (Known gaps 11).
+
+Test, 2026-11-27 (fresh `--out` folders, this PC, the converter of this commit):
+
+| run | result | time | overlay (recipe/work) |
+|---|---|---|---|
+| GOTY only | ok 1,535, ps4 11, skipped 2,240 (101 map pack rows), failed 0; `imported` | 88 s | 1,567 files, 481 MB |
+| `--ps3-dlc` BCUS98123 | ok 1,638, ps4 9, skipped 2,139, failed 0; `imported` | 145 s | 1,649 files, 1,121 MB |
+| `--ps3-dlc` BCES00757 | same counts and the same files as BCUS98123 | 322 s (other builds ran meanwhile) | identical |
+
+Groups with the map packs: A ok 64 / ps4 1, B ok 20, C ok 38 (all from dlc-map1), D ok 65 / ps4 8 (the 4 base
+`*-multi-npc` paks and their -ingame10 stay PS4), E ok 1,451 / skipped 2,139. Levels added to `pak22_ps4.txt`:
+facility-multi (+ -npc, -wide), highrise-multi-2 (+ -wide), highrise-multi-npc, museum-multi (+ -eva, -npc, -wide),
+ruins-multi-npc, ruins-multi-wide, sky-facility/museum/ruins-multi; `banks.txt` gains facility-multi,
+highrise-multi, museum-multi, museum-multi-phys. The registry drops nothing (without the map packs it drops the 4
+map pack props from the PS4 `ruins-multi` entry). Main paks: facility-multi 122 MB (170 materials, 20 exact),
+ruins-multi 106 MB (193, 7 exact), highrise-multi-2 103 MB, museum-multi 105 MB (208, 64 exact),
+museum-multi-eva 89 MB. Not tried in game.
 
 ## GOTY-only default (user decision, 8 November 2026)
 

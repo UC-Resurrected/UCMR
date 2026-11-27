@@ -45,6 +45,11 @@ std::vector<std::string> progression_players_met() {
     hx::rec("progression_players_met -> %zu", s.recent.size());
     return s.recent;
 }
+// menus.cpp's Matchmaking row (cond 135) asks for the imported map packs.
+uint32_t dlc_packs() {
+    hx::rec("dlc_packs -> %u", s.packs);
+    return s.packs;
+}
 #endif
 
 namespace session {
