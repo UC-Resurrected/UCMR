@@ -220,7 +220,8 @@ struct PlaylistDef {
 
 constexpr uint32_t kDeathmatch = 0xa30341e7, kTeamDeathmatch = 0x8dfdede9, kPlunder = 0x3d9470a5,
                    kTurf = 0x0544e6f6, kKoh = 0x13f76fcc, kObjA = 0x71ede2dc, kObjB = 0xf625a024,
-                   kElimination = 0x3b8de400;
+                   kElimination = 0x3b8de400, kCoopObjective = 0xc072e0a6, kSurvival = 0x2959eca4,
+                   kGoldRush = 0xe9995f4c, kCoopArena3 = 0xf0a21209;
 
 const PlaylistDef kDefs[] = {
     {"the-lab", sid("u2mp/playlist/the-lab"), sid("u2mp/playlist/the-lab/desc"), {"the-lab", "default"},
@@ -233,8 +234,10 @@ const PlaylistDef kDefs[] = {
      {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 5},
     {"all-competitive", sid("u2mp/playlist/all-competitive"), sid("u2mp/playlist/all-competitive/desc"),
      {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 6},
-    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {0x5136a578}, 7},
-    {"coop-arena", 0x2ee192ab, 0, {"coop", "survival", "default"}, {0x2ee192ab}, 8},
+    // The co-op playlists list net games of these game types on PS3 (Co-op Objective: the "Co-op" type; Co-op Arena:
+    // Survival, Gold Rush and the third arena type, f0a21209); their names are not game type names.
+    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {kCoopObjective}, 7},
+    {"coop-arena", 0x2ee192ab, 0xe1ae2796, {"coop", "survival", "default"}, {kSurvival, kGoldRush, kCoopArena3}, 8},
     {"gold-rush", 0x00248bb5, 0, {"default", "survival", "coop"}, {0x00248bb5, 0xe9995f4c}, 9},
     {"survival", 0x2959eca4, 0, {"survival", "default", "coop"}, {0x2959eca4, 0xb81a7c18}, 10},
 };
@@ -384,22 +387,9 @@ U2MP_GUEST void query_playlist(uint8_t *q) {
     if (get<int16_t>(abs_at(kNgm + 0x1ca0)) < 0) applied = 0;   // left Multiplayer: apply again next time
     call(original_playlist, q);
 
-    if (op_of(q) == 3 && get<uint32_t>(q + 8) == 0x25) {
-        const uint32_t row = get<uint32_t>(q + 4);
-        if (row < uint32_t(built)) {
-            // An image from the net image table, looked up by id.
-            put<uint32_t>(q + 0x08, 3);
-            put<uint64_t>(q + 0x10, 0);
-            put<uint32_t>(q + 0x18, 0);
-            put<uint32_t>(q + 0x1c, playlists[row].picture());
-            put<uint32_t>(q + 0x20, 1);
-            put<int32_t>(q + 0x24, -1);
-            put<uint32_t>(q + 0x28, 0);
-            put<int32_t>(q + 0x2c, -1);
-            put<float>(q + 0x30, 1.0f);
-        }
-        return;
-    }
+    // op 3: the game's answer stays (image type 0x25 with the playlist id, as PS3): menuimages.cpp draws the
+    // picture in PS3's box and the game type icons under it.
+    if (op_of(q) == 3) return;
     if (op_of(q) != 4 || built == 0) return;
     if (get<int32_t>(q + 4) < 0) {   // the saved choice is not one of ours: take the first playlist
         put<uint32_t>(abs_at(kNpd + 0x104), playlists[0].id());
@@ -871,6 +861,24 @@ int32_t playlist_max_players(uint32_t id) {
     for (int k = 0; k < built; ++k)
         if (playlists[k].id() == id) return playlists[k].max_players();
     return 0;
+}
+
+int playlist_type_icons(uint32_t id, uint32_t *icons, int max) {
+    const Playlist *p = nullptr;
+    for (int k = 0; k < built && !p; ++k)
+        if (playlists[k].id() == id) p = &playlists[k];
+    if (!p || max <= 0) return 0;
+    void *sym = dc_lookup(kDcGameTypes);
+    if (!sym) return 0;
+    const DcTable types = read_table(sym);
+    if (types.count <= 0 || !types.records) return 0;
+    int n = 0;
+    for (int32_t t = 0; t < types.count && n < max; ++t) {   // game type order, each type once
+        bool listed = false;
+        for (int i = 0; i < p->type_count() && i < 8; ++i) listed = listed || p->type(i) == t;
+        if (listed) icons[n++] = get<uint32_t>(types.records + 0x44 * t + 8);
+    }
+    return n;
 }
 
 int32_t playlist_index(uint32_t id) {

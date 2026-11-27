@@ -41,6 +41,8 @@ namespace u2mp {
 void install_menus(int &installed);
 void menus_help_bar_frame();   // MENUS.md 3.8.1 (new only: the HB scenarios)
 int32_t playlist_index(uint32_t id);   // new only: the 14P / 15P scenarios
+int playlist_type_icons(uint32_t id, uint32_t *icons, int max);
+int32_t playlist_max_players(uint32_t id);
 void install_menuimages(int &installed);
 int32_t playlist_pick_type();
 bool playlist_game_types(std::vector<int32_t> &types);
@@ -315,6 +317,24 @@ void ps3_playlist_order(std::vector<std::string> &r, bool ngm) {
         i = j > i ? j : i + 1;
     }
 }
+// (2026-11-27, spec menus.md 1.3) The playlist query no longer turns the game's op 3 answer (image type 0x25 with the
+// playlist id, the type 0x25 box with the game type icons under the picture, as PS3) into a type 3 net image. The old
+// build's answer gets back the game's: type 0x25 and the fields the old build wrote put back to the scenario's
+// filler (the test's game query sets only the type).
+void playlist_picture_type(std::vector<std::string> &r) {
+    static const std::string head = "  -> q ";
+    for (auto &l : r) {
+        if (l.rfind(head, 0) != 0 || l.size() < head.size() + 2 * 0x34) continue;
+        std::string h = l.substr(head.size(), 2 * 0x60);
+        if (h.substr(0, 8) != "03000000" || h.substr(16, 8) != "03000000" || h.substr(2 * 0x18, 8) != "00000000" ||
+            h.substr(2 * 0x20, 8) != "01000000" || h.substr(2 * 0x24, 8) != "ffffffff" ||
+            h.substr(2 * 0x30, 8) != "0000803f")
+            continue;
+        h.replace(16, 8, "25000000");
+        for (size_t b = 0x10; b < 0x34; ++b) h.replace(2 * b, 2, "c1");
+        l.replace(head.size(), 2 * 0x60, h);
+    }
+}
 void expected_old(std::vector<std::string> &r) {
     for (auto &l : r) {
         // f11e480 (spec parity-g-friends.md G1): the Players Met query takes progression_players_met() instead of
@@ -344,6 +364,7 @@ void expected_old(std::vector<std::string> &r) {
     }
     ps3_playlist_order(r, false);
     ps3_playlist_order(r, true);
+    playlist_picture_type(r);
 }
 
 // per query of the current run, by side (filled by model_ask, used by cursor_expected)
@@ -695,7 +716,7 @@ void make_games(const std::vector<int32_t> &types) {
 // the PS4 game types, by their name texts, plus Machinima and an objective-picture name
 const std::vector<TypeRec> kFullTypes = [] {
     const uint32_t names[] = {0xa30341e7, 0x8dfdede9, 0x3d9470a5, 0x0544e6f6, 0x13f76fcc, 0x71ede2dc,
-                              0xf625a024, 0x3b8de400, 0x5136a578, 0x2ee192ab, 0x00248bb5, 0xe9995f4c,
+                              0xf625a024, 0x3b8de400, 0xc072e0a6, 0xf0a21209, 0x00248bb5, 0xe9995f4c,
                               0x2959eca4, 0xb81a7c18, 0x5614c769, 0x8f86cb5f};
     std::vector<TypeRec> v;
     for (uint32_t i = 0; i < 16; ++i) v.push_back({names[i], 0xde500000u + i, 0x1a000000u + i});
@@ -1616,6 +1637,13 @@ void playlist_order_scenarios() {
             EXPECT(u2mp::playlist_index(id) == k);
         }
         EXPECT(u2mp::playlist_index(0xdeadbeef) == -1);
+        // the co-op playlists: Co-op Objective = the "Co-op" game type, Co-op Arena = Survival, Gold Rush and type
+        // f0a21209; the icons under the picture are their game types' images in game type order
+        uint32_t icons[16] = {};
+        EXPECT(u2mp::playlist_type_icons(sid("u2mp/playlist/coop-objective"), icons, 16) == 1 && icons[0] == 0x1a000008);
+        EXPECT(u2mp::playlist_type_icons(sid("u2mp/playlist/coop-arena"), icons, 16) == 3 && icons[0] == 0x1a000009 &&
+               icons[1] == 0x1a00000b && icons[2] == 0x1a00000c);
+        EXPECT(u2mp::playlist_type_icons(0xdeadbeef, icons, 16) == 0);
     });
 }
 void playlist_partial_order_scenario() {
@@ -2146,8 +2174,8 @@ int main(int argc, char **argv) {
         menus_install_scenarios();
         menus_query_scenarios();
         playlist_prebuild_scenarios();
-        build_scenario("14 all game types playable: 11 PS3 playlists", full_playlist_data, 3);
-        post_build_scenarios("14", full_playlist_data, false);
+        // (2026-11-27) The PS3 playlist builds differ from the old build in order and in the co-op game types (the
+        // co-op playlists list game types, not their own names): new only (14P, 15P); the fallback builds stay compared.
         playlist_order_scenarios();
         menuimages_install_scenarios();
         lookup_scenarios();
@@ -2166,8 +2194,6 @@ int main(int argc, char **argv) {
         return fail ? 1 : 0;
     }
     if (mode == "pl-partial") {
-        build_scenario("15 some types playable: skipped definitions, dups, 8 cap", partial_playlist_data, 2);
-        post_build_scenarios("15", partial_playlist_data, false);
         playlist_partial_order_scenario();
     } else if (mode == "pl-fallback") {
         build_scenario("16 fallback: Machinima skipped, ids replaced", fallback_playlist_data, 2);

@@ -324,6 +324,21 @@ uint32_t playlist_image(uint32_t value) {
 
 std::atomic<int> draw_log_budget{24};
 
+// Under a playlist picture (type 0x25, the box's last 50 units) PS3 draws one icon per game type of the playlist,
+// in game type order: squares of 46 units, 20 units apart, the row centred on the box, their bottom 12 units above
+// the box's bottom; every size scales with the box width over 440 (the box PS3 gives type 0x25), so the small
+// cards of the carousel fan get small icons. The icons are the game types' own images (PS4 net.pak).
+void draw_playlist_icons(uint64_t list, uint32_t playlist, float x, float bottom, float w, const Colour &c) {
+    uint32_t icons[16];
+    const int n = playlist_type_icons(playlist, icons, 16);
+    if (n <= 0) return;
+    const float s = w * (1.0f / 440.0f), size = 46.0f * s, step = 66.0f * s;
+    const float row = size * float(n) + 20.0f * s * float(n - 1);
+    float left = x + w * 0.5f - row * 0.5f;
+    const float top = bottom - 58.0f * s;
+    for (int i = 0; i < n; ++i, left += step) draw_quad(list, net_material(icons[i]), left, top, size, size, 0, 0, 1, 1, c);
+}
+
 // Called by the stub for the image types the renderer has no case for.
 U2MP_GUEST void draw_lost_type(uint8_t *desc, uint8_t *frame, uint32_t c2, uint32_t c1, uint32_t c0, uint32_t c3) {
     const uint64_t list = get<uint64_t>(frame);
@@ -377,6 +392,7 @@ U2MP_GUEST void draw_lost_type(uint8_t *desc, uint8_t *frame, uint32_t c2, uint3
             hh = less > 0.0f ? less : 0.0f;
         }
         draw_quad(list, m, x, y, w, hh, 0.0703125f, 0, 0.9296875f, 1, colour);
+        if (type == 0x25) draw_playlist_icons(list, value, x, y + h, w, colour);
         break;
     }
     default: break;

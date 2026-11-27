@@ -8,7 +8,6 @@
 //
 // Reimplemented from the behaviour description u2mp/docs/spec/parity-ticker-respawn.md (part 1).
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -46,38 +45,6 @@ bool check_bytes(const Check &c) {
         p += 2;
     }
     return image.matches(c.offset, want, n);
-}
-
-// Diagnostics (owner report 2026-11-27: the strip stays empty although a text is added): while the strip is drawn,
-// every 4 s for the first 8 times, the strip rectangle, the last draw time and every entry in use (start, width,
-// the text's first characters). Shows whether the entries move, where they are and whether they are freed.
-int state_logs = 0;
-float next_state_log = 0.0f;
-
-float f32_at(const unsigned char *p) {
-    float v;
-    std::memcpy(&v, p, sizeof v);
-    return v;
-}
-
-void log_state(const unsigned char *ticker, float now) {
-    if (state_logs >= 8 || now < next_state_log) return;
-    const float drawn = f32_at(ticker + 0x10);
-    if (now - drawn > 0.5f || drawn - now > 0.5f) return;   // the strip is not on screen
-    next_state_log = now + 4.0f;
-    ++state_logs;
-    std::string entries;
-    for (int k = 0; k < 8; ++k) {
-        const unsigned char *e = ticker + 0x14 + 0x208 * k;
-        if (!e[8]) continue;
-        char line[96];
-        std::snprintf(line, sizeof line, " [%d] start %.1f width %.1f \"%.24s\"", k, double(f32_at(e)),
-                      double(f32_at(e + 4)), reinterpret_cast<const char *>(e + 8));
-        entries += line;
-    }
-    log("ticker: t %.2f strip x %.1f y %.1f w %.1f h %.1f, drawn %.2f;%s", double(now), double(f32_at(ticker)),
-        double(f32_at(ticker + 8)), double(f32_at(ticker + 4)), double(f32_at(ticker + 0xc)), double(drawn),
-        entries.empty() ? " no entry" : entries.c_str());
 }
 
 }  // namespace
@@ -118,7 +85,6 @@ void ticker_refresh() {
     std::memcpy(&clock, image.base + kFrameClock, sizeof clock);
     const float now = float(clock) * (1.0f / 300.0f);
     if (next_refresh - now > kRefreshSeconds) next_refresh = now;   // the clock started again lower
-    log_state(ticker, now);
     if (!overlay::ticker_visible(ticker, clock) || !overlay::ticker_finished(ticker) || !(now > next_refresh))
         return;
     next_refresh = now + kRefreshSeconds;

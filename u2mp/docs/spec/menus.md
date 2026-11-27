@@ -241,12 +241,16 @@ The playlist id is `sid("u2mp/playlist/<key>")`. A description of 0 means: the d
 | 5 | objectives (`72a5f8c5`) | 4bf30e73 | 675ef552 | objective | 3d9470a5, 0544e6f6, 13f76fcc, 71ede2dc, f625a024 |
 | 6 | ranked (`d96118bb`) | 47b24464 | 57fc82aa | mlg | same 8 as #7 |
 | 7 | all-competitive (`013dc564`) | `sid("u2mp/playlist/all-competitive")` = `013dc564` | `sid("u2mp/playlist/all-competitive/desc")` = `a2d9233c` | grab-bag | a30341e7, 8dfdede9, 3d9470a5, 0544e6f6, 13f76fcc, 71ede2dc, f625a024, 3b8de400 |
-| 8 | coop-objective (`e0c85229`) | 5136a578 | c35e16e8 | coop | 5136a578 |
-| 9 | coop-arena (`03fdfa7b`) | 2ee192ab | 0 | coop, survival, default | 2ee192ab |
+| 8 | coop-objective (`e0c85229`) | 5136a578 | c35e16e8 | coop | c072e0a6 (the "Co-op" game type) |
+| 9 | coop-arena (`03fdfa7b`) | 2ee192ab | e1ae2796 | coop, survival, default | 2959eca4, e9995f4c, f0a21209 (Survival, Gold Rush, the third arena type) |
 | 10 | gold-rush (`6590fddd`) | 00248bb5 | 0 | default, survival, coop | 00248bb5, e9995f4c |
 | 11 | survival (`a6481abb`) | 2959eca4 | 0 | survival, default, coop | 2959eca4, b81a7c18 |
 
 Note: in #1 and #7 the name text id equals the playlist id (both are sids of the same string).
+The co-op playlists name game types, not themselves (2026-11-27; before, #8 / #9 listed their own names and were
+never built): PS3 lists net games per playlist, Co-op Objective only games of game type 4 ("Co-op", c072e0a6), Co-op
+Arena games of types 8, 9 and 12 (Survival, Gold Rush, f0a21209; GOTY net-patch9, 3 and 33 games). The PS4 game type
+table has the same twelve types (index 4 c072e0a6, 8 2959eca4, 9 e9995f4c, 12 f0a21209).
 
 Picture image ids: grab-bag `f268b146`, mlg `a756f41a`, deathmatch `f892a814`, elimination
 `37ada99e`, objective `9dd25791`, plunder `4f7d9fcd`, coop `e80c4be1`, survival `79c940bf`,
@@ -327,9 +331,9 @@ Done at the start of every cond 55 call:
 1. Build the playlists (above).
 2. If s16 ngm+0x1ca0 < 0: applied = 0.
 3. Call the original 0x6562d0 with `q`.
-4. If u32 `q+0` == 3 and u32 `q+8` == 0x25: let row = u32 `q+4`. If row < number of built
-   playlists (host count), write the picture as a net image descriptor (below) for record `row`
-   (host record order, which is also the pointer array order). Return in both cases.
+4. If u32 `q+0` == 3: return (the game's answer stays: image type 0x25 with the playlist id, drawn by menuimages as
+   PS3: the picture and the game type icons under it, 2.9; until 2026-11-27 it was turned into a type 3 net image,
+   which has no icons).
 5. If u32 `q+0` != 4 or no playlist is built: return.
 6. If s32 `q+4` < 0: npd+0x104 = id of the first record, `q+4` = 0.
 7. Apply.
@@ -732,7 +736,10 @@ or w <= 0, or h <= 0 (a NaN passes these tests). Otherwise one guest call `DrawQ
 - **0x24, 0x25 playlist picture**: id = the u32 `+0x10` of the first guest playlist record (from
   ngm+0x20a0[i], i < min(u32 ngm+0x21a0, 32), skipping NULL pointers) whose u32 `+0` == value;
   none -> 0. No guest call. m = net material of id. hh = h for 0x24; for 0x25 hh = max(0, h - 50.0f).
-  Draw quad (m, x, y, w, hh, 0.0703125f, 0, 0.9296875f, 1).
+  Draw quad (m, x, y, w, hh, 0.0703125f, 0, 0.9296875f, 1). For 0x25 PS3 then draws one icon per game type of
+  the playlist (`playlist_type_icons`: the game type records' `+8` images, in game type order, each type once): s =
+  w / 440; squares of 46 s, 66 s apart (20 s gaps), the row centred on x + w / 2, from y + h - 58 s down to
+  y + h - 12 s, same colour as the picture.
 - **any other type (0x23)**: nothing is drawn; id 0, no material.
 
 Then, while the shared draw-log budget lasts (24 lines for the process, thread safe), log
