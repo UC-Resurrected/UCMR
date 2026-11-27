@@ -601,7 +601,7 @@ void query_friends_online(uint8_t *q) {
             put<float>(q + 0x30, 1.0f);
         };
         if (element == kElementStatusDot) image(0x20, v.party_member ? 2 : v.online ? 1 : 0);
-        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.level, 1)));
+        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.mode, 1)));
         else if (element == 0 && v.this_game) image(0x21, 0);
         break;   // the avatar (0x2138a9b2): RPCN has none
     }

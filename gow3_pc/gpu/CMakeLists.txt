@@ -256,6 +256,9 @@ if (WIN32)
     # u2mp peer rules test (unreachable list, bar colours; no game needed): ninja -C out/gpu u2mp-peer-rules-test
     add_executable(u2mp-peer-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_peer_rules.cpp)
     target_compile_options(u2mp-peer-rules-test PRIVATE -Wall -Wextra -Werror)
+    # u2mp presence block test (PS3 88-byte block, old PC data, join hint; no game needed): ninja -C out/gpu u2mp-presence-test
+    add_executable(u2mp-presence-test EXCLUDE_FROM_ALL ../tests/test_u2mp_presence.cpp)
+    target_compile_options(u2mp-presence-test PRIVATE -Wall -Wextra -Werror)
 
     # u2mp scoreboard overlay / voice column / ticker rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
     add_executable(u2mp-overlay-test EXCLUDE_FROM_ALL ../tests/test_u2mp_overlay.cpp ../src/u2mp/overlay_rules.cpp)

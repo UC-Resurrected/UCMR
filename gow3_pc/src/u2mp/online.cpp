@@ -46,6 +46,7 @@
 #include "online.h"
 #include "online_link.h"
 #include "peer_rules.h"
+#include "presence_block.h"
 #include "progression.h"
 #include "session_api.h"
 #include "u2_online_abi.h"
@@ -108,42 +109,15 @@ enum : uint8_t { kOpFollowRoom = 1,     // leader -> party: {u64 room id}: I joi
                  kOpTalkAll = 5,        // member -> host: {u8 all}: our links to every other match room member are up
                                         // (PS3 tracker "canTalkToAll")
                  kOpOrder = 6 };        // host -> all: {u8 n, n x u8 net id}: the match room's owner succession (HostRank)
-// Presence data (RPCN presence of this game, what friends' lists read): "U2MP", what we do, which room.
-// Version 1 is the first 32 bytes; version 2 (48 bytes) adds what the PS3 friends list and friend card show
-// (spec parity-b-menus.md 5); version 3 (80 bytes) adds the career stats PAGE_MULTIPLAYER's friends ticker shows
-// (parity-d-flow1.md 2.10). A version 1 reader takes the head and rejects the version; a version 2 reader takes
-// the first 48 bytes of version 3. This reader takes all three (a version 1 friend reads as "in this game's
-// multiplayer, no details", a version 1 or 2 friend has no stats).
-constexpr uint32_t kPresenceMagic = 0x504d3255u;
-constexpr uint8_t kPresenceVersion = 3;
-constexpr uint32_t kPresenceV1Size = 32, kPresenceV2Size = 48;
-struct PresenceData {
-    uint32_t magic;
-    uint8_t version, state, members, max;
-    uint32_t key;
-    uint32_t kind;
-    uint64_t room;      // the room a friend joins (0 = not joinable now)
-    uint64_t party_room;   // our party room (PS3 block: party room id), whose members a friend's View Profile
-                           // lists (parity G4); 0 none (also every build before it: the word was padding)
-    // version 2
-    uint8_t level;      // rank badge (the friends list row icon)
-    uint8_t party;      // players in the party room (1 alone)
-    uint8_t difficulty; // co-op difficulty 0..4 (NetGameManager +0x21c4)
-    uint8_t pad2;
-    int16_t net_game;   // *net-games* index of the game being played or set up, -1 none
-    uint16_t pad3;
-    uint64_t match_end; // the running match's end, Unix UTC seconds; 0 none
-    // version 3: NetPlayerData career values (headshots: the local progression store's career count)
-    uint32_t cash, kills, wins, losses, deaths, headshots, seconds;
-    uint32_t pad4;
-};
-static_assert(sizeof(PresenceData) == 80, "presence data");
-static_assert(sizeof(PresenceData) <= sizeof(U2oFriend::data), "presence data fits the ABI's 128 bytes");
-// State: kPresMenu = this game but not in Multiplayer (version 2 readers: single player); kPresCinema = cinema
-// mode (version 2).
-enum : uint8_t { kPresMenu = 0, kPresParty = 1, kPresCustom = 2, kPresMatchmaking = 3, kPresMatch = 4,
-                 kPresCinema = 5 };
+// Presence data (RPCN presence of this game, what friends' lists read): the PS3 88-byte block
+// (presence_block.h, spec parity-g-friends.md 1.2), the same for PS3 and PC friends. PC builds up to 0.10.172 sent
+// "U2MP" data (versions 1..3); it is still read. A PC also names the room a PC friend joins in the presence comment
+// (the join hint; PS3 neither sets nor reads the comment).
+namespace pres = u2mp::presence;
+using pres::kOldMenu, pres::kOldParty, pres::kOldCustom, pres::kOldMatchmaking, pres::kOldMatch, pres::kOldCinema;
+static_assert(pres::kBlockSize <= sizeof(U2oFriend::data), "presence data fits the ABI's 128 bytes");
 constexpr char kPresenceTitle[] = "Uncharted 2: Among Thieves";
+constexpr uint64_t kScoreTable = 0x104ae70;   // pointer; table + 0x3dee + 0x34 * t = u16 score of team t
 // Presence (PS3 parity G2): checked every 5 s, sent on change; after a failed send the next check is 10 s later.
 constexpr double kPresencePeriod = 5.0, kPresenceRetry = 10.0;
 constexpr double kInviteLife = 600.0, kMigrateTimeout = 15.0, kPromoteDelay = 0.4;
@@ -1070,20 +1044,28 @@ void back_to_multiplayer_page() {
 }
 
 // ---- friends, presence, invites (ABI 2; PS3 NP Basic, PORT-MATCHMAKING.md 1.10 / 3.6) -------------
-// A friend's presence data of this game (version 1, 2 or 3; the fields a lower version lacks stay 0).
-bool presence_data(const U2oFriend &f, PresenceData &d) {
-    d = PresenceData{};
-    if (!f.online || !f.same_game || f.data_len < kPresenceV1Size) return false;
-    std::memcpy(&d, f.data, std::min<size_t>(f.data_len, sizeof d));
-    if (d.magic != kPresenceMagic || d.version < 1 || (d.version == 2 && f.data_len < kPresenceV2Size) ||
-        (d.version >= 3 && f.data_len < sizeof d))
-        return false;
-    const uint32_t have = d.version == 1 ? kPresenceV1Size : d.version == 2 ? kPresenceV2Size : uint32_t(sizeof d);
-    std::memset(reinterpret_cast<uint8_t *>(&d) + have, 0, sizeof d - have);
-    if (d.version == 1) d.net_game = -1;
-    return true;
+// A friend's multiplayer presence of this game: the PS3 block (PS3 and PC), or the old PC data of 0.10.172 and
+// older read with the PS3 meaning. `join` is the room a PC friend names for joining (old data or the join hint;
+// room 0 = none), `pc` whether the friend is a PC (it sent old data or a join hint), `details` whether activity and
+// values are known (not for old version 1 data). The key is not checked here (another build: see the callers).
+struct FriendPresence {
+    pres::Block b;
+    pres::OldRoom join;
+    bool pc = false, details = false;
+};
+bool friend_presence(const U2oFriend &f, FriendPresence &p) {
+    p = FriendPresence{};
+    if (!f.online || !f.same_game) return false;
+    if (f.data_len == pres::kBlockSize && pres::decode(f.data, f.data_len, p.b)) {
+        p.details = true;
+        p.pc = pres::parse_join_hint(f.comment, sizeof f.comment, p.join);
+        return true;
+    }
+    p.pc = true;
+    return pres::decode_legacy(f.data, std::min<size_t>(f.data_len, sizeof f.data), p.b, p.join, p.details);
 }
-bool presence_of(const U2oFriend &f, PresenceData &d) { return presence_data(f, d); }
+// The same, only when the friend plays our build (PS3 0x48f020: size 88 and our key).
+bool our_presence(const U2oFriend &f, FriendPresence &p) { return friend_presence(f, p) && p.b.key == room_key(); }
 
 // The friends list order (PS3 0x4c1fe0): friends in this game first, then the others online, then offline;
 // within a group by online id (byte order, ascending).
@@ -1113,10 +1095,22 @@ void refresh_friends() {
     }
 }
 
-// A friend's room we may join: same build, in a party / lobby / matchmaking (or cinema mode), a free slot.
-bool joinable(const PresenceData &d) {
-    return d.room && d.key == room_key() &&
-           ((d.state >= kPresParty && d.state <= kPresMatchmaking) || d.state == kPresCinema) && d.members < d.max;
+// The room a friend of our build can be joined in (`r`; false none). A PC friend names it (old data: in a party /
+// lobby / matchmaking room or cinema mode; join hint: whenever it has one), a free slot needed. A PS3 friend (no
+// hint): its party room unless the party is hidden (PS3 0x43a340 offers Join Party only then).
+bool join_room_of(const FriendPresence &p, pres::OldRoom &r) {
+    r = p.join;
+    if (p.b.key != room_key()) return false;
+    if (p.pc) {
+        if (!r.room || (r.max && r.members >= r.max)) return false;
+        return !r.version || (r.state >= kOldParty && r.state <= kOldMatchmaking) || r.state == kOldCinema;
+    }
+    if (!p.b.party_room || p.b.party_hidden) return false;
+    r = pres::OldRoom{};
+    r.key = p.b.key;
+    r.room = p.b.party_room;
+    r.kind = kKindParty;
+    return true;
 }
 
 // The running match's end in Unix UTC seconds (the PS3 presence clock), 0 without a time limit. Kept while
@@ -1146,66 +1140,57 @@ uint64_t match_end_now() {
     return kept;
 }
 
-// What we do now, for our friends (PS3 NetFriends presence 0x48f16c / 0x490338: sceNpBasicSetPresenceDetails).
-void presence_now(PresenceData &d, std::string &status) {
-    d = PresenceData{};
-    d.magic = kPresenceMagic;
-    d.version = kPresenceVersion;
-    d.key = room_key();
-    d.max = uint8_t(kPartySlots);
-    d.net_game = -1;
-    const Room *r = nullptr;
+// The room a friend joins us in now, which an invite names too (nullptr: none); `state` in the old data's terms.
+const Room *join_target(uint8_t &state, const char *&what) {
     const bool cinema = G<int32_t>(kNetInfo + NI_MODE) == 3;
-    if (!started) {
-        status = "Multiplayer menu";
-    } else if (cinema) {
-        d.state = kPresCinema;
-        r = match_room_.id ? &match_room_ : party_room.id ? &party_room : nullptr;
-        status = "Watching a cinema";
-    } else if (in_match) {
-        d.state = kPresMatch;
-        status = "Playing a match";
-    } else if (match_room_.id && match_room_.kind == kKindMatchmaking) {
-        d.state = kPresMatchmaking;
-        r = &match_room_;
-        status = "Matchmaking";
-    } else if (match_room_.id) {
-        d.state = kPresCustom;
-        r = &match_room_;
-        status = "In a custom game lobby";
-    } else if (party_room.id) {
-        d.state = kPresParty;
-        r = &party_room;
-        status = "In a party";
-    } else {
-        d.state = kPresParty;   // in Multiplayer, the party room not made yet: nothing to join
-        status = "Multiplayer menu";
+    if (!started) return state = kOldMenu, what = "not in multiplayer", nullptr;
+    if (cinema) {
+        state = kOldCinema, what = "cinema";
+        return match_room_.id ? &match_room_ : party_room.id ? &party_room : nullptr;
     }
-    if (r) {
-        d.room = r->id;
-        d.kind = r->kind;
-        d.members = uint8_t(std::min<size_t>(r->members.size(), 255));
-        d.max = uint8_t(r->max_slot ? r->max_slot : kPartySlots);
-        char b[32];
-        std::snprintf(b, sizeof b, " (%u/%u)", unsigned(d.members), unsigned(d.max));
-        status += b;
+    if (in_match) return state = kOldMatch, what = "match", nullptr;
+    if (match_room_.id && match_room_.kind == kKindMatchmaking) return state = kOldMatchmaking, what = "matchmaking", &match_room_;
+    if (match_room_.id) return state = kOldCustom, what = "custom game lobby", &match_room_;
+    if (party_room.id) return state = kOldParty, what = "party", &party_room;
+    return state = kOldParty, what = "multiplayer menu", nullptr;   // the party room not made yet: nothing to join
+}
+
+// What we do now, for our friends (PS3 NetFriends 0x490338; spec parity-g-friends.md 1.2): the PS3 block.
+void presence_block_now(pres::Block &b) {
+    b = pres::Block{};
+    b.key = room_key();
+    b.party = uint8_t(std::clamp<size_t>(party_room.id ? party_room.members.size() : 1, 1, 255));
+    b.party_hidden = party_room.id && party_room.hidden;
+    b.mode = uint8_t(G<int32_t>(kNetInfo + NI_MODE));
+    b.party_room = party_room.id;
+    // A net game exists (NGM match state, PS3 +0x1a8c): a film being played back (NGM film flag, PS3 +0x1ba4), else
+    // a match with its players, team scores, end time.
+    if (G<int32_t>(kNgm + 0x1e80) != 0) {
+        b.net_game = G<int16_t>(kNgm + 0x1ca0);
+        b.difficulty = G<uint8_t>(kNgm + 0x21c4);
+        if (G<uint8_t>(kNgm + 0x209c)) {
+            b.activity = pres::kActFilm;
+        } else {
+            b.activity = pres::kActMatch;
+            b.players = uint8_t(std::clamp(session::member_count(), 0, 255));
+            if (const uint8_t *table = reinterpret_cast<const uint8_t *>(G<uint64_t>(kScoreTable)))
+                for (int t = 0; t < 2; ++t) std::memcpy(&b.score[t], table + 0x3dee + 0x34 * t, 2);
+            b.match_end = match_end_now();
+        }
     }
-    if (started) {
-        d.level = uint8_t(std::clamp(session::rank(), 0, 255));
-        d.party = uint8_t(std::clamp<size_t>(party_room.id ? party_room.members.size() : 1, 1, 255));
-        d.difficulty = G<uint8_t>(kNgm + 0x21c4);
-        d.net_game = G<int16_t>(kNgm + 0x1ca0);
-        d.party_room = party_room.id;
-        if (d.state == kPresMatch) d.match_end = match_end_now();
-        // The career values the friends ticker shows (NetPlayerData Data, spec progression.md).
-        d.cash = G<uint32_t>(kNpd + 0xd8);
-        d.kills = G<uint32_t>(kNpd + 0x184);
-        d.deaths = G<uint32_t>(kNpd + 0x188);
-        d.wins = G<uint32_t>(kNpd + 0x18c);
-        d.losses = G<uint32_t>(kNpd + 0x190);
-        d.headshots = progression_headshots();   // the career count of the local store (progression.cpp)
-        d.seconds = G<uint32_t>(kNpd + 0x198);
-    }
+    // The career values (NetPlayerData data, spec progression.md); headshots: the local store's career count
+    // (progression.cpp), as before.
+    const uint32_t cash = G<uint32_t>(kNpd + 0xd8), spent = G<uint32_t>(kNpd + 0xdc);
+    b.cash = cash;
+    b.cash_left = cash > spent ? cash - spent : 0;
+    b.kills = G<uint32_t>(kNpd + 0x184);
+    b.deaths = G<uint32_t>(kNpd + 0x188);
+    b.wins = G<uint32_t>(kNpd + 0x18c);
+    b.losses = G<uint32_t>(kNpd + 0x190);
+    b.headshots = progression_headshots();
+    b.time_a = G<uint32_t>(kNpd + 0x198);
+    b.time_b = G<uint32_t>(kNpd + 0x1a0);
+    b.extra = G<uint32_t>(kNpd + 0x19c);
 }
 
 // A presence send failed (PS3 parity G2): forget what was sent, so the next check sends again, 10 s from now.
@@ -1216,18 +1201,36 @@ void presence_failed(double t) {
     log("online: presence: not sent: trying again in %.0f s", kPresenceRetry);
 }
 
-// PS3 parity G2: one check every 5 s (the next time is set before the check); sent only when it changed.
+// PS3 parity G2: one check every 5 s (the next time is set before the check); sent only when it changed. As PS3:
+// the game title text in the title field, an empty status line, the block as data; outside multiplayer (PS3
+// 0x48f16c at the MP clean-up) no data. The comment carries the PC join hint.
 void publish_presence(double t) {
     if (link_state != U2O_READY || !api.set_presence || t < next_presence) return;
     next_presence = t + kPresencePeriod;
-    PresenceData d;
-    std::string status;
-    presence_now(d, status);
-    std::string key = status;
-    key.append(reinterpret_cast<const char *>(&d), sizeof d);
+    uint8_t state = 0;
+    const char *what = "";
+    const Room *r = join_target(state, what);
+    std::string hint;
+    uint8_t data[pres::kBlockSize];
+    pres::Block b;
+    if (started) {
+        presence_block_now(b);
+        pres::encode(b, data);
+        hint = pres::join_hint(r ? r->id : 0, r ? r->kind : 0, r ? unsigned(r->members.size()) : 0,
+                               r ? unsigned(r->max_slot ? r->max_slot : kPartySlots) : 0);
+    }
+    std::string key = hint;
+    key.push_back('\0');
+    if (started) key.append(reinterpret_cast<const char *>(data), sizeof data);
     if (key == sent_presence) return;
-    const uint64_t id = api.set_presence(kPresenceTitle, status.c_str(), "", reinterpret_cast<const uint8_t *>(&d), uint32_t(sizeof d));
-    log("online: presence: %s (room %llx) (request %llu)", status.c_str(), (unsigned long long)d.room, (unsigned long long)id);
+    const uint64_t id = api.set_presence(kPresenceTitle, "", hint.c_str(), started ? data : nullptr,
+                                         started ? uint32_t(sizeof data) : 0);
+    if (started)
+        log("online: presence: %s: activity %u, party %u%s, room %llx, net game %d (request %llu)", what,
+            unsigned(b.activity), unsigned(b.party), b.party_hidden ? " (hidden)" : "", (unsigned long long)b.party_room,
+            int(b.net_game), (unsigned long long)id);
+    else
+        log("online: presence: %s, no data (request %llu)", what, (unsigned long long)id);
     if (!id) {
         presence_failed(t);
         return;
@@ -1295,13 +1298,12 @@ void on_invite(const U2oEvent &e) {
         on_cinema(m, from);
         return;
     }
-    PresenceData d{};
-    if (m.main_type != U2O_MSG_INVITE || m.data_len < kPresenceV1Size) {   // version 1 invites: 32 bytes
+    pres::OldRoom d;
+    if (m.main_type != U2O_MSG_INVITE) {
         log("online: message from %s (type %u) ignored", from.c_str(), unsigned(m.main_type));
         return;
     }
-    std::memcpy(&d, m.data, std::min<size_t>(m.data_len, sizeof d));
-    if (d.magic != kPresenceMagic || !d.room) {
+    if (!pres::decode_old_room(m.data, std::min<size_t>(m.data_len, sizeof m.data), d) || !d.room) {   // 32+ bytes
         log("online: invite from %s without a room: ignored", from.c_str());
         return;
     }
@@ -2730,9 +2732,11 @@ std::string profile_text(int i) {
     std::string t = n + ": " + (f.online ? "Online" : "Offline");
     if (f.online && f.title[0]) t += std::string(". ") + f.title;
     if (f.online && f.status[0]) t += std::string(". ") + f.status;
-    if (f.online && f.comment[0]) t += std::string(". ") + f.comment;
-    PresenceData d;
-    if (presence_of(f, d) && d.key != room_key()) t += ". Plays another version of the game.";
+    pres::OldRoom hint;
+    if (f.online && f.comment[0] && !pres::parse_join_hint(f.comment, sizeof f.comment, hint))
+        t += std::string(". ") + f.comment;
+    FriendPresence p;
+    if (friend_presence(f, p) && p.b.key != room_key()) t += ". Plays another version of the game.";
     return t;
 }
 
@@ -2746,19 +2750,23 @@ bool friend_view(int i, FriendView &v) {
     v.online = f.online != 0;
     v.this_game = v.online && friend_group(f) == 0;
     v.party_member = party_room.id && in_room(party_room, v.npid);
-    PresenceData d;
-    const bool data = presence_data(f, d);
-    v.other_build = data && d.key != room_key();
-    // PS3 takes the data only when its signature is our build's (0x4a9cd4): another build reads as "this game".
-    if (data && d.key == room_key() && (d.version == 1 || d.state != kPresMenu)) {
+    FriendPresence p;
+    const bool data = friend_presence(f, p);
+    v.other_build = data && p.b.key != room_key();
+    // PS3 takes the data only when its signature is our build's (0x48f020): another build reads as "this game".
+    if (data && p.b.key == room_key()) {
         v.multiplayer = true;
-        v.details = d.version >= 2;
-        v.activity = d.state == kPresMatch ? 3 : d.state == kPresCinema ? 2 : d.version >= 2 ? 1 : 0;
-        v.level = d.level;
-        v.party = d.party;
-        v.difficulty = d.difficulty;
-        v.net_game = d.net_game;
-        v.match_end = d.match_end;
+        v.details = p.details;
+        v.activity = !p.details                         ? 0
+                     : p.b.activity == pres::kActMatch  ? 3
+                     : p.b.activity == pres::kActFilm   ? 2
+                     : p.b.activity == pres::kActLobby  ? 1
+                                                        : 0;
+        v.mode = p.b.mode;
+        v.party = p.b.party;
+        v.difficulty = p.b.difficulty;
+        v.net_game = p.b.net_game;
+        v.match_end = p.b.match_end;
     }
     return true;
 }
@@ -2780,13 +2788,13 @@ bool friend_party(int i, std::vector<std::string> &names) {
     const U2oFriend &f = friend_list[size_t(i)];
     const std::string npid = npid_text(f.npid);
     const double t = now();
-    PresenceData d;
-    if (api.members_external && !party_list_req && presence_data(f, d) && d.key == room_key() && d.party_room &&
+    FriendPresence p;
+    if (api.members_external && !party_list_req && our_presence(f, p) && p.b.party_room &&
         (party_list.npid != npid || t >= party_list.at + kPartyListLife)) {
-        party_list_req = api.members_external(d.party_room);
+        party_list_req = api.members_external(p.b.party_room);
         log("online: friends: asking for %s's party (room %llx, request %llu)", npid.c_str(),
-            (unsigned long long)d.party_room, (unsigned long long)party_list_req);
-        request(party_list_req, Pending{Req::PartyMembers, d.party_room, 0, false, "party members"});
+            (unsigned long long)p.b.party_room, (unsigned long long)party_list_req);
+        request(party_list_req, Pending{Req::PartyMembers, p.b.party_room, 0, false, "party members"});
         if (party_list_req) party_list_asked = PartyList{npid, t, {}};
     }
     if (party_list.npid != npid) return false;
@@ -2811,18 +2819,20 @@ void refresh_friend_list() {
 }
 
 bool friend_joinable(int i) {
-    PresenceData d;
-    return i >= 0 && size_t(i) < friend_list.size() && presence_of(friend_list[size_t(i)], d) && joinable(d) &&
-           !room_by_id(d.room);
+    FriendPresence p;
+    pres::OldRoom r;
+    return i >= 0 && size_t(i) < friend_list.size() && friend_presence(friend_list[size_t(i)], p) &&
+           join_room_of(p, r) && !room_by_id(r.room);
 }
 
 bool join_friend(int i) {
-    PresenceData d;
-    if (i < 0 || size_t(i) >= friend_list.size() || !presence_of(friend_list[size_t(i)], d) || !joinable(d)) {
+    FriendPresence p;
+    pres::OldRoom r;
+    if (i < 0 || size_t(i) >= friend_list.size() || !friend_presence(friend_list[size_t(i)], p) || !join_room_of(p, r)) {
         notice("There is no game to join.");
         return false;
     }
-    return join_by_id(d.room, d.kind, npid_text(friend_list[size_t(i)].npid), d.members, d.max);
+    return join_by_id(r.room, r.kind, npid_text(friend_list[size_t(i)].npid), r.members, r.max);
 }
 
 bool invite_friend(int i) {
@@ -2832,19 +2842,23 @@ bool invite_friend(int i) {
         notice("Online play is not connected.");
         return false;
     }
-    PresenceData d;
-    std::string status;
-    presence_now(d, status);
-    if (!d.room || d.state == kPresMatch) {
+    pres::OldRoom d;
+    const char *what = "";
+    const Room *r = join_target(d.state, what);
+    if (!r || d.state == kOldMatch) {
         notice("There is no party to invite to yet. Try again in a moment.");
         return false;
     }
+    d.key = room_key();
+    d.kind = r->kind;
+    d.room = r->id;
+    d.members = uint8_t(std::min<size_t>(r->members.size(), 255));
+    d.max = uint8_t(r->max_slot ? r->max_slot : kPartySlots);
     U2oMessage m{};
     m.main_type = U2O_MSG_INVITE;
     std::snprintf(m.subject, sizeof m.subject, "Uncharted 2 invite");
     std::snprintf(m.body, sizeof m.body, "%s invites you to play Uncharted 2: Among Thieves.", session::local_name().c_str());
-    std::memcpy(m.data, &d, sizeof d);
-    m.data_len = uint32_t(sizeof d);
+    m.data_len = uint32_t(pres::encode_old_room(d, m.data));
     const char *npids[] = {to.c_str()};
     const uint64_t id = api.send_message(npids, 1, &m);
     log("online: invite to %s: %s room %llx (request %llu)", to.c_str(), kind_name(d.kind), (unsigned long long)d.room,
@@ -3166,7 +3180,9 @@ bool ticker_append(std::string &out, const std::string &s) {
     return true;
 }
 
-uint64_t ticker_value(const PresenceData &d, int category) {
+// PS3 0x43b30c: block +0x30 cash, +0x38 kills, +0x40 wins, +0x44 losses, +0x3c deaths, +0x48 headshots, time played
+// = +0x4c plus +0x50.
+uint64_t ticker_value(const pres::Block &d, int category) {
     switch (category) {
     case 0: return d.cash;
     case 1: return d.kills;
@@ -3174,7 +3190,7 @@ uint64_t ticker_value(const PresenceData &d, int category) {
     case 3: return d.losses;
     case 4: return d.deaths;
     case 5: return d.headshots;
-    case 6: return d.seconds;
+    case 6: return uint64_t(d.time_a) + d.time_b;
     default: return 0;
     }
 }
@@ -3217,9 +3233,10 @@ std::string stats_ticker_text() {
     if (!linked()) return out;
     std::vector<std::pair<std::string, uint64_t>> pool;
     for (size_t i = 0; i < friend_list.size() && i < size_t(kTickerScan); ++i) {
-        PresenceData d;
-        if (presence_of(friend_list[i], d) && d.key == room_key() && d.state != kPresMenu && d.version >= 3)
-            pool.emplace_back(npid_text(friend_list[i].npid), ticker_value(d, category));
+        // PS3: every friend whose block is valid (in this build's multiplayer); old PC data only from version 3 on.
+        FriendPresence p;
+        if (our_presence(friend_list[i], p) && (!p.join.version || p.join.version >= 3))
+            pool.emplace_back(npid_text(friend_list[i].npid), ticker_value(p.b, category));
     }
     for (int n = 0; n < kTickerFriends && !pool.empty(); ++n) {
         const size_t pick = size_t(std::rand()) % pool.size();

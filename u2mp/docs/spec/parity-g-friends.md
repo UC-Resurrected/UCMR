@@ -43,17 +43,67 @@ One object, built at NP start-up (PS3 `0x448d9c` -> `0x490178`) and torn down by
 
 ### 1.2 PS3 presence data block (88 bytes, what friends read)
 
-Written by `0x490338` and read by the friends list, card and ticker (`parity-b-menus.md` 5, `parity-d-flow1.md`
-2.10). Content: build key (the same signature PS3 `0x4a9cd4` returns; readers accept the block only when its size
-is 88 and its key is their own), activity (0 not in a net game, 1 in a net game, 2 cinema), the party member
-count, a co-op difficulty byte, two more bytes copied from netInfo (the page mode and one flag byte), the two team
-scores (u16 each, widened), the net game index (s16 widened, -1 none), a NetGameManager state byte, the match end
-time (u64, 0 when the game has no time limit), the party room id (u64), then the career values the ticker shows.
-The **status text** sent with it is always the game's title text (`fd2de693`), never a description.
+Settled 2026-11-27 from the PS3 1.10 GOTY EBOOT (writer `0x490338`, readers `0x48f020`, `0x4909a8`, `0x43a340`,
+friends list `0x4c1fe0`, card `0x4c1a08`, ticker `0x43b30c`). The writer fills a local 88-byte block every presence
+check, compares it with the last block sent and, when it differs, sends it with `sceNpBasicSetPresenceDetails`
+(options 3 = data and status). Every multi-byte field is written as a native PS3 word, so the block is
+**big-endian**. Unused bytes are not cleared on PS3 (whatever the stack held); no reader looks at them.
 
-Ours: `online.cpp PresenceData` version 3 carries every field a PS3 reader shows (state incl. cinema, party size,
-level, difficulty, net game, match end, room, career values). The two team scores and the NetGameManager state
-byte have no reader in the friends UI (checked: list, card and ticker never show them), so they are not needed.
+| Offset | Size | Field (PS4 1.02 source on PC) | Readers |
+|---|---|---|---|
+| +0x00 | u32 | build key: the net version word, netInfo `+0` (PS3 `0x4a9cd4` only loads that word; see below) | all: block valid only when the size is 88 and this word equals the reader's own key |
+| +0x04 | u8 | activity: 0 in multiplayer without a running net game (party, lobby, matchmaking, menus); 1 a net game is running (NGM match state `+0x1a8c` != 0, PS4 `+0x1e80`); 2 a film is played back (NGM film flag `+0x1ba4` set, PS4 `+0x209c`) | list, card: 0 "In lobby", 2 "Watching a cinema", 1 "Playing match" / the match line |
+| +0x05 | u8 | party size: 1 without a party room, else the occupied party slots (PS3 `0x4d24a8`) | list, card: "[A] players in party" when 2+ |
+| +0x06 | u8 | activity 1: occupied player slots of the NetGameManager (`0x492a20`); else 0 | none |
+| +0x07 | u8 | the party room's "hidden" flag (session `+0x112c`, set from room flag 0x10000000 and by Hide `0x4d5338`) | `0x43a340`: Join Party is offered only when 0 |
+| +0x08 | u8 | low byte of the multiplayer menu mode, netInfo `+0x2b4` (PS4 `+0x2c4`: 1 matchmaking, 2 custom, 3 cinema, 4 leaderboards) | list op 3: row icon, image type 0x21, value = this byte, at least 1 |
+| +0x09 | 3 | unused | - |
+| +0x0c | u32 | activity 1: team 0 score (u16 of the score table `+0x3dee`, widened); else 0 | none |
+| +0x10 | u32 | activity 1: team 1 score (table `+0x3e22`); else 0 | none |
+| +0x14 | s32 | activity 1 / 2: net game index (NGM `+0x18ec`, s16 widened, PS4 `+0x1ca0`); else -1 | card: net game record (map, type, map picture, type icon) |
+| +0x18 | s32 | activity 1 / 2: co-op difficulty byte (NGM `+0x1c44` read by `0x4919fc`, PS4 `+0x21c4`); else -1 | card, co-op type 4: difficulty text (`0x492148`) |
+| +0x1c | 4 | unused | - |
+| +0x20 | u64 | activity 1 with a time limit (`0x49e0e8`: none for co-op types 4, 8, 9, 12): match end as Unix seconds (start `+0x19a0` plus the limit, converted by `0x4e862c`); else 0 | card: "Match ends in [TIME]" |
+| +0x28 | u64 | party room id (session `+0x10`), 0 none | G4 party member list (`0x490c28`) |
+| +0x30 | u32 | NetPlayerData data `+0x94` (PS4 NPD `+0xd8`): cash earned | ticker category 0 |
+| +0x34 | u32 | data `+0x94` minus data `+0x98`, at least 0 (cash left) | none |
+| +0x38 | u32 | data `+0x140` (PS4 `+0x184`): kills | ticker 1 |
+| +0x3c | u32 | data `+0x144` (`+0x188`): deaths | ticker 4 |
+| +0x40 | u32 | data `+0x148` (`+0x18c`): wins | ticker 2 |
+| +0x44 | u32 | data `+0x14c` (`+0x190`): losses | ticker 3 |
+| +0x48 | u32 | data `+0x150` (`+0x194`): headshots | ticker 5 |
+| +0x4c | u32 | data `+0x154` (`+0x198`): seconds played | ticker 6 = this plus +0x50 |
+| +0x50 | u32 | data `+0x15c` (`+0x1a0`): seconds played (second counter) | ticker 6 |
+| +0x54 | u32 | data `+0x158` (`+0x19c`) | none |
+
+The career values (+0x30..+0x57) are written in every activity; +0x06, +0x0c, +0x10 and +0x20 only in activity 1;
++0x14 and +0x18 in activity 1 and 2.
+
+**Details structure and status text.** The block goes into the system presence details record (title 128 bytes,
+status 64, comment 64, data 128, data size, state). The game copies its title text (`fd2de693`) into the **title**
+field; the status and comment fields stay empty, and options 3 send the data and the (empty) status. So a PS3 player
+shows an empty status line in another client's friend list; the game itself never reads status or comment. At the MP
+clean-up (`0x48f16c`) the presence becomes the title with no data (friends then read "Playing Single-Player").
+
+**Readers.** `0x48f020` returns the block of a friend entry only when the stored data size is 88 and its first word
+equals the reader's own key (`0x4a9cd4`); the list, card, ticker and `0x43a340` also require the entry's presence
+state 2 (online in this title). `0x4909a8` (friend in this game but without such a block) answers "yes" for state 2,
+and for state 1 when the presence title equals the game's own title text: the "Playing Single-Player" case.
+
+**Build key.** PS3 `0x4a9cd4` is a two-instruction accessor: it returns the first word of netInfo. That word is the
+net version, filled at start-up from the DC symbol `*net-version*` (`6f1c3f87`) with 0x90000 added; live PS3 1.10
+shows `0x0009004e`. It is the same value the game shows as its version text ("1.09.078") and puts into the room key
+attribute 0x4C (`PORT-MATCHMAKING.md`). It is a version number, not a secret: it neither identifies a copy nor
+unlocks anything, and it is already the PC's room key (`online.cpp kPcNetVersion`, used when the PS4 netInfo word is
+0). So PC and PS3 friends of the same version accept each other's blocks.
+
+Ours (2026-11-27, `presence_block.h`, `online.cpp presence_block_now` / `publish_presence`): every PC sends this
+block with the PS3 field order and byte order, title "Uncharted 2: Among Thieves", empty status; no data outside
+multiplayer. Headshots (+0x48) stay the local store's career count (`progression_headshots`), as before. The PC also
+writes a join hint into the comment ("u2mp-join <room hex> <kind> <members> <max>"; PS3 neither sets nor reads it),
+because a PC in a custom game lobby or a matchmaking room has left its party room, so the block alone would offer
+nothing to join. Readers take the PS3 block from every friend and still read the old PC data ("U2MP" versions 1..3,
+0.10.172 and older) with the PS3 meaning.
 
 ### 1.3 Who calls what (PS3)
 
@@ -141,13 +191,13 @@ To do (`online.cpp publish_presence`, `kPresencePeriod`): period 5 s; on a faile
 carries an error) clear the remembered presence and wait 10 s before the next try. The `match_end_now` 2 s hold
 stays (it only avoids resends).
 
-### G3. Presence status text (PS3 `0x490338`, `0x48f16c`) - PLATFORM (delta), kept (owner)
+### G3. Presence status text and data (PS3 `0x490338`, `0x48f16c`) - COVERED (2026-11-27)
 
-PS3 always sends the game's title text as the status string; everything else is in the data block. Ours sends a
-description. In-game readers (ours and PS3's) use only the data block, so the game shows the same; the difference is
-visible only where RPCN shows the raw status string (another client's friend list). Parity: send the title text
-(`fd2de693` as the game's own text, or `kPresenceTitle`) as status; keep the description only in our log line.
-Owner choice (open question 3).
+Corrected 2026-11-27 (1.2): PS3 puts the title text into the presence **title** field and sends an **empty**
+status line (options 3); the data is the 88-byte block. Before 2026-11-27 the PC sent its own 80-byte "U2MP" data
+with a descriptive status, so a PS3 friend rejected it (size and key) and the PC rejected PS3's block (no "U2MP"):
+each saw the other as "Playing Single-Player". Ours now: title "Uncharted 2: Among Thieves", empty status, the PS3
+block (`presence_block.h`), the PC join hint as comment; the description is only in our log line (section 9).
 
 ### G4. A friend's party members (PS3 `0x490c28`, `0x48f350` / `0x48f558`, cond 37 `0x4b8760`) - PLATFORM, implemented 2026-11-25 in View Profile (section 8)
 
@@ -220,7 +270,7 @@ event ids used by `0x491ca0`, `0x491d08`, `0x492104` occur in PS4 code. No port 
    names in our View Profile popup?
 2. G1: the PS3 players history is a system list shared by all titles, read in the system's order (believed newest
    first) and limited to 50; ours is per game, most recently seen first. Keep ours (no system history on PC)?
-3. G3: send the title text as RPCN status (PS3) or keep our descriptive status?
+3. G3: settled 2026-11-27: PS3 sends the title text in the title field and an empty status; ours the same.
 4. PS3 lists at most 100 friends (its PSN limit); ours up to 250 plus request rows. Keep 250 (RPCN lists can be
    longer) or cap at 100?
 5. PS3 keeps a removed friend in the list until the next MP entry (the "friend removed" event is ignored); ours
@@ -244,7 +294,7 @@ event ids used by `0x491ca0`, `0x491d08`, `0x492104` occur in PS4 code. No port 
 | 0x490040 | friend list load thread (up to 100 friends with presence) | PLATFORM | `U2O_FRIEND_LIST` -> `refresh_friends` (250); question 4 |
 | 0x490170 | thread entry thunk of 0x490040 | PLATFORM | - |
 | 0x490178 | build NetFriends (100 / 50 / 16 / 10), start the friend load | PLATFORM | online.cpp link start |
-| 0x490338 | presence check every 5 s, send on change, 10 s retry on failure | COVERED | online.cpp `publish_presence` (5 s, next time set before the check), `presence_failed` (sent data forgotten, next check 10 s later; on a 0 request id or a `U2O_EV_DONE` error of the last presence request); G2 (content COVERED by PresenceData v3; status text stays ours, G3) |
+| 0x490338 | presence check every 5 s, send on change, 10 s retry on failure | COVERED | online.cpp `publish_presence` (5 s, next time set before the check), `presence_failed` (sent data forgotten, next check 10 s later; on a 0 request id or a `U2O_EV_DONE` error of the last presence request); G2 (content: the PS3 block, `presence_block.h` `encode`, 1.2; title text, empty status, G3) |
 | 0x490878 | tear down: wait, clear presence, free lists | PLATFORM | online.cpp `on_transport_closed` / link close |
 | 0x4909a8 | friend runs this game but has no MP presence of this build | COVERED | online.cpp `friend_view` this_game / multiplayer; menus.cpp `friend_status` |
 | 0x490a88 | players history write thread (skips friends; title text as description) | PLATFORM | progression.cpp `progression_note_met` (synchronous store write, friends skipped, log "adding player %s to Players Met"); G1 |
@@ -299,7 +349,7 @@ timing; G3 **kept** (our descriptive status text, question 3); G4 in **our View 
 | G1 (b) | done | progression_store.cpp `players_met(store, is_friend)`: listed, no friend, newest first, at most 50 (`kMetShown`). Used by menus.cpp `query_players_met` (op 8 / empty reload) and remaining.cpp `players_met_row` (same call, same order). A stranger who becomes a friend is gone at the next reload. LAN: no friend filter. |
 | G1 (c) | done | progression.cpp `progression_players_met`: empty while online is active and `online::friend_list_ready()` is false (link up and the list read since then; reset when the link leaves ready or is lost). The list reloads while empty, so it fills once the list is known. |
 | G2 | done | online.cpp `publish_presence`: `kPresencePeriod` 5 s, the next check time set before the check, sent only on change. `presence_failed`: a 0 request id, or a `U2O_EV_DONE` error of the last presence request, clears the remembered presence and sets the next check 10 s (`kPresenceRetry`) later, logged `online: presence: not sent: trying again in 10 s`. The `match_end_now` 2 s hold stays. |
-| G3 | kept | owner choice: descriptive status text. |
+| G3 | done 2026-11-27 | PS3 block, title text, empty status (section 9). |
 | G4 | done | Presence data: the former padding word (+0x18) is now `party_room` (our party room id, 0 none; older builds sent 0 there, version stays 3). online.cpp `friend_party(i, names)`: nothing while the list is not ready or row i is no friend; asks `members_external(party_room)` (new `Req::PartyMembers`) when the friend's presence is this build with a party room, the cache is another friend's or 5 s (`kPartyListLife`) old, and no such request runs; the cache (friend, request time, up to 10 online ids) is returned when it is this friend's. `party_list_answer` (`U2O_EV_MEMBERS_EXT`, or a `U2O_EV_DONE` error = empty list) fills the cache and calls remaining.cpp `friend_party_arrived`, which renews an open View Profile box of that friend. remaining.cpp `friend_profile`: card lines, then `\` + text `b6bd34c3` ("Party") + one id per line when the list is not empty. Player text buffer 1023 characters. Link lost: cache and request cleared. |
 
 Remaining differences from PS3:
@@ -312,3 +362,24 @@ Remaining differences from PS3:
   answer arrives (the open box is renewed if the game re-reads the player text; else the next open shows it). A
   friend on an older build has no `party_room` and so no list. Whether the room service lists the members of a
   hidden party room to a non-member is up to the online program (not checked here).
+
+## 9. PS3 presence block (2026-11-27, branch `u2-presence-ps3`)
+
+Problem: a PC and a PS3 (RPCS3, RPCN) friend saw each other as "Playing Single-Player" in Party Up: the PC sent its
+own data, which PS3 rejects (not 88 bytes, no key at +0), and the PC accepted only that data.
+
+| Piece | Where / what |
+|---|---|
+| Block | `presence_block.h`: `Block`, `encode` / `decode` (1.2 layout, big-endian, exactly 88 bytes). Test `tests/test_u2mp_presence.cpp` (`ninja -C out/gpu u2mp-presence-test`). |
+| Writer | online.cpp `presence_block_now`: key `room_key()`; activity from NGM `+0x1e80` / `+0x209c`; party size and the party room's hidden flag; menu mode netInfo `+0x2c4`; in a match the session's player count, the two team scores (`[0x104ae70] + 0x3dee + 0x34 t`), net game `+0x1ca0`, difficulty `+0x21c4`, `match_end_now`; career values from NetPlayerData (cash left = `+0xd8` - `+0xdc`, times `+0x198` and `+0x1a0`, headshots from the local store). `publish_presence`: title text, empty status, the join hint as comment; outside multiplayer no data. Log `online: presence: <what>: activity A, party P, room R, net game N`. |
+| Readers | online.cpp `friend_presence` / `our_presence`: the PS3 block from everyone (PS3 and PC); the old "U2MP" data of 0.10.172 and older with the PS3 meaning (`decode_legacy`; activity from its state, mode 1 / 2 / 3 from matchmaking / custom / cinema). `friend_view` fills multiplayer, activity, mode (row icon 0x21, was the rank before), party, difficulty, net game, match end. Ticker: every friend with a valid block; time played = +0x4c plus +0x50 (PS3 `0x43b30c`). G4 party list: block +0x28. |
+| Join Party | `join_room_of`: a PC friend's join hint (or old data) names its room (free slot checked, as before); a PS3 friend's party room from +0x28 unless +0x07 (hidden) is set (PS3 `0x43a340`). PS3 itself asks the friend with NP message 0x10b and gets the party room in 0x10c; joining the room id from the presence reaches the same room (see crossplay-ps3.md for the message exchange). |
+| Invites | unchanged content: the old 32-byte head (`encode_old_room`), which every older build reads. PS3 invites: crossplay-ps3.md. |
+
+What the PS3 block lacks compared with the old PC data: the rank byte (PS3 shows the menu mode icon there instead:
+PS3 behaviour now), and the joinable room, its kind and member counts (kept for PC friends in the join hint). Old
+PCs (0.10.172 and older) cannot read the new block: they show an updated PC friend as "Playing Single-Player" until
+they update; updated PCs still read old PCs.
+
+Not verified (no game run here): the RPCS3 side end to end; whether RPCN passes the comment through (if not, a PC in a
+custom lobby or matchmaking room is simply not joinable from its presence; its party room still is when it has one).
