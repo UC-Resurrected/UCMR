@@ -1,4 +1,3 @@
-# UCMR: Uncharted Collection Multiplayer Resurrected
 ![UCMR AI Generated Picture](assets/UCMR_AI_generated.png)
 
 <p align="center">
