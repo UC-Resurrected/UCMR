@@ -172,8 +172,13 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     {
         const Dlss* dlss = Dlss::Get();
         static std::string problem;
+#ifdef _WIN32
         problem = !dlss ? "not installed (DLSS files missing)"
                         : dlss->Problem();
+#else
+        // gow3: the DLSS bridge (dlss_bridge/, gow3_dlss.dll) is Windows-only for now
+        problem = "not on Linux yet";
+#endif
         Gow3Settings::ConfigureDlssSupport(dlss && dlss->Available(), problem.c_str());
     }
     // Available unless GOW3_UPSCALER=none; on/off and the parameters are the menu's settings.

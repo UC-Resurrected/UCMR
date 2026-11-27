@@ -26,8 +26,11 @@ followed by `(`, Windows headers, types, wide-string constructs, `.exe`/MSYS2 na
 **Progress:** phases 0, 1 and 2 of §13 are done: the Linux CI workflow (§7.4), the launcher core building on Linux
 with the platform layer (§4.1, §12), and processes: the launcher starts the imports, the game starter and the runtime,
 checks for its own updates over libcurl, and `u2import`, `u3import` and `u3fix` build, link and run on Linux (§4.7,
-§4.8). Phase 3 is done too: the Qt window runs on Linux (§4.2) and every push builds `UCMR_linux.tar.gz` (§7.4, §7.5),
-a launcher and import preview: the games do not run on Linux until the runtime is ported (phase 4, next).
+§4.8). Phase 3 is done too: the Qt window runs on Linux (§4.2) and every push builds `UCMR_linux.tar.gz` (§7.4, §7.5).
+Phase 4 is done in code: one `gow3-probe` CMake target for both systems, the runtime's Linux platform functions in C++
+(`host_linux.cpp`, `host_linux_shared.cpp`), the unit tests out of `if (WIN32)`, and the runtime in the Linux package
+(§4.3–§4.6). The runtime starts on Linux and its tests pass there; no game has been played on Linux yet, and online
+and LAN multiplayer wait for phase 5 (next).
 
 ## How to help
 
@@ -220,16 +223,16 @@ own `CreateProcessW` body unchanged beside the Linux one. `launcher/native/port_
 
 | File | Lines | Sites | Windows constructs | Linux body | Effort |
 |---|---:|---:|---|---|---|
-| `probe.c` (loader, fault handler) | 1 643 | 125 | VEH (`AddVectoredExceptionHandler`, `EXCEPTION_*`, `CONTEXT`), `SetUnhandledExceptionFilter`, `RtlLookupFunctionEntry`/`RtlVirtualUnwind`, TEB (`NtCurrentTeb`, stack bounds), `VirtualAlloc`/`VirtualQuery`/`FlushInstructionCache`, toolhelp thread suspend for the exec watch, `GetModuleFileNameA`, `CreateProcessA` restart (`GOW3_RESTART_COMMAND`), TEB TLS slot patch (`patch_tcb_loads`) | `sigaction` `fault()`, watchdog and restart (`execl`) exist (`#ifndef _WIN32`); exec watch, guest affinity/scheduling and native TSC are Windows-only today | M |
-| `compat_win.c` / `compat_win.h` | 253 / 88 | 44 | Windows-only by design: `pread`/`pwrite`/`fsync`/`realpath`/`mkdir` shims, `timeBeginPeriod`, high-resolution waitable timers, `BCryptGenRandom`, `GetProcessTimes`, `gow3_setjmp`/`gow3_longjmp` (asm), `compat_remove_tree` | Not compiled on Linux (the POSIX calls are native) | none |
-| `runtime_memory.c` | 1 192 | 32 | `VirtualAlloc2` placeholders for the PS4 range, `VirtualProtect`/`VirtualQuery`/`VirtualFree` | `mmap`/`mprotect` bodies exist (`#else` at 405–430) | S (verify) |
-| `runtime_thread.c` | 538 | 29 | TEB TLS slot for the guest TCB (`TlsAlloc`, `gs:[0x1480+8*slot]`), `__chkstk`/`StackLimit` widening, `SetThreadDescription`, affinity, priorities | `arch_prctl(ARCH_SET_GS)` exists; `pthread_setname_np`, `pthread_setaffinity_np` | S (verify) |
+| `probe.c` (loader, fault handler) | 1 643 | 125 | VEH (`AddVectoredExceptionHandler`, `EXCEPTION_*`, `CONTEXT`), `SetUnhandledExceptionFilter`, `RtlLookupFunctionEntry`/`RtlVirtualUnwind`, TEB (`NtCurrentTeb`, stack bounds), `VirtualAlloc`/`VirtualQuery`/`FlushInstructionCache`, toolhelp thread suspend for the exec watch, `GetModuleFileNameA`, `CreateProcessA` restart (`GOW3_RESTART_COMMAND`), TEB TLS slot patch (`patch_tcb_loads`) | **done**: the Linux signal handlers, the watchdog (off unless `--timeout`, as Windows has none), the restart and the near-image stub memory are C++ in `host_linux.cpp`; they step over the `int 0x41` assertion trap and a lone `int3` as the Windows handler does, and a crash on a pipeline cache warm-up thread leaves the cache mark. Still Windows-only: the exec watch (`GOW3_EXEC_WATCH`; Linux says "not on Linux yet"), guest affinity/scheduling | M — **done** (exec watch: phase 6) |
+| `compat_win.c` / `compat_win.h` | 253 / 88 | 44 | Windows-only by design: `pread`/`pwrite`/`fsync`/`realpath`/`mkdir` shims, `timeBeginPeriod`, high-resolution waitable timers, `BCryptGenRandom`, `GetProcessTimes`, `gow3_setjmp`/`gow3_longjmp` (asm), `compat_remove_tree` | Not compiled on Linux (the POSIX calls are native); `compat_remove_tree` has its Linux body in `host_linux_shared.cpp` (`std::filesystem::remove_all`), which the Linux tests link as the Windows tests link `compat_win.c` | none |
+| `runtime_memory.c` | 1 192 | 32 | `VirtualAlloc2` placeholders for the PS4 range, `VirtualProtect`/`VirtualQuery`/`VirtualFree` | `mmap`/`mprotect` bodies exist (`#else` at 405–430); build and tests checked on Linux | S — **done** (no game run yet) |
+| `runtime_thread.c` | 538 | 29 | TEB TLS slot for the guest TCB (`TlsAlloc`, `gs:[0x1480+8*slot]`), `__chkstk`/`StackLimit` widening, `SetThreadDescription`, affinity, priorities | `arch_prctl(ARCH_SET_GS)` exists; `pthread_setname_np`, `pthread_setaffinity_np`; build and tests checked on Linux | S — **done** (no game run yet) |
 | `runtime_redzone.c` | 727 | 29 | Windows-only: rewrites guest leaf functions because Windows exception frames overwrite the red zone | Linux stub present (signal frames skip the 128-byte red zone): nothing to do | none |
-| `runtime_isa.c` | 1 201 | 20 | Windows-only: emulates MOVBE/BMI1/F16C/LZCNT/TZCNT on CPUs without them, on a `CONTEXT` | Linux stub returns "inactive": old CPUs unsupported on Linux until the emulation reads a `ucontext_t` (shared code behind a small register-view struct) | M (later) |
-| `runtime_file.c` | 718 | 10 | `_stat64` + reparse-point fix (UCRT symlink stat), `GetDiskFreeSpaceExA`, `MoveFileExA`, `_chsize_s`, drive-root handling | `statvfs`, `rename`, `ftruncate` bodies exist; **case-sensitive `/app0` lookup** (§8.4) | M |
-| `runtime_kernel.c` | 426 | 5 | `QueryPerformanceCounter`, `Sleep`, `__rdtsc` native TSC | `clock_gettime`/`nanosleep` exist | S |
-| `runtime_services.c` | 925 | 4 | Winsock headers | BSD sockets exist | S |
-| `runtime_savedata.c`, `runtime_mutex.c`, `runtime.c`, `runtime_audio.c`, `runtime_pad.c`, `runtime_sema.c`, `runtime_rtc.c`, `runtime_time.c` | | 1–2 each | `MoveFileExA`, `rand_s`, small `#ifdef` bodies | both bodies present | S (verify) |
+| `runtime_isa.c` | 1 201 | 20 | Windows-only: emulates MOVBE/BMI1/F16C/LZCNT/TZCNT on CPUs without them, on a `CONTEXT` | Linux stub returns "inactive": old CPUs unsupported on Linux until the emulation reads a `ucontext_t` (shared code behind a small register-view struct) | M (later, phase 6) |
+| `runtime_file.c` | 718 | 10 | `_stat64` + reparse-point fix (UCRT symlink stat), `GetDiskFreeSpaceExA`, `MoveFileExA`, `_chsize_s`, drive-root handling | `statvfs`, `rename`, `ftruncate` bodies exist; **done**: a name the game asks for in another case is looked up in the game folder (`host_linux_fold_case`, only when the path does not exist as written, §8.4) | M — **done** |
+| `runtime_kernel.c` | 426 | 5 | `QueryPerformanceCounter`, `Sleep`, `__rdtsc` native TSC | `clock_gettime`/`nanosleep` exist; **done**: `GOW3_NATIVE_TSC` (which the launcher turns on for every game) measures the TSC against the monotonic clock on Linux (`host_linux_tsc_hz`), so the guest's inline `rdtsc` and the reported frequency agree on both systems | S — **done** |
+| `runtime_services.c` | 925 | 4 | Winsock headers | BSD sockets exist | S — **done** |
+| `runtime_savedata.c`, `runtime_mutex.c`, `runtime.c`, `runtime_audio.c`, `runtime_pad.c`, `runtime_sema.c`, `runtime_rtc.c`, `runtime_time.c` | | 1–2 each | `MoveFileExA`, `rand_s`, small `#ifdef` bodies | both bodies present; `runtime_savedata.c` removes folders with `compat_remove_tree` on both systems | S — **done** |
 
 These C files are also on the "port to C++" list (AGENTS.md); doing the C++ port and the Linux check in the same pass
 avoids touching each file twice.
@@ -238,15 +241,15 @@ avoids touching each file twice.
 
 | File | Windows constructs | Shared path / platform function | Effort |
 |---|---|---|---|
-| `pokes.cpp` | unguarded `<windows.h>`, `CreateThread`, `ReadProcessMemory`/`WriteProcessMemory` on its own process (so unmapped addresses are skipped, not faulted) | `std::thread`; `port::safe_read`/`safe_write`: `ReadProcessMemory` on Windows, `process_vm_readv`/`process_vm_writev` on Linux | S |
-| `name_dictionary.cpp` | `FindFirstFileW`, `_wfopen` (guarded) | `std::filesystem` for both | S |
-| `u2mp/session.cpp:3054` | `_putenv_s` (unguarded) | `port::set_env` (`_putenv_s` / `setenv`) | S |
-| `u2mp/u2_online_abi.h` | 30 `__cdecl` function pointer types | `#ifndef _WIN32 #define __cdecl #endif` or drop (x86-64 has one C convention) | S |
-| `u2mp/crashlog.cpp` | VEH, `RtlVirtualUnwind`, `psapi` | `#else` stub exists; Linux crash log via `sigaction` + frame walk later | M (later) |
-| `u2mp/online_link.cpp` | `CreateProcessW` + job object `KILL_ON_JOB_CLOSE`, pipes, `CREATE_SUSPENDED` | `__linux__` branch exists; later reuse `port::spawn` | S (verify) |
-| `u2mp/net.cpp`, `u2mp/host_memory.h` | Winsock / `VirtualAlloc` | both bodies present | none |
-| `u3fix/*` (5 files) | `VirtualQuery` readability checks, `VirtualAlloc` near image | both bodies present | none |
-| `u3voice/u3voice.h` | `__declspec(dllexport)` (the helper finds `uncharted_u3_voice` in the runtime's exports) | Linux: `visibility("default")` + link with `-rdynamic`; the helper's lookup changes with its backend (§4.10) | S |
+| `pokes.cpp` | unguarded `<windows.h>`, `CreateThread`, `ReadProcessMemory`/`WriteProcessMemory` on its own process (so unmapped addresses are skipped, not faulted) | **done**: `std::thread` on both; Linux reads and writes through `/proc/self/mem`, so an unmapped address is skipped there too (Windows keeps `Read/WriteProcessMemory`) | S — **done** |
+| `name_dictionary.cpp` | `FindFirstFileW`, `_wfopen` (guarded) | both bodies present (builds and its test passes on Linux) | S — **done** |
+| `u2mp/session.cpp:3054` | `_putenv_s` (unguarded) | **done** without touching the file: `src/linux_compat.h` (force-included into the runtime's C++ on Linux only) maps `_putenv_s` to `setenv`/`unsetenv` (an empty value removes the variable, as on Windows) | S — **done** |
+| `u2mp/u2_online_abi.h` | 30 `__cdecl` function pointer types | **done** without touching the file: `linux_compat.h` defines `__cdecl` empty (x86-64 has one C convention). U2 online stays off on Linux until its online program has a Linux build (phase 5) | S — **done** |
+| `u2mp/crashlog.cpp` | VEH, `RtlVirtualUnwind`, `psapi` | `#else` stub exists; Linux crash log via `sigaction` + frame walk later | M (later, phase 6) |
+| `u2mp/online_link.cpp` | `CreateProcessW` + job object `KILL_ON_JOB_CLOSE`, pipes, `CREATE_SUSPENDED` | `__linux__` branch exists; later reuse `port::spawn` | S (with phase 5) |
+| `u2mp/net.cpp`, `u2mp/host_memory.h` | Winsock / `VirtualAlloc` | both bodies present (`u2mp-net-test` passes on Linux) | none |
+| `u3fix/*` (5 files) | `VirtualQuery` readability checks, `VirtualAlloc` near image | both bodies present (the u3fix tests pass on Linux) | none |
+| `u3voice/u3voice.h` | `__declspec(dllexport)` (the helper finds `uncharted_u3_voice` in the runtime's exports) | **done**: default visibility and `-rdynamic` on Linux (`nm -D gow3-probe` lists `uncharted_u3_voice`); the helper's lookup changes with its backend (§4.10, phase 5) | S — **done** |
 
 `u2mp` has its own maintainer: coordinate its changes with them.
 
@@ -270,26 +273,26 @@ Windows-only code** that needs a Linux body:
 
 | File | `gow3:` Windows additions | Linux |
 |---|---|---|
-| `core/libraries/videoout/driver.cpp` (12 `#if`) | waitable timers, `SetThreadPriority`, `CreateEventW`/`WaitForMultipleObjects`, `K32GetProcessMemoryInfo` | `clock_nanosleep`, `pthread_setschedparam`/nice, `std::condition_variable` |
-| `video_core/amdgpu/liverpool.cpp` (6) | thread priority/affinity | `pthread_*` |
-| `video_core/renderer_vulkan/vk_pipeline_serialization.cpp` (3) | `MoveFileExW` atomic replace | `rename` (`port::replace_file`) |
-| `video_core/renderer_vulkan/vk_scheduler.cpp`, `buffer_cache/buffer_cache.cpp` | `RtlCaptureStackBackTrace` diagnostics | `backtrace()` |
-| `video_core/renderer_vulkan/vk_dlss.cpp` | `LoadLibraryW(L"gow3_dlss.dll")`, `nvngx_dlss.dll` | `dlopen` when a Linux bridge exists; else "DLSS unavailable" |
+| `core/libraries/videoout/driver.cpp` (12 `#if`) | waitable timers, `SetThreadPriority`, `CreateEventW`/`WaitForMultipleObjects`, `K32GetProcessMemoryInfo` | **checked**: Linux keeps upstream's `std::condition_variable` / `sleep_until` waits, which glibc times to the nanosecond (the Windows timers work around libc++ rounding to whole milliseconds there); the vblank thread priority and the memory numbers in the 5-second log are Windows-only (log shows 0 on Linux) |
+| `video_core/amdgpu/liverpool.cpp` (6) | thread priority/affinity | upstream `pthread_*` branches |
+| `video_core/renderer_vulkan/vk_pipeline_serialization.cpp` (3) | `MoveFileExW` atomic replace, the warm-up crash mark (`CreateFileW`) | **done**: `std::filesystem::rename`; the mark is written with `open`/`write` from the Linux fault report (`host_linux.cpp`), so a driver crash during the warm-up clears the cache at the next start on Linux too |
+| `video_core/renderer_vulkan/vk_scheduler.cpp`, `buffer_cache/buffer_cache.cpp` | `RtlCaptureStackBackTrace` diagnostics (`GOW3_SUBMIT_STATS`) | Windows-only diagnostics; `backtrace()` later (phase 6) |
+| `video_core/renderer_vulkan/vk_dlss.cpp` | `LoadLibraryW(L"gow3_dlss.dll")`, `nvngx_dlss.dll` | stub on Linux: the settings menu says DLSS is "not on Linux yet" (`vk_temporal_upscaler.cpp`); a Linux bridge later (optional) |
 | `video_core/page_manager.cpp` | `EXCEPTION_POINTERS` fault path | upstream Linux path (signals) |
-| `common/*` (`thread`, `io_file`, `ntapi`, `signal_context`, `rdtsc`, `path_util`, `string_util`, `srw_shared_mutex.h`) | upstream Windows branches | upstream Linux branches exist |
+| `common/*` (`thread`, `io_file`, `ntapi`, `signal_context`, `rdtsc`, `path_util`, `string_util`, `srw_shared_mutex.h`) | upstream Windows branches | upstream Linux branches; **`path_util.cpp`**: on Linux too the GPU user folder is the port's portable folder (`GOW3_GPU_USER_DIR`), created at start, never shadPS4's own `~/.local/share/shadPS4` (before, the runtime aborted before `main` when that folder's parent was missing) |
 
-CMake already separates the two: `gow3gpu` is `STATIC` on Windows (links `ws2_32 bcrypt ntdll synchronization winmm
-pdh`) and `SHARED` elsewhere (links X11, `--allow-shlib-undefined`, runtime symbols resolved from the executable).
+CMake builds `gow3gpu` `STATIC` on both systems and links it into `gow3-probe` (Windows: `ws2_32 bcrypt ntdll
+synchronization winmm pdh`; Linux: X11, `z`, `m`, `dl`, pthreads).
 
 ### 4.6 `gow3_pc/tests`, `gow3_pc/tools`, `gow3_pc/packaging`
 
 | Item | Windows constructs | Shared path | Effort |
 |---|---|---|---|
 | `tests/u2mp_rewrite/*` (old-vs-new harness, 10 files) | `_spawnl`, `_putenv_s`, `_popen`, `GetModuleFileNameA`, `_aligned_malloc`, `__declspec(dllimport)`, `_get_osfhandle`; `run.sh` builds `test_*.exe`; `flags_progression.sh` uses `cygpath` if present | `posix_spawn`/`setenv`/`readlink("/proc/self/exe")` behind a tiny test helper; `.exe` suffix by OS | M |
-| `tests/test_isa.c`, `test_tsc_clock.c`, `test_cheat_hook(s).cpp`, `test_actor_hook.cpp`, `test_orb_multiplier.cpp`, `test_stat_multipliers.cpp`, `test_debug_menus.cpp`, `test_u3_job_trace.cpp` | `VirtualAlloc`/`VirtualProtect`/`FlushInstructionCache`, VEH, affinity | `mmap`/`mprotect`/`__builtin___clear_cache` helper shared by the tests; `test_isa` stays Windows-only until §4.3 `runtime_isa` has a Linux body | S–M |
+| `tests/test_isa.c`, `test_tsc_clock.c`, `test_cheat_hook(s).cpp`, `test_actor_hook.cpp`, `test_orb_multiplier.cpp`, `test_stat_multipliers.cpp`, `test_debug_menus.cpp`, `test_u3_job_trace.cpp` | `VirtualAlloc`/`VirtualProtect`/`FlushInstructionCache`, VEH, affinity | **done**: the hook tests share `tests/test_memory.h` (`mmap`/`mprotect` on Linux); `test_tsc_clock.c`'s core-hopping part stays Windows-only; `test_isa` stays Windows-only until §4.3 `runtime_isa` has a Linux body | S–M — **done** |
 | `tests/tool_checks.cpp` | `CreateProcessA`, `CreateFileW` | `posix_spawn` branch | S |
-| `tests/test_environment.h`, `test_pad.c`, others | `_putenv_s` | `setenv` macro | S |
-| CMake test targets | ~36 tests inside `if (WIN32)`; 31 GPU/unit tests outside (already built on any OS) | move the runtime tests out of `if (WIN32)`, keep `compat_win.c` sources Windows-only | M |
+| `tests/test_environment.h`, `test_pad.c`, others | `_putenv_s` | both bodies present (`setenv`/`unsetenv`) | none |
+| CMake test targets | ~36 tests inside `if (WIN32)`; 31 GPU/unit tests outside (already built on any OS) | **done**: every unit test except `isa-test` is defined for both systems; `tests/run_unit_tests.sh` builds and runs the 63 that need no game (the Linux CI job, with lavapipe; on Windows run them from PowerShell, MSYS2 bash gives the temp-writing tests a POSIX TMP). Linux tests link `host_linux_shared.cpp` where Windows tests link `compat_win.c` | M — **done** |
 | `tools/got_import.cpp`, `tools/fsr4_rewrite.cpp` | `GetModuleFileNameW`, `_setmode` (guarded) | both bodies | S |
 | `tools/bridge_helper/bridge_helper.c` | Proton/Wine test helper (`wine_server_fd_to_handle`) | Windows-only by design (runs under Wine) | none |
 | `tools/{ab,press,restart,soak}.sh` | POSIX (`pkill`, `pgrep`), from the Linux era; `restart.sh` calls a `run.sh` that no longer exists | refresh when the Linux runtime runs | S |
@@ -717,7 +720,7 @@ in both CI jobs.
 | 1. Platform layer + leaf files | `port.h`, one shared SHA-256, `un_path_char` in `native.h`; port the S-files of §4.1 (`session_value`, `updates`, `gamepads`, `pages`, `patch_tables`, `starter`, `self_reader.h`, `prepare`, `gamefiles`, `patcher`, `config`, `actions`), `u2import.cpp`, `mkzip`, `code_ids` | launcher core compiles on Linux with stubs that say "not on Linux yet" for Steam, shortcuts, hang, display. **Done**: every §4.1 file builds on Linux; the stubs are marked in §4.1 |
 | 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs. **Done**: both CI jobs run `tools/importer_smoke.sh` (no game files; no fixture test exists yet, §7.4) and Linux runs `port_smoke`. Still stubs on Linux: unpacking the update tarball and the apply step (phase 7), the window icon's PNG decode, the online program (phase 5), the runtime itself (phase 4) |
 | 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push. **Done** (§4.2, §7.4, §7.5): the window runs on Linux (checked headless in CI with `--self-check`), `UCMR_linux.tar.gz` from every push and PR; no game runtime in it yet, no release yet |
-| 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests) |
+| 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests). **Done** (§4.3–§4.6): the CI job builds the runtime with every subsystem, starts it without a game (usage, a missing boot file, `--vulkan-only` on lavapipe, the `uncharted_u3_voice` export) and runs the 63 unit tests; the package carries the runtime. Found and fixed on the way: native TSC, the GPU user folder, the warm-up crash mark, save data removal. Not yet: a game played on Linux; exec watch, old-CPU emulation, DLSS and the freeze report stay Windows-only (phase 6); multiplayer needs phase 5 |
 | 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged |
 | 6. Linux bodies for Windows-only features | `runtime_isa` on `ucontext_t`, hang watchdog (`ptrace`), Add to Steam on Linux, `.desktop` shortcuts, display info, profiler, DLSS (optional) | feature parity list shrinks |
 | 7. Releases | release job attaches `UCMR_windows.zip` + `UCMR_linux.tar.gz` (+ AppImage with a movable data root); updater picks its asset by OS; `recomplauncher.json` gains the Linux program name and `system.linux` | one tag, both packages |
@@ -727,8 +730,12 @@ side, no behaviour change on Windows, the simplest form that does the full job.
 
 ## 14. Not checked / open questions
 
-- The launcher core, the importers and the GPU unit tests build and run in the Linux CI (§7.4); the runtime was not
-  built on Linux yet, and its POSIX branches were not re-verified against today's Windows features.
+- The launcher core, the importers, the runtime and its unit tests build and run on Linux (§7.4); no game has been
+  played on Linux yet (no game files in CI), so the runtime's Linux paths past the loader (guest memory, threads,
+  files, the GPU on a real driver) are built and unit-tested but not seen in a game.
+- On Linux the U3 multiplayer helper finds no Windows process block (its `gs:0x60` read lands in the guest's zeroed
+  thread block), so every PC call it makes is skipped: the game runs without LAN or online play and without voice
+  until phase 5 gives the helper its host-function table.
 - The Linux bodies of the imports, PLAY and the game start were built and run with made-up folders and `sh`, never
   with a real game or a whole import on Linux.
 - The Linux window was checked headless (`QT_QPA_PLATFORM=offscreen`) in CI only, not yet on a real X11/Wayland
