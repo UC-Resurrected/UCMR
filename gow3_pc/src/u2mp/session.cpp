@@ -52,6 +52,7 @@ constexpr uint64_t kMatchSession = 0x1065b08;
 constexpr uint64_t kNetInfo = 0x104f1c8;
 constexpr uint64_t kNgm = 0x113b760;
 constexpr uint64_t kNpd = 0x11474f8;
+constexpr uint64_t kNpdMatchmaking = 0x1b0;   // u32 bit 0: Profile "Matchmaking" 0 Default / 1 DLC (saved)
 constexpr uint64_t kPackageTable = 0x1130390;
 constexpr uint64_t kNetImageTable = 0x1130078;
 constexpr uint64_t kGameFrame = 0x11162c4;
@@ -3322,6 +3323,9 @@ int playlist_room_slots() {
 }
 
 uint32_t mm_pack_mask() {
+    // The Profile's Matchmaking setting (NetPlayerData +0x1b0 bit 0, PS3 +0x16c, menus.cpp cond 135): only "DLC" (1)
+    // puts the map packs into the room key; "Default" (0, a new career) searches and makes the rooms every PC shares.
+    if (!(get<uint32_t>(g(kNpd) + kNpdMatchmaking) & 1u)) return 0;
     std::vector<int32_t> types;
     Table games = table_of(lookup(kNetGamesId));
     if (!playlist_game_types(types) || !games.records) return 0;

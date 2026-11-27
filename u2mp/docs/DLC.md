@@ -50,6 +50,29 @@ that the `/app0` overlay serves; there is no `dlc-map%d.psarc` on PC and nothing
   member lacks the map pack" when it has the pack, else the box for this PC lacking map pack 1 (it is the
   one lacking the pack its members play). Members of older PCs that send no map-pack byte are not counted.
 
+## Matchmaking: Default / DLC (Profile, Other Settings)
+
+PS3 (code read in GOTY NPUA80698; its "DLC" text is in the server text of NPUA80698DATA2 and BCES00757DATA2 alike)
+has one Profile row for the map packs, not one per pack:
+"Matchmaking" with the values "Default" and "DLC", between Taunt and Golden Guns, shown only to a player who owns a map
+pack (without one the row is hidden and leaves a gap). It is NetPlayerData `+0x1b0` bit 0 (PS3 data block `+0x16c`),
+saved with the career; a new career has Default. Only matchmaking reads it (PS3 `0x4b10d8` / `0x4b29d0` in the
+matchmaking machine, before SearchRoom `0x4d3c50` and CreateJoinRoom `0x4d421c`):
+
+* **DLC**: when the playlist has map-pack maps (`0x49b858`) and the party's common map packs (`0x4d6a08`, the AND of
+  every member's map-pack byte) are not 0, the room key 0x4C carries those packs from bit 12 up, on search and create:
+  the party only meets parties with the same map packs, and the pack maps are played.
+* **Default**: the plain playlist key, the rooms every player shares; a pack map is still picked only when every
+  member has its pack (`session::net_game_same_map`, above).
+
+Custom games, the map vote and the map pick rules do not read it. PS3 also shows a one-time box when the Multiplayer
+menu opens with a map pack owned ("... Would you like to go to your Profile page to set your Matchmaking preference?",
+`041a85ca`; NetPlayerData `+0x1b0` bit 0x8000 = shown); the PC does not show it (the owned-DLC word stays 0 outside the
+row's query).
+
+On PC: menus.cpp `query_matchmaking` (MENUS.md 3.3) shows the row when `dlc_packs()` has map pack 1 or 2;
+session.cpp `mm_pack_mask` (the H5 key mask of `parity-h-session.md`) returns 0 unless the row says DLC.
+
 ## Not verified
 
 * Nothing was run. Whether the game then loads the imported DLC levels correctly is the import's work

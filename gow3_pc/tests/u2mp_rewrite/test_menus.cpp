@@ -528,7 +528,8 @@ void boosters_not_in_old() {
             hx::calls.insert(hx::calls.begin() + std::ptrdiff_t(i) + 1,
                              {"log LIST_BOOSTERS0 (cond 77): table entry is not 0x659bd0, left alone",
                               "log LIST_BOOSTERS1 (cond 78): table entry is not 0x659bd0, left alone",
-                              "log Golden Guns (cond 108): table entry is not 0x65c610, left alone"});
+                              "log Golden Guns (cond 108): table entry is not 0x65c610, left alone",
+                              "log Matchmaking (cond 135): table entry is not 0x65a790, left alone"});
             return;
         }
 }
@@ -1090,6 +1091,29 @@ void golden_guns_scenario() {
     });
 }
 
+// The Matchmaking row (cond 135, 0x65a790): the query sees the imported map packs' bits in the owned-DLC word
+// [0x1115a30 + 0xa0] (no pack: the word as it was, the row stays hidden); the word is put back after the call.
+U2MP_GUEST void matchmaking_orig(uint8_t *q) {
+    rec("matchmaking orig op %u owned %08x", get<uint32_t>(q - mem), get<uint32_t>(0x1115a30 + 0xa0));
+}
+void matchmaking_scenario() {
+    run_new("MM-1 Matchmaking row: imported map packs in the owned-DLC word during its query (new only)",
+            [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 8, 135, 0x65a790);
+        hx::stub(0x65a790, reinterpret_cast<void *>(&matchmaking_orig));
+        hx::mn::s.packs = 1 | 4;   // map pack 2 only
+        inst_menus(a);
+        EXPECT(lines("log Matchmaking (cond 135): 0x65a790 wrapped") == 1);
+        ask(ETRACE + 8, 1);
+        EXPECT(lines("matchmaking orig op 1 owned 00000004") == 1);
+        EXPECT(get<uint32_t>(0x1115a30 + 0xa0) == 0);
+        hx::mn::s.packs = 1;       // no map pack imported
+        ask(ETRACE + 8, 1);
+        EXPECT(lines("matchmaking orig op 1 owned 00000000") == 1);
+    });
+}
+
 void help_bar_scenarios() {
     run_new("HB-1 help bar icons: always the L1 / R1 pictures, whatever the shoulder setting (new only)",
             [](const Api &a) {
@@ -1239,6 +1263,7 @@ void menus_install_scenarios() {
     help_bar_scenarios();
     boosters_scenario();
     golden_guns_scenario();
+    matchmaking_scenario();
 }
 
 void menus_query_scenarios() {

@@ -85,7 +85,7 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
 | 129 | BUTTON_POSTGAME_PARTYUP | `65e7f0` | `4b7c48` | intact |
 | 133 | PAGE_MULTIPLAYER profile panel (k23) | `65e890` | `4bddd4` | **wrap**: online id written |
 | 134 | PLAYER_OPTIONS: BUTTON_CLANTAG label | `6609e0` | `4bdc30` | intact; text 639e0fa8 added |
-| 135, 138 | PLAYER_OPTIONS matchmaking pref, (138) | `65a790`, `65a660` | | intact |
+| 135, 138 | PLAYER_OPTIONS Matchmaking Default / DLC, (138) | `65a790`, `65a660` | `4c09a8` (135) | 135 **wrap**: shown when a map pack is imported (3.3); 138 intact |
 
 ## 3. Page by page
 
@@ -192,6 +192,16 @@ licence table), PS4 never sets it, so the row had no label and stayed hidden. Th
 it is 1 and the net game is not co-op, the game's weapon sets `8cf8e1cc` / `469fefc8` become the golden sets
 `e58a9398` / `556dd82a`, which net-patch9 defines). menus.cpp wraps the cond 108 entry (`query_golden_guns`): the
 query runs with bit 0x10 added and the word is put back after, so nothing else sees the bit. Not checked in the game.
+
+Matchmaking (owner request 2026-11-27: a DLC option in Profile as PS3 has it). The gap between Taunt and Golden Guns is
+this row, hidden. Cond 135, query `0x65a790` (PS3 `0x4c09a8`): label "Matchmaking" `ea2119f2`, values "Default"
+`81af6b75` (0) / "DLC" `9811415d` (1, texts.cpp); the setting is NetPlayerData `+0x1b0` bit 0 (PS3 data block
+`+0x16c`, inside the saved career blob; a new career has 0, Default). The query gives the label only while the
+owned-DLC word `[0x1115a30 + 0xa0]` is not 0: PS3's map pack entitlements set it, PS4 nothing, so on PC the row never
+showed (a PS3 without map packs shows the same gap, video 2:55). menus.cpp wraps the cond 135 entry
+(`query_matchmaking`): the query runs with the imported map packs' bits (dlc.cpp `dlc_packs`, bits 1 / 2) added and
+the word is put back after; no pack imported, no row. PS3 has this one row, not one row per map pack. What the value
+does: DLC.md, "Matchmaking: Default / DLC". Not checked in the game.
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
