@@ -10,7 +10,7 @@
  * LZCNT and TZCNT do not fault there: the CPU ignores their F3 prefix and runs BSR / BSF, which
  * give other results. At load time their F3 prefix becomes F0 (LOCK, same length): LOCK BSR / BSF
  * raise #UD on every CPU, and the handler runs them as LZCNT / TZCNT (real code never holds a
- * LOCK BSR / BSF). runtime_redzone.c applies this to the game's functions after its own pass
+ * LOCK BSR / BSF). runtime_redzone.cpp applies this to the game's functions after its own pass
  * (runtime_isa_convert_function) and to the copies it moves into its stubs (runtime_isa_fix_moved),
  * and in functions that keep data below rsp it moves these instructions into its stubs as it does
  * faulting accesses: the exception frame of the #UD then lands below the red zone.

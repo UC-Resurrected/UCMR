@@ -52,7 +52,7 @@ static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
 int vulkan_smoke(void);
-/* runtime_redzone.c: guest leaf functions' red zones kept clear of exception frames. */
+/* runtime_redzone.cpp: guest leaf functions' red zones kept clear of exception frames. */
 uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count);
 void runtime_redzone_after_fault(void *context);
 int runtime_isa_configure(uint32_t leaf1_ecx, uint32_t leaf7_ebx, uint32_t ext1_ecx, char *missing, size_t size);
@@ -1449,9 +1449,11 @@ int main(int argc, char **argv) {
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#endif
     /* gow3 25 Oct 2026: accesses that can fault in functions keeping data below rsp run with rsp
-     * 128 lower (runtime_redzone.c; GitHub #205). After every other code change: it skips code
-     * our hooks and the eboot patches changed. GOW3_RED_ZONE=0: off. */
+     * 128 lower (runtime_redzone.cpp; GitHub #205). After every other code change: it skips code
+     * our hooks and the eboot patches changed. GOW3_RED_ZONE=0: off. Linux needs no red-zone pass;
+     * there it only prepares the old-CPU instructions (runtime_isa.cpp), when that is on. */
     {
         uint64_t *triples = calloc(ns ? ns * 3 : 3, sizeof(*triples));
         if (!triples) fail("allocation failed");
@@ -1463,7 +1465,6 @@ int main(int argc, char **argv) {
         runtime_redzone_install(image, size, triples, ns);
         free(triples);
     }
-#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     /* gow3 21 Nov 2026: only the pages outside every segment become inaccessible. Making the whole image inaccessible
      * first and then each segment accessible again left a moment in which a runtime thread already running (the GPU
