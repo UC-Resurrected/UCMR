@@ -61,6 +61,7 @@ std::string norm_key(std::string s) {
 struct Ps4View {
     std::string root, root_key, update, update_key;   // the game and update folders: slashes() and norm_key()
     std::map<std::string, std::string> files, dirs;   // norm_key of a path relative to the folder -> that path as listed
+    std::unordered_map<std::string, const std::string *> file_at, dir_at;   // the same, for the lookups (every path)
     std::map<std::string, bool> base_dirs;            // folders of the update: whether the game folder has them too
     std::mutex m;
     bool active = false;
@@ -73,6 +74,8 @@ struct Ps4View {
         update_key.clear();
         files.clear();
         dirs.clear();
+        file_at.clear();
+        dir_at.clear();
         base_dirs.clear();
         active = false;
         std::error_code ec;
@@ -95,6 +98,8 @@ struct Ps4View {
             else throw Stop(utf8(manifest) + ": bad entry");
         }
         if (update.empty()) throw Stop(utf8(manifest) + ": no update folder");
+        for (const auto &[k, v] : files) file_at[k] = &v;
+        for (const auto &[k, v] : dirs) dir_at[k] = &v;
         active = true;
     }
 
@@ -103,21 +108,32 @@ struct Ps4View {
         if (mf && *mf && r && *r) load(raw_path(r), raw_path(mf));
     }
 
-    // the place in the view of path s (key: its norm_key): false when s is in neither folder
-    bool place(const std::string &s, const std::string &key, std::string &rel_key, std::string &rel, bool *in_root = nullptr) const {
+    // whether s is the folder `top` (a norm_key) or below it, compared in place (most paths a step uses are not)
+    static bool below(const std::string &s, const std::string &top) {
+        const size_t n = top.size();
+        if (s.size() < n) return false;
+        for (size_t i = 0; i < n; i++) {
+            char c = s[i];
+            if (c == '\\') c = '/';
+#ifdef _WIN32
+            if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+#endif
+            if (c != top[i]) return false;
+        }
+        return s.size() == n || s[n] == '/' || s[n] == '\\';
+    }
+    // the place in the view of path s: false when s is in neither folder
+    bool place(const std::string &s, std::string &rel_key, std::string &rel, bool *in_root = nullptr) const {
         if (!active) return false;
         for (const std::string *top : {&root_key, &update_key}) {
+            if (!below(s, *top)) continue;
             if (in_root) *in_root = top == &root_key;
-            if (key == *top) {
-                rel_key.clear();
-                rel.clear();
-                return true;
-            }
-            if (key.size() > top->size() && key.compare(0, top->size(), *top) == 0 && key[top->size()] == '/') {
-                rel_key = key.substr(top->size() + 1);
-                rel = slashes(s).substr(top->size() + 1);   // slashes() and norm_key() have the same length
-                return true;
-            }
+            size_t from = top->size();
+            while (from < s.size() && (s[from] == '/' || s[from] == '\\')) from++;
+            rel = slashes(s.substr(from));
+            if (rel == "/") rel.clear();
+            rel_key = norm_key(rel);
+            return true;
         }
         return false;
     }
@@ -133,10 +149,15 @@ struct Ps4View {
         base_dirs[r] = has;
         return has;
     }
+    // the update's path for the view's place rel_key: its file, or a folder only it has; nullptr: the game folder's
+    const std::string *in_update_only(const std::string &rel_key) {
+        if (auto f = file_at.find(rel_key); f != file_at.end()) return f->second;
+        if (auto d = dir_at.find(rel_key); d != dir_at.end() && !base_has_dir(rel_key, *d->second)) return d->second;
+        return nullptr;
+    }
     // where the view's place (rel_key, rel) is on disk
     fs::path resolve(const std::string &rel_key, const std::string &rel) {
-        if (auto f = files.find(rel_key); f != files.end()) return in_update(f->second);
-        if (auto d = dirs.find(rel_key); d != dirs.end() && !base_has_dir(rel_key, d->second)) return in_update(d->second);
+        if (const std::string *u = in_update_only(rel_key)) return in_update(*u);
         return in_base(rel);
     }
 };
@@ -163,12 +184,11 @@ fs::path upath(const std::string &s) {
     Ps4View &v = view();
     std::string rel_key, rel;
     bool in_root = false;
-    if (v.active && v.place(s, norm_key(s), rel_key, rel, &in_root)) {
-        fs::path r = v.resolve(rel_key, rel);
-        if (in_root && r == v.in_base(rel)) return raw_path(s);   // the game folder's own path: as the step wrote it
-        return r;
+    if (v.active && v.place(s, rel_key, rel, &in_root)) {
+        if (const std::string *u = v.in_update_only(rel_key)) return v.in_update(*u);
+        if (!in_root) return v.in_base(rel);   // a path below the update folder that the update does not have
     }
-    return raw_path(s);
+    return raw_path(s);   // the game folder's own path (or no PS4 path): as the step wrote it
 }
 
 fs::path resolve_read_path(const fs::path &p) { return upath(utf8(p)); }
@@ -176,8 +196,8 @@ fs::path resolve_read_path(const fs::path &p) { return upath(utf8(p)); }
 bool ps4_exists(const std::string &s) {
     Ps4View &v = view();
     std::string rel_key, rel;
-    if (v.active && v.place(s, norm_key(s), rel_key, rel)) {
-        if (rel_key.empty() || v.files.count(rel_key) || v.dirs.count(rel_key)) return true;
+    if (v.active && v.place(s, rel_key, rel)) {
+        if (rel_key.empty() || v.file_at.count(rel_key) || v.dir_at.count(rel_key)) return true;
         std::error_code ec;
         return fs::exists(v.in_base(rel), ec);
     }
@@ -191,7 +211,7 @@ std::vector<fs::directory_entry> ps4_dir(const std::string &s) {
     std::string rel_key, rel;
     bool in_root = false;
     std::error_code ec;
-    if (!v.active || !v.place(s, norm_key(s), rel_key, rel, &in_root)) {
+    if (!v.active || !v.place(s, rel_key, rel, &in_root)) {
         for (fs::directory_iterator it(raw_path(s), ec), end; !ec && it != end; it.increment(ec)) out.emplace_back(*it);
         return out;
     }
@@ -208,7 +228,7 @@ std::vector<fs::directory_entry> ps4_dir(const std::string &s) {
     for (fs::directory_iterator it(listed, ec), end; !ec && it != end; it.increment(ec)) {
         const std::string child = prefix + norm_key(utf8(it->path().filename()));
         seen.insert(child);
-        if (auto f = v.files.find(child); f != v.files.end()) out.emplace_back(v.in_update(f->second));
+        if (auto f = v.file_at.find(child); f != v.file_at.end()) out.emplace_back(v.in_update(*f->second));
         else out.emplace_back(*it);
     }
     for (const auto *m : {&v.dirs, &v.files})
