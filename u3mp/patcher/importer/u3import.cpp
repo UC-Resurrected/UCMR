@@ -39,6 +39,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <regex>
 #include <thread>
 
@@ -474,64 +475,45 @@ void discard_next(const fs::path &data) {
     else log("update not applied: " + S(nxt.filename()) + " could not be deleted yet (files in use); it is reused or removed later");
 }
 
-// ------------------------------------------------------------------------------------------------ the PS4 manifest
-// The PS4 game as the recipe reads it: a table of virtual path -> the real file in the game folder or its update.
-// Every --ps4 path a step reads is resolved through it, so the import makes no hard links, junctions or copies.
-struct Ps4Entry {
-    std::string rel;
-    fs::path real;
-    bool dir;
-};
-
-void scan_tree(const fs::path &dir, const std::string &rel, std::map<std::string, Ps4Entry> &out) {
-    std::error_code ec;
-    for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        const std::string name = S(it->path().filename());
-        const std::string r = rel.empty() ? name : rel + "/" + name;
-        std::error_code e2;
-        if (it->is_directory(e2)) {
-            out[r] = Ps4Entry{r, it->path(), true};   // a later base scan keeps a folder both copies have on the base path
-            scan_tree(it->path(), r, out);
-        } else if (it->is_regular_file(e2)) {
-            out.try_emplace(r, Ps4Entry{r, it->path(), false});
-        }
-    }
-}
-
-std::string ps4_manifest(const Args &a, const fs::path &data) {
+// ------------------------------------------------------------------------------------------------ the PS4 update list
+// The PS4 game as the recipe reads it. With update 1.02 in a folder of its own (--ps4-update) the recipe must read the
+// updated files: every path a step uses under the game folder resolves with the update laid over it (u3::upath and
+// u3::ps4_dir, dctools/fixlib.cpp), from the list of the update's files and folders made here (<data>/ps4-manifest.tsv,
+// names only, made again at each run). Nothing is linked or copied: the folders can be on any drive or file system,
+// and only the update (a few thousand names) is listed. Without an update folder there is no list: the steps read the
+// game folder as it is.
+fs::path ps4_manifest(const Args &a, const fs::path &data) {
     const fs::path manifest = data / "ps4-manifest.tsv";
-    const fs::path base = P(a.ps4), update = a.ps4_update.empty() ? fs::path() : P(a.ps4_update);
     std::error_code ec;
-    if (present(data / "ps4-view")) {
+    if (present(data / "ps4-view")) {   // the hard-link view of earlier versions (rmtree never follows its junctions)
         rmtree(data / "ps4-view");
-        log("PS4 game: the old hard-link view was removed");
+        log("PS4 game: the hard-link view of an earlier version was removed");
     }
     fs::remove(data / "ps4-view.txt", ec);
-    fs::remove(data / "ps4-manifest.txt", ec);
-    std::map<std::string, Ps4Entry> entries;
-    entries[""] = Ps4Entry{"", base, true};
-    auto add_file = [&](const std::string &rel, const fs::path &root) {
-        const fs::path p = root / P(rel);
-        if (is_file(p)) entries.try_emplace(rel, Ps4Entry{rel, p, false});
+    fs::remove(manifest, ec);
+    if (a.ps4_update.empty()) return {};
+    const fs::path update = P(a.ps4_update);
+    std::string text = "U3PS4V3\nupdate\t" + S(update) + "\n";
+    size_t files = 0;
+    std::function<void(const fs::path &, const std::string &)> walk = [&](const fs::path &dir, const std::string &rel) {
+        std::error_code e;
+        for (fs::directory_iterator it(dir, e), end; !e && it != end; it.increment(e)) {
+            const std::string r = rel.empty() ? S(it->path().filename()) : rel + "/" + S(it->path().filename());
+            std::error_code e2;
+            if (it->is_directory(e2)) {
+                text += "D\t" + r + "\n";
+                walk(it->path(), r);
+            } else if (it->is_regular_file(e2)) {
+                text += "F\t" + r + "\n";
+                files++;
+            }
+        }
     };
-    auto add_dir = [&](const std::string &rel, const fs::path &root) {
-        const fs::path p = root / P(rel);
-        if (!is_dir(p)) return;
-        entries[rel] = Ps4Entry{rel, p, true};   // base last: a folder both copies have stays on the base path
-        scan_tree(p, rel, entries);
-    };
-    if (!update.empty()) {
-        for (const char *rel : {"eboot.bin", "sce_sys/param.sfo"}) add_file(rel, update);
-        for (const char *rel : {"u3data/build/main", "u2data/build/main/sound1"}) add_dir(rel, update);
-    }
-    for (const char *rel : {"eboot.bin", "sce_sys/param.sfo"}) add_file(rel, base);
-    for (const char *rel : {"u3data/build/main", "u2data/build/main/sound1"}) add_dir(rel, base);
-    std::string text = "U3PS4V2\n";
-    for (const auto &[rel, e] : entries) text += (e.dir ? "D\t" : "F\t") + rel + "\t" + S(e.real) + "\n";
+    walk(update, "");
     write_text(manifest, text);
-    log("PS4 game for the recipe: " + S(base) + (update.empty() ? "" : " with update " + S(update)) + " (" + S(manifest) + ")");
-    return S(manifest);
+    log(fmt("PS4 game for the recipe: %s with update %s laid over it (%zu files of the update, listed in %s)", S(P(a.ps4)).c_str(),
+            S(update).c_str(), files, S(manifest).c_str()));
+    return manifest;
 }
 
 // ------------------------------------------------------------------------------------------------ the recipe run
@@ -562,10 +544,10 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
     fs::create_directories(out);
     RecipeArgs ra;
     const fs::path manifest = ps4_manifest(a, data);
-    ra.ps4 = a.ps4;
+    ra.ps4 = a.ps4;   // the game folder; with an update, the steps resolve its paths through the list
     ra.ps4_update = a.ps4_update;
     ra.out = S(out);
-    u3::ps4_view_set(P(a.ps4), manifest);
+    u3::ps4_view_set(P(a.ps4), manifest);   // the steps that run in this process (an empty list: none)
     ra.continue_on_error = true;
     ra.speech_langs = a.speech_langs;
     ra.ps3_u3 = a.ps3_u3;
@@ -581,8 +563,10 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
 #endif
     if (const char *p = std::getenv("PATH")) path += p;
     ra.env.push_back({"PATH", path});
-    ra.env.push_back({"U3_PS4_ROOT", S(P(a.ps4))});
-    ra.env.push_back({"U3_PS4_MANIFEST", S(manifest)});
+    if (!manifest.empty()) {   // the steps run as their own programs (u3fix.exe ...): the same list
+        ra.env.push_back({"U3_PS4_ROOT", S(P(a.ps4))});
+        ra.env.push_back({"U3_PS4_MANIFEST", S(manifest)});
+    }
     if (!ps4_elf.empty()) ra.env.push_back({"RECIPE_PS4_ELF", S(ps4_elf)});
     if (!ps3_elf.empty()) {
         ra.env.push_back({"RECIPE_PS3_ELF", ps3_elf});

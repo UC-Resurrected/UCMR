@@ -9,7 +9,8 @@ namespace u3 {
 
 fs::path upath(const std::string &utf8_path);
 
-// the PS4 game as the recipe reads it: base/update paths from the U3PS4V2 manifest (recipe.cpp and the steps)
+// the PS4 game as the recipe reads it: the game folder with its update folder laid over it (the U3PS4V3 list of the
+// update, u3import.cpp ps4_manifest; recipe.cpp and the steps); fixlib.cpp says how a path resolves
 void ps4_view_set(const fs::path &root, const fs::path &manifest);
 bool ps4_exists(const std::string &path);
 std::vector<fs::directory_entry> ps4_dir(const std::string &path);

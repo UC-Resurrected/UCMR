@@ -2,11 +2,13 @@
 // output), apart from u3fix.cpp's main so that the Uncharted 2 import (u2mp/patcher/importer) links them too.
 #include "u3fix.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <set>
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
@@ -29,27 +31,50 @@ fs::path raw_path(const std::string &s) {
 #endif
 }
 
-std::string norm_key(std::string s) {
+// a path with "/" separators and no trailing "/" (case kept)
+std::string slashes(std::string s) {
     for (char &c : s)
         if (c == '\\') c = '/';
     while (s.size() > 1 && s.back() == '/') s.pop_back();
+    return s;
+}
+// a path as a lookup key: slashes(); on Windows without case (its file systems ignore it). Same length as slashes().
+std::string norm_key(std::string s) {
+    s = slashes(std::move(s));
 #ifdef _WIN32
     for (char &c : s) c = char(std::tolower((unsigned char)c));
 #endif
     return s;
 }
 
+// The PS4 game as the recipe reads it when its update is in a folder of its own (--ps4-update): the update laid over
+// the game folder, as the old hard-link view of both did, without making any link or copy. The steps get the game
+// folder (U3_PS4_ROOT) as --ps4; the list (U3_PS4_MANIFEST, written by u3import.cpp ps4_manifest) names the update
+// folder and every file and folder in it. A path below the game folder, or below the update folder (a step may take
+// the folder of a file it got resolved, and join other names to it), stands for the same place in the view:
+//   a file the update has                 -> the update's file
+//   a folder only the update has          -> the update's folder (everything below it is the update's)
+//   anything else                         -> the game folder's path (a folder both have: every file below it is
+//                                            looked up again)
+// Listings of a folder both have hold both sides' entries (the update's where a name is in both), in the order NTFS
+// listed the view on Windows (names compared upper-cased). Nothing of the game folder itself is listed in advance.
 struct Ps4View {
-    std::string root;
-    std::map<std::string, std::string> files, dirs;
-    bool active = false, loaded = false;
+    std::string root, root_key, update, update_key;   // the game and update folders: slashes() and norm_key()
+    std::map<std::string, std::string> files, dirs;   // norm_key of a path relative to the folder -> that path as listed
+    std::map<std::string, bool> base_dirs;            // folders of the update: whether the game folder has them too
+    std::mutex m;
+    bool active = false;
 
     void load(const fs::path &root0, const fs::path &manifest) {
-        root = norm_key(utf8(root0));
+        std::lock_guard<std::mutex> l(m);
+        root = slashes(utf8(root0));
+        root_key = norm_key(root);
+        update.clear();
+        update_key.clear();
         files.clear();
         dirs.clear();
+        base_dirs.clear();
         active = false;
-        loaded = true;
         std::error_code ec;
         if (manifest.empty() || !fs::is_regular_file(manifest, ec)) return;
         std::ifstream in(manifest, std::ios::binary);
@@ -57,41 +82,62 @@ struct Ps4View {
         std::string line;
         std::getline(in, line);
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line != "U3PS4V2") throw Stop(utf8(manifest) + ": not a U3 PS4 manifest");
+        if (line != "U3PS4V3") throw Stop(utf8(manifest) + ": not a U3 PS4 update list");
         while (std::getline(in, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
-            const size_t a = line.find('\t');
-            const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
-            if (a == std::string::npos || b == std::string::npos) throw Stop(utf8(manifest) + ": bad manifest line");
-            const std::string rel = norm_key(line.substr(a + 1, b - a - 1)), real = line.substr(b + 1);
-            if (line[0] == 'F') files[rel] = real;
-            else if (line[0] == 'D') dirs[rel] = real;
-            else throw Stop(utf8(manifest) + ": bad manifest entry");
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) throw Stop(utf8(manifest) + ": bad line");
+            const std::string kind = line.substr(0, tab), value = line.substr(tab + 1);
+            if (kind == "update") update = slashes(value), update_key = norm_key(update);
+            else if (kind == "F") files[norm_key(value)] = value;
+            else if (kind == "D") dirs[norm_key(value)] = value;
+            else throw Stop(utf8(manifest) + ": bad entry");
         }
+        if (update.empty()) throw Stop(utf8(manifest) + ": no update folder");
         active = true;
     }
 
     void ensure() {
-        if (loaded) return;
-        const char *m = std::getenv("U3_PS4_MANIFEST"), *r = std::getenv("U3_PS4_ROOT");
-        if (!m || !*m || !r || !*r) {
-            loaded = true;
-            return;
-        }
-        load(raw_path(r), raw_path(m));
+        const char *mf = std::getenv("U3_PS4_MANIFEST"), *r = std::getenv("U3_PS4_ROOT");
+        if (mf && *mf && r && *r) load(raw_path(r), raw_path(mf));
     }
 
-    bool under(const std::string &key) const {
+    // the place in the view of path s (key: its norm_key): false when s is in neither folder
+    bool place(const std::string &s, const std::string &key, std::string &rel_key, std::string &rel, bool *in_root = nullptr) const {
         if (!active) return false;
-        if (key == root) return true;
-        return key.size() > root.size() && key.compare(0, root.size(), root) == 0 && key[root.size()] == '/';
+        for (const std::string *top : {&root_key, &update_key}) {
+            if (in_root) *in_root = top == &root_key;
+            if (key == *top) {
+                rel_key.clear();
+                rel.clear();
+                return true;
+            }
+            if (key.size() > top->size() && key.compare(0, top->size(), *top) == 0 && key[top->size()] == '/') {
+                rel_key = key.substr(top->size() + 1);
+                rel = slashes(s).substr(top->size() + 1);   // slashes() and norm_key() have the same length
+                return true;
+            }
+        }
+        return false;
     }
-    std::string rel(const std::string &key) const { return key == root ? std::string() : key.substr(root.size() + 1); }
-    const std::string *find(const std::string &r, bool dir) const {
-        const auto &m = dir ? dirs : files;
-        auto it = m.find(r);
-        return it == m.end() ? nullptr : &it->second;
+    fs::path in_update(const std::string &listed) const { return raw_path(update + "/" + listed); }
+    fs::path in_base(const std::string &rel) const { return raw_path(rel.empty() ? root : root + "/" + rel); }
+    // whether the game folder has the update's folder `r` too (asked once per folder)
+    bool base_has_dir(const std::string &r, const std::string &listed) {
+        std::lock_guard<std::mutex> l(m);
+        auto it = base_dirs.find(r);
+        if (it != base_dirs.end()) return it->second;
+        std::error_code ec;
+        const bool has = fs::is_directory(in_base(listed), ec);
+        base_dirs[r] = has;
+        return has;
+    }
+    // where the view's place (rel_key, rel) is on disk
+    fs::path resolve(const std::string &rel_key, const std::string &rel) {
+        if (auto f = files.find(rel_key); f != files.end()) return in_update(f->second);
+        if (auto d = dirs.find(rel_key); d != dirs.end() && !base_has_dir(rel_key, d->second)) return in_update(d->second);
+        return in_base(rel);
     }
 };
 
@@ -102,17 +148,25 @@ Ps4View &view() {
     return v;
 }
 
+// the name as NTFS sorts it (ASCII upper-cased), for listings in the view's order
+std::string sort_key(const fs::path &name) {
+    std::string s = utf8(name);
+    for (char &c : s) c = char(std::toupper((unsigned char)c));
+    return s;
+}
+
 }  // namespace
 
 void ps4_view_set(const fs::path &root, const fs::path &manifest) { view().load(root, manifest); }
 
 fs::path upath(const std::string &s) {
     Ps4View &v = view();
-    const std::string key = norm_key(s);
-    if (v.under(key)) {
-        const std::string r = v.rel(key);
-        if (const std::string *p = v.find(r, false)) return raw_path(*p);
-        if (const std::string *p = v.find(r, true)) return raw_path(*p);
+    std::string rel_key, rel;
+    bool in_root = false;
+    if (v.active && v.place(s, norm_key(s), rel_key, rel, &in_root)) {
+        fs::path r = v.resolve(rel_key, rel);
+        if (in_root && r == v.in_base(rel)) return raw_path(s);   // the game folder's own path: as the step wrote it
+        return r;
     }
     return raw_path(s);
 }
@@ -121,10 +175,11 @@ fs::path resolve_read_path(const fs::path &p) { return upath(utf8(p)); }
 
 bool ps4_exists(const std::string &s) {
     Ps4View &v = view();
-    const std::string key = norm_key(s);
-    if (v.under(key)) {
-        const std::string r = v.rel(key);
-        if (v.find(r, false) || v.find(r, true)) return true;
+    std::string rel_key, rel;
+    if (v.active && v.place(s, norm_key(s), rel_key, rel)) {
+        if (rel_key.empty() || v.files.count(rel_key) || v.dirs.count(rel_key)) return true;
+        std::error_code ec;
+        return fs::exists(v.in_base(rel), ec);
     }
     std::error_code ec;
     return fs::exists(raw_path(s), ec);
@@ -133,37 +188,52 @@ bool ps4_exists(const std::string &s) {
 std::vector<fs::directory_entry> ps4_dir(const std::string &s) {
     std::vector<fs::directory_entry> out;
     Ps4View &v = view();
-    const std::string key = norm_key(s);
-    if (v.under(key)) {
-        const std::string r = v.rel(key), prefix = r.empty() ? std::string() : r + "/";
-        std::map<std::string, std::string> kids;
-        for (const auto *m : {&v.dirs, &v.files})
-            for (auto it = m->lower_bound(prefix); it != m->end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
-                const std::string name = it->first.substr(prefix.size());
-                if (name.empty() || name.find('/') != std::string::npos) continue;
-                kids[name] = it->second;
-            }
-        for (const auto &[name, p] : kids) out.emplace_back(raw_path(p));
+    std::string rel_key, rel;
+    bool in_root = false;
+    std::error_code ec;
+    if (!v.active || !v.place(s, norm_key(s), rel_key, rel, &in_root)) {
+        for (fs::directory_iterator it(raw_path(s), ec), end; !ec && it != end; it.increment(ec)) out.emplace_back(*it);
         return out;
     }
-    std::error_code ec;
-    for (fs::directory_iterator it(raw_path(s), ec), end; it != end; it.increment(ec)) out.emplace_back(*it);
+    const fs::path where = v.resolve(rel_key, rel);
+    if (where != v.in_base(rel)) {   // a folder only the update has: its own listing is the whole view
+        for (fs::directory_iterator it(where, ec), end; !ec && it != end; it.increment(ec)) out.emplace_back(*it);
+        return out;
+    }
+    const fs::path listed = in_root ? raw_path(s) : where;   // entries named as the step named the folder
+    // a folder the game folder has (or neither): its entries, the update's file where a name is in both, then the
+    // update's entries the game folder does not have
+    const std::string prefix = rel_key.empty() ? std::string() : rel_key + "/";
+    std::set<std::string> seen;
+    for (fs::directory_iterator it(listed, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string child = prefix + norm_key(utf8(it->path().filename()));
+        seen.insert(child);
+        if (auto f = v.files.find(child); f != v.files.end()) out.emplace_back(v.in_update(f->second));
+        else out.emplace_back(*it);
+    }
+    for (const auto *m : {&v.dirs, &v.files})
+        for (auto it = m->lower_bound(prefix); it != m->end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
+            const std::string name = it->first.substr(prefix.size());
+            if (name.empty() || name.find('/') != std::string::npos || seen.count(it->first)) continue;
+            seen.insert(it->first);
+            out.emplace_back(v.in_update(it->second));
+        }
+    std::stable_sort(out.begin(), out.end(), [](const fs::directory_entry &a, const fs::directory_entry &b) {
+        return sort_key(a.path().filename()) < sort_key(b.path().filename());
+    });
     return out;
 }
 
 std::vector<fs::path> ps4_files(const std::string &s) {
     std::vector<fs::path> out;
-    Ps4View &v = view();
-    const std::string key = norm_key(s);
-    if (v.under(key)) {
-        const std::string r = v.rel(key), prefix = r.empty() ? std::string() : r + "/";
-        for (auto it = v.files.lower_bound(prefix); it != v.files.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it)
-            out.push_back(raw_path(it->second));
-        return out;
+    for (const fs::directory_entry &e : ps4_dir(s)) {
+        std::error_code ec;
+        if (e.is_directory(ec)) {
+            // below a folder: the same lookup again, through the view's path (a folder both have is merged again)
+            for (fs::path &p : ps4_files(slashes(s) + "/" + utf8(e.path().filename()))) out.push_back(std::move(p));
+        } else if (e.is_regular_file(ec))
+            out.push_back(e.path());
     }
-    std::error_code ec;
-    for (fs::recursive_directory_iterator it(raw_path(s), ec), end; it != end; it.increment(ec))
-        if (it->is_regular_file(ec)) out.push_back(it->path());
     return out;
 }
 
@@ -234,7 +304,8 @@ std::string md5_hex(const Bytes &data) {
     return s;
 }
 
-void copy2(const fs::path &src, const fs::path &dst) {
+void copy2(const fs::path &src0, const fs::path &dst) {
+    const fs::path src = resolve_read_path(src0);   // a PS4 source: the update's file when it has one
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
     fs::last_write_time(dst, fs::last_write_time(src));
 }

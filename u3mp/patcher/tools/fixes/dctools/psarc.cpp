@@ -41,7 +41,7 @@ bool unzlib(const Bytes &in, Bytes &out) {
 
 }  // namespace
 
-Psarc::Psarc(const fs::path &p) : f(p, std::ios::binary), path(p) {
+Psarc::Psarc(const fs::path &p) : f(resolve_read_path(p), std::ios::binary), path(p) {   // a PS4 path: the update's file when it has one (fixlib.cpp)
     if (!f) throw Stop("cannot read " + utf8(p));
     uint8_t h[32] = {};
     f.read(reinterpret_cast<char *>(h), 32);

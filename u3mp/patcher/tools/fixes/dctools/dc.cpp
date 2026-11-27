@@ -183,7 +183,7 @@ void write_file_replace(const fs::path &p, const Bytes &data) {
 }
 
 void copy_once(const fs::path &src, const fs::path &dst) {
-    if (!fs::exists(dst)) fs::copy_file(src, dst);
+    if (!fs::exists(dst)) fs::copy_file(resolve_read_path(src), dst);   // a PS4 source: the update's file when it has one
 }
 
 uint32_t sid(const std::string &s) {

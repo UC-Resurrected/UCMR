@@ -774,6 +774,9 @@ inline void kill_tree(long long pid) {
     for (long long p : tree) ::kill((pid_t)p, SIGKILL);
 }
 
+// files: a hard link (CreateHardLinkW's counterpart; the U3 import's kept PS3 files, ps3keep.cpp)
+inline bool hard_link(const fs::path &existing, const fs::path &link) { return ::link(existing.c_str(), link.c_str()) == 0; }
+
 #endif   // !_WIN32
 
 // ------------------------------------------------------------------------------------------------ later phases
