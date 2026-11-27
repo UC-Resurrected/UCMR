@@ -42,10 +42,13 @@ What works in this preview
   has not been tested on Linux yet.
 - The game runtime: PLAY starts it, as on Windows. It builds and passes its tests on Linux; a
   whole game has not been played with it on Linux yet.
+- Add to Steam (close Steam first; on a Steam Deck switch to desktop mode and exit Steam), the
+  desktop shortcuts, the freeze report and the memory monitor.
+- The launcher's own update: it updates itself once a release carries the Linux package; until
+  then download the new tarball and extract it over this folder.
 - Not yet on Linux: online and LAN multiplayer (the Uncharted 3 multiplayer helper and the online
-  program still speak only to Windows; the game starts, but finds no network), Add to Steam,
-  desktop shortcuts, the online sign-in, the freeze report, the launcher's own update (download
-  the new tarball and extract it over this folder instead).
+  program still speak only to Windows; the game starts, but finds no network), the online
+  sign-in, DLSS, and the emulation that lets Windows run the games on older CPUs.
 
 Good to know
 - Settings, saves and logs live in the analysis/ folder beside the launcher, as on Windows.
