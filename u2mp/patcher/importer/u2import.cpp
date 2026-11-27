@@ -158,9 +158,9 @@ fs::path launcher_root() { return exe_dir().parent_path().parent_path(); }
 
 namespace {
 
-const char *CONV_VERSION = "4";        // bump when a converter changes its output: those files are converted again
-const char *SKIN_VERSION = "twin2";    // mp-hero skins: PS4-twin build first; skins converted before it are redone
-const char *ACTOR_VERSION = "u2ag2";   // actor27 paks: U2 artgroup / lookup / LEVEL_PATS layout, props, anims
+const char *CONV_VERSION = "5";        // bump when a converter changes its output: those files are converted again
+const char *SKIN_VERSION = "twin3";    // mp-hero skins: PS4-twin build first, re-textured materials kept from PS3; older builds are redone
+const char *ACTOR_VERSION = "u2ag3";   // actor27 paks: U2 artgroup / lookup / LEVEL_PATS layout, props, anims; same-object template materials
 // PS3 speech language -> PS4 speech archive (<name>_ps4.psarc). NPUA80698 is the North American release: its Spanish /
 // Portuguese tracks are taken as the Latin American Spanish / Brazilian Portuguese the PS4 game has.
 const std::map<std::string, std::string> SPEECH_LANGS = {{"english", "english"}, {"french", "french"}, {"spanish", "sam-spanish"}, {"portuguese", "brazilian"}};

@@ -32,6 +32,8 @@ u2import --dc convert <schema.json> <ps3 module.bin> <out.bin>   |   u2import --
 u2import --hk-tables --ps3-elf <EBOOT.elf> --ps4 <game folder> --out <u2hkclasses.json> [--objdump <path>]
 u2import --twin-build <ps3 mp skin.pak> <ps3 twin.pak> <ps4 twin.pak> <out.pak>
 u2import --psarc list <file.psarc>   |   u2import --psarc extractall <file.psarc> <folder>
+u2import --materials <pak>           a pak's materials and the textures they bind (PS3 or PS4)
+u2import --texture-stats <pak>       per texture: format, size, share of black colour blocks
 ```
 
 * PS3 sources: the GOTY release NPUA80698 1.10 (base archives + `all-patches.psarc`) for game data, the map packs
@@ -252,6 +254,12 @@ tags, artgroup). Then, in that pak:
   against `:default`, `:lod0`, `:fma` ...), gets the twin's record (and its textures; twin textures the converter
   did not carry over, e.g. `default-mask.tga/<hash>.ndb.error`, are copied with their GEOMETRY_1 texture entries).
   Materials the twin has no counterpart for (re-textures such as chloe-heist, skeleton glow) stay converted from PS3.
+  A material matched only by its path (another variant) whose converted record binds a texture neither the PS3 nor
+  the PS4 twin has is a re-texture too and stays converted (since 2026-11-27, `SKIN_VERSION` twin3): Anniversary
+  Drake's `hero-main-outfit-cloth/mp-year-one` with `drake-year-one-color` got the campaign shirt before, so the
+  skin looked like plain Drake. Such a material is converted on the template's material of the same object (its
+  shader and constants, the PS3 textures re-bound), not on the cost-scored one (the hair material, before). The log
+  names them (`re-textures kept from PS3: ...`); in the 2026-11-27 run only mp-hero-year-1 has one.
 * a PS3-only skin with no material name match (the DLC characters) takes each PS3 material's own textures from its
   `MATERIAL_TABLE_1`, and a donor PS4 material chosen by the texture kinds and the material's part (skin, cloth,
   metal, eyes ...). The PS3 character suffixes `_c` / `_n` / `_s` (and Killzone's `_clr` / `_nmt` / `_spc`) are
@@ -403,7 +411,15 @@ Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python im
    retail material record (often none shares a name), so their shaders may differ from PS3; the ARTGROUP /
    LEVEL_PATS login order varies in retail and follows PS3. Not verified in game.
 5. **Level materials without a retail twin**: these get the closest retail background material (path,
-   texture roles), not their own shader. They may look different in game.
+   texture roles), not their own shader, with the PS3 material's own textures (a texture the PS3 material borrows
+   from another level, e.g. Facility's `war-rubble-01-color`, comes as its remastered PS4 copy). They may look
+   different in game. Lightmaps: U2 cooks a level lightmap without the hash folder
+   (`<level>.geom.atgi/indirect.rgbmax.tga.ndb`); until converter 5 (2026-11-27) the stage converter carried it but
+   bound every material to the retail `default-lightmap0/1`, which the lightmap UVs sampled as random dark patches
+   (the map packs' black walls and floors). Now facility-multi, ruins-multi, museum-multi, highrise-multi-2 and
+   ruins-multi-wide bind their own lightmaps as retail levels do; museum-multi-eva and the other -wide levels have
+   no PS3 lightmap and stay vertex lit. No texture of the converted map pack levels is black itself
+   (`u2import --texture-stats`).
 6. **Region script opcodes**: retail re-encodes some `LoadStatic` (0x3f) instructions as 0x42 and keeps
    others. The rule is unknown, so the import keeps 0x3f (1 of 2 in stage-multi; 7 of 292 blocks differ in
    treasure-multi). Spawners, splines and feature db match retail exactly.
