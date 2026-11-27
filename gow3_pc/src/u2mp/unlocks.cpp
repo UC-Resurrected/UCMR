@@ -312,14 +312,21 @@ char *heap_text(const char *s, size_t len) {
     return copy;
 }
 
+// A name left in 4-byte-swapped words (each word's bytes reversed): whole words reversed until the first NUL of the
+// result. `len` is the stored bytes' strnlen. A name whose length is not a multiple of 4 ends in a word whose real
+// characters sit behind its NUL bytes ('s\0\0\0' stored as '\0\0\0s'), so that word, the one at `len`, is read too:
+// reversing only `len` bytes cut 'costume-hero-skeleton-sir-francis' to '...-sir-franci', a package that does not
+// exist, and Sir Francis Drake loaded no model of his own.
 char *heap_swap4(const char *s, size_t len) {
-    auto *copy = static_cast<char *>(netheap_alloc(len + 1, 16));
-    if (!copy) return nullptr;
-    for (size_t i = 0; i < len; i += 4) {
-        const size_t n = len - i < 4 ? len - i : 4;
-        for (size_t j = 0; j < n; ++j) copy[i + j] = s[i + n - 1 - j];
-    }
-    copy[len] = 0;
+    std::string t;
+    bool end = false;
+    for (size_t i = 0; i <= len && i < 64 && !end; i += 4)
+        for (int j = 3; j >= 0 && !end; --j) {
+            if (s[i + size_t(j)] == 0) end = true;
+            else t += s[i + size_t(j)];
+        }
+    auto *copy = static_cast<char *>(netheap_alloc(t.size() + 1, 16));
+    if (copy) std::memcpy(copy, t.c_str(), t.size() + 1);
     return copy;
 }
 
