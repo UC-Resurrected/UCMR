@@ -1512,6 +1512,8 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
 #ifdef _WIN32
     start_exec_watch();
+#else
+    host_linux_start_exec_watch();   /* host_linux.cpp: perf-event breakpoints */
 #endif
     pokes_start(image);   /* src/pokes.cpp (C++): GOW3_POKE, the launcher's cheats and debug switches */
     entered_game=1;

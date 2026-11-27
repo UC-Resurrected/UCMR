@@ -22,6 +22,11 @@ typedef struct {
  * timeout_seconds (0: no watchdog, as on Windows) dumps every thread and ends the process. */
 void host_linux_install_signals(const HostLinuxGuest *guest, unsigned timeout_seconds);
 
+/* GOW3_EXEC_WATCH / GOW3_EXEC_WATCH_FILE (diagnostics, as probe.c's Windows exec watch): hardware breakpoints on every
+ * thread through perf events, hits logged by the SIGTRAP handler. Called once the guest image is loaded, before guest
+ * code starts; does nothing without either variable. */
+void host_linux_start_exec_watch(void);
+
 /* The in-game restart (settings menu): runs GOW3_RESTART_COMMAND through /bin/sh in place of this process. */
 void host_linux_restart(void) __attribute__((noreturn));
 

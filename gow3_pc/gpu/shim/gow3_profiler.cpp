@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // gow3: a sampling profiler for one thread (GOW3_PROFILE=<seconds per report>), to find where the
 // GPU command thread spends its time and what grows when the frame rate falls over minutes. A
-// thread suspends the target about once per millisecond, reads its instruction pointer and
-// resumes it (nothing is allocated while it is suspended). Each report lists the sampled
-// addresses as module+offset with their counts in GOW3_DUMP_DIR/profile_<n>.txt; offsets into
-// the runtime's executable are symbolized offline (llvm-symbolizer, image base 0x140000000).
+// thread takes a sample of the target about once per millisecond: its instruction pointer and call
+// stack (nothing is allocated while it is taken). Windows suspends the target, reads its context and
+// resumes it; Linux sends it SIGPROF, and its handler reads the signal frame. Each report lists the
+// sampled addresses as module+offset with their counts in GOW3_DUMP_DIR/profile_<n>.txt; offsets into
+// the runtime's executable are symbolized offline (llvm-symbolizer, image base 0x140000000 on Windows).
 // profile_<n>_stacks.txt holds the call stacks (up to 16 frames, innermost first, counted per
-// distinct stack), so a wait shows who waits: host frames are unwound with their unwind tables,
-// guest code (no module, "?+address") by its saved frame pointers.
+// distinct stack), so a wait shows who waits. Windows unwinds host frames with their unwind tables and
+// guest code (no module, "?+address") by its saved frame pointers; Linux follows the saved frame
+// pointers throughout (the runtime is built with them).
 // GOW3_PROFILE_STALLS=1: no periodic reports; each sampler keeps its last half second of stacks,
 // and a frame over 40 ms (NoteStall, from the flip statistics) writes the stacks sampled during
 // that frame to GOW3_DUMP_DIR/stall_<n>_<thread>_stacks.txt.
@@ -30,6 +32,14 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <dlfcn.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <ucontext.h>
+#include <unistd.h>
 #endif
 
 namespace Gow3Profiler {
@@ -58,6 +68,7 @@ void NoteStall(double frame_ms) {
     ++stall_seq;
 }
 
+// ---- the system's part: a thread to sample (Target), one sample of it (Sample), an address's name (NameOf) ----
 #ifdef _WIN32
 namespace {
 
@@ -298,11 +309,211 @@ void Walk(const std::vector<Module>& modules, CONTEXT context, Stack& stack) {
     }
 }
 
+struct Target {
+    HANDLE thread = nullptr;
+    std::vector<Module> modules;
+};
+
+bool Open(unsigned long thread_id, Target& target) {
+    target.thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                               thread_id);
+    if (!target.thread) {
+        return false;
+    }
+    target.modules = LoadModules();
+    return true;
+}
+
+/// One sample: false when the thread is gone (the sampler ends); `taken` false when this one failed.
+bool Sample(Target& target, unsigned long long& rip, Stack& stack, bool& taken) {
+    if (SuspendThread(target.thread) == DWORD(-1)) {
+        return false;
+    }
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    taken = GetThreadContext(target.thread, &context) != 0;
+    if (taken) {
+        rip = context.Rip;
+        Walk(target.modules, context, stack);
+    }
+    ResumeThread(target.thread);
+    return true;
+}
+
+void Refresh(Target& target) {
+    target.modules = LoadModules(); // modules loaded since (the thread runs now)
+}
+
+void Close(Target& target) {
+    CloseHandle(target.thread);
+}
+
+/// module+offset ("?+address" outside every module)
+std::string NameOf(unsigned long long rip) {
+    HMODULE module = nullptr;
+    char module_name[MAX_PATH] = "?";
+    unsigned long long offset = rip;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(rip), &module) &&
+        module) {
+        GetModuleFileNameA(module, module_name, sizeof(module_name));
+        offset = rip - reinterpret_cast<unsigned long long>(module);
+    }
+    const char* base = std::strrchr(module_name, '\\');
+    char text[MAX_PATH + 32];
+    std::snprintf(text, sizeof(text), "%s+%#llx", base ? base + 1 : module_name, offset);
+    return text;
+}
+
+unsigned long CurrentThread() {
+    return GetCurrentThreadId();
+}
+
+} // namespace
+#else
+namespace {
+
+constexpr int MaxDepth = 16;
+
+struct Stack {
+    unsigned long long pc[MaxDepth];
+    int depth;
+};
+
+/// A read that fails instead of faulting (process_vm_readv on this process; safe in a signal handler).
+bool Read(unsigned long long address, void* out, size_t size) {
+    iovec local{out, size}, remote{reinterpret_cast<void*>(address), size};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
+}
+
+/// The saved frame pointers from the interrupted frame, every stack read checked.
+void Walk(unsigned long long rip, unsigned long long rsp, unsigned long long rbp, Stack& stack) {
+    const unsigned long long low = rsp, high = rsp + (8ull << 20);
+    stack.depth = 0;
+    while (stack.depth < MaxDepth && rip) {
+        stack.pc[stack.depth++] = rip;
+        unsigned long long frame[2];
+        if (rbp < low || rbp >= high || !Read(rbp, frame, sizeof(frame))) {
+            break;
+        }
+        rip = frame[1];
+        rsp = rbp + 16;
+        rbp = frame[0];
+        if (rsp < low || rsp >= high) {
+            break;
+        }
+    }
+}
+
+/// One sample in flight per sampled thread: the sampler sets `asked` to a new number and sends SIGPROF; the
+/// thread's handler fills rip and stack and sets `done` to that number.
+struct Slot {
+    std::atomic<long> tid{0};
+    std::atomic<unsigned> asked{0}, done{0};
+    unsigned long long rip;
+    Stack stack;
+};
+constexpr int MaxSlots = 64;
+Slot slots[MaxSlots];
+
+void OnSample(int, siginfo_t*, void* context) {
+    const int saved_errno = errno;
+    const long me = syscall(SYS_gettid);
+    for (Slot& slot : slots) {
+        if (slot.tid.load(std::memory_order_acquire) != me) {
+            continue;
+        }
+        const unsigned asked = slot.asked.load(std::memory_order_acquire);
+        if (asked != slot.done.load(std::memory_order_relaxed)) {
+            const auto* uc = static_cast<const ucontext_t*>(context);
+            slot.rip = static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RIP]);
+            Walk(slot.rip, static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RSP]),
+                 static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RBP]), slot.stack);
+            slot.done.store(asked, std::memory_order_release);
+        }
+        break;
+    }
+    errno = saved_errno;
+}
+
+struct Target {
+    long tid = 0;
+    Slot* slot = nullptr;
+};
+
+bool Open(unsigned long thread_id, Target& target) {
+    static std::once_flag handler;
+    std::call_once(handler, [] {
+        struct sigaction sa {};
+        sa.sa_sigaction = OnSample;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGPROF, &sa, nullptr);
+    });
+    for (Slot& slot : slots) {
+        long free_slot = 0;
+        if (slot.tid.compare_exchange_strong(free_slot, static_cast<long>(thread_id))) {
+            target.tid = static_cast<long>(thread_id);
+            target.slot = &slot;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// One sample: false when the thread is gone or no longer answers (the sampler ends).
+bool Sample(Target& target, unsigned long long& rip, Stack& stack, bool& taken) {
+    Slot& slot = *target.slot;
+    const unsigned number = slot.asked.load(std::memory_order_relaxed) + 1;
+    slot.asked.store(number, std::memory_order_release);
+    if (syscall(SYS_tgkill, getpid(), target.tid, SIGPROF) != 0) {
+        return false;
+    }
+    // the handler runs at the thread's next return to user space; a thread that does not answer in a second has
+    // the signal blocked: stop sampling it
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (slot.done.load(std::memory_order_acquire) != number) {
+        if (std::chrono::steady_clock::now() > until) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(20));
+    }
+    rip = slot.rip;
+    stack = slot.stack;
+    taken = true;
+    return true;
+}
+
+void Refresh(Target&) {}
+
+void Close(Target& target) {
+    // the handler must not fill a slot handed on: the thread id leaves it first
+    target.slot->tid.store(0, std::memory_order_release);
+}
+
+/// module+offset ("?+address" outside every module)
+std::string NameOf(unsigned long long rip) {
+    Dl_info where{};
+    const char* module_name = "?";
+    unsigned long long offset = rip;
+    if (dladdr(reinterpret_cast<void*>(rip), &where) && where.dli_fname && where.dli_fbase) {
+        const char* base = std::strrchr(where.dli_fname, '/');
+        module_name = base ? base + 1 : where.dli_fname;
+        offset = rip - reinterpret_cast<unsigned long long>(where.dli_fbase);
+    }
+    char text[512];
+    std::snprintf(text, sizeof(text), "%s+%#llx", module_name, offset);
+    return text;
+}
+
+unsigned long CurrentThread() {
+    return static_cast<unsigned long>(syscall(SYS_gettid));
+}
+
 } // namespace
 #endif
 
 void Start(unsigned long thread_id, const char* name) {
-#ifdef _WIN32
     const char* env = std::getenv("GOW3_PROFILE");
     if (!env || !*env || std::atoi(env) <= 0) {
         return;
@@ -311,10 +522,8 @@ void Start(unsigned long thread_id, const char* name) {
     const char* dir_env = std::getenv("GOW3_DUMP_DIR");
     const std::string dir = dir_env && *dir_env ? dir_env : ".";
     std::thread([thread_id, period, dir, label = std::string(name)] {
-        HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-                                       THREAD_QUERY_INFORMATION,
-                                   FALSE, thread_id);
-        if (!thread) {
+        Target target;
+        if (!Open(thread_id, target)) {
             std::printf("Profiler: cannot open thread %lu\n", thread_id);
             return;
         }
@@ -325,22 +534,19 @@ void Start(unsigned long thread_id, const char* name) {
         samples.reserve(size_t(period) * 2000);
         std::vector<Stack> stacks;
         stacks.reserve(samples.capacity());
-        std::vector<Module> modules = LoadModules();
         auto last = std::chrono::steady_clock::now();
         // Stall mode: the recent samples (time since stall_epoch, stack).
         std::deque<std::pair<long long, Stack>> recent;
         unsigned seen_stall = stall_seq.load();
         for (int report = 0;;) {
-            Sleep(1);
-            if (SuspendThread(thread) == DWORD(-1)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            unsigned long long rip = 0;
+            Stack stack{};
+            bool taken = false;
+            if (!Sample(target, rip, stack, taken)) {
                 break;
             }
-            CONTEXT context{};
-            context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-            const BOOL ok = GetThreadContext(thread, &context);
-            if (ok && StallMode()) {
-                Stack stack{};
-                Walk(modules, context, stack);
+            if (taken && StallMode()) {
                 recent.emplace_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                         std::chrono::steady_clock::now() - stall_epoch)
                                         .count(),
@@ -348,12 +554,10 @@ void Start(unsigned long thread_id, const char* name) {
                 while (recent.size() > 600) {
                     recent.pop_front();
                 }
-            } else if (ok && samples.size() < samples.capacity()) {
-                samples.push_back(context.Rip);
-                stacks.emplace_back();
-                Walk(modules, context, stacks.back());
+            } else if (taken && samples.size() < samples.capacity()) {
+                samples.push_back(rip);
+                stacks.push_back(stack);
             }
-            ResumeThread(thread);
             if (StallMode()) {
                 const unsigned seq = stall_seq.load();
                 if (seq == seen_stall) {
@@ -363,27 +567,13 @@ void Start(unsigned long thread_id, const char* name) {
                 const long long end = stall_end_ns.load(), begin = end - stall_window_ns.load();
                 std::unordered_map<std::string, unsigned> counts;
                 unsigned total = 0;
-                for (const auto& [when, stack] : recent) {
+                for (const auto& [when, sampled] : recent) {
                     if (when < begin || when > end) {
                         continue;
                     }
                     std::string key;
-                    for (int i = 0; i < stack.depth; ++i) {
-                        char text[64];
-                        HMODULE module = nullptr;
-                        unsigned long long offset = stack.pc[i];
-                        const char* module_name = "?";
-                        char path[MAX_PATH];
-                        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                               reinterpret_cast<LPCSTR>(stack.pc[i]), &module) &&
-                            module && GetModuleFileNameA(module, path, sizeof(path))) {
-                            offset = stack.pc[i] - reinterpret_cast<unsigned long long>(module);
-                            const char* base = std::strrchr(path, '\\');
-                            module_name = base ? base + 1 : path;
-                        }
-                        std::snprintf(text, sizeof(text), "%s%s+%#llx", i ? ";" : "", module_name, offset);
-                        key += text;
+                    for (int i = 0; i < sampled.depth; ++i) {
+                        key += (i ? ";" : "") + NameOf(sampled.pc[i]);
                     }
                     ++counts[key];
                     ++total;
@@ -414,12 +604,12 @@ void Start(unsigned long thread_id, const char* name) {
             }
             last = now;
             std::unordered_map<unsigned long long, unsigned> counts;
-            for (const auto rip : samples) {
-                ++counts[rip];
+            for (const auto sampled : samples) {
+                ++counts[sampled];
             }
             std::vector<std::pair<unsigned, unsigned long long>> sorted;
-            for (const auto& [rip, n] : counts) {
-                sorted.emplace_back(n, rip);
+            for (const auto& [sampled, n] : counts) {
+                sorted.emplace_back(n, sampled);
             }
             std::sort(sorted.rbegin(), sorted.rend());
             std::string tag = label;
@@ -427,23 +617,10 @@ void Start(unsigned long thread_id, const char* name) {
                 c = c == ' ' ? '-' : c;
             }
             std::unordered_map<unsigned long long, std::string> names;
-            const auto name_of = [&names](unsigned long long rip) -> const std::string& {
-                auto [it, added] = names.try_emplace(rip);
+            const auto name_of = [&names](unsigned long long address) -> const std::string& {
+                auto [it, added] = names.try_emplace(address);
                 if (added) {
-                    HMODULE module = nullptr;
-                    char module_name[MAX_PATH] = "?";
-                    unsigned long long offset = rip;
-                    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                           reinterpret_cast<LPCSTR>(rip), &module) &&
-                        module) {
-                        GetModuleFileNameA(module, module_name, sizeof(module_name));
-                        offset = rip - reinterpret_cast<unsigned long long>(module);
-                    }
-                    const char* base = std::strrchr(module_name, '\\');
-                    char text[MAX_PATH + 32];
-                    std::snprintf(text, sizeof(text), "%s+%#llx", base ? base + 1 : module_name, offset);
-                    it->second = text;
+                    it->second = NameOf(address);
                 }
                 return it->second;
             };
@@ -451,18 +628,18 @@ void Start(unsigned long thread_id, const char* name) {
             const std::string path = stem + ".txt";
             if (FILE* f = std::fopen(path.c_str(), "w")) {
                 std::fprintf(f, "# %s, %zu samples in %d s\n", label.c_str(), samples.size(), period);
-                for (const auto& [n, rip] : sorted) {
-                    std::fprintf(f, "%u %s\n", n, name_of(rip).c_str());
+                for (const auto& [n, address] : sorted) {
+                    std::fprintf(f, "%u %s\n", n, name_of(address).c_str());
                 }
                 std::fclose(f);
                 std::printf("Profiler: %zu samples written to %s\n", samples.size(), path.c_str());
                 std::fflush(stdout);
             }
             std::unordered_map<std::string, unsigned> stack_counts;
-            for (const Stack& stack : stacks) {
+            for (const Stack& sampled : stacks) {
                 std::string key;
-                for (int i = 0; i < stack.depth; ++i) {
-                    key += (i ? ";" : "") + name_of(stack.pc[i]);
+                for (int i = 0; i < sampled.depth; ++i) {
+                    key += (i ? ";" : "") + name_of(sampled.pc[i]);
                 }
                 ++stack_counts[key];
             }
@@ -481,22 +658,14 @@ void Start(unsigned long thread_id, const char* name) {
             }
             samples.clear();
             stacks.clear();
-            modules = LoadModules(); // modules loaded since (the thread runs now)
+            Refresh(target);
         }
-        CloseHandle(thread);
+        Close(target);
     }).detach();
-#else
-    (void)thread_id;
-    (void)name;
-#endif
 }
 
 void StartCurrent(const char* name) {
-#ifdef _WIN32
-    Start(GetCurrentThreadId(), name);
-#else
-    (void)name;
-#endif
+    Start(CurrentThread(), name);
 }
 
 } // namespace Gow3Profiler
