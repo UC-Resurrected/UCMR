@@ -149,6 +149,20 @@ Fix: the overlay (version 7) makes the five kind-6 rows kind 13, the record othe
 `+0x64` 0, `+0x68` 5 rows as Team); menudraw.cpp skips the kind-8 closed-row arrows while NET_SM > 1 (the
 campaign's chapter carousel, also kind 8, keeps them). Friendly Fire was kind 13 already. Not verified in the game.
 
+**Hidden rows and row widths of kind 13 (owner report 2026-11-27).** After the change above, Custom Game showed a
+blank line between Score Limit and Time Limit and its panel sat higher, and Find Match's panel moved up (the whole
+lobby panel grows with the left column and is centred). The page lays out a column from its rows' sizes (virtual
++0x28, `{width, height}`): each row gets the column's x and width (the widest row) and its own height, and a row of
+height 0 takes no space (`0x5a2110`). A row hidden by its condition has no label; kind 6 then measures 0 x 0
+(`0x57f370`), kind 13 one empty text line (`0x587df0`, path `0x587e74`). So each hidden converted row (Rounds in
+Deathmatch; in matchmaking all five) left a line. Second difference: the kind-13 draw (`0x587300`, `0x587359..0x58737e`)
+replaces the laid-out width with the record's width (`+0x5c`, 320 on the Profile page), so Co-op Difficulty and Taunt
+ended at 320 units while the column (and the Hero / Villain rows) is wider; on PS3 (video, 2:55) these rows reach the
+column's right edge. Fix (menudraw.cpp `install_dropdown_rows`): the size of a row with no label is 0 x 0 for the
+five converted rows (conditions 59, 60, 61, 63, 65; Friendly Fire and Team keep the shipped measure), and the draw
+keeps the laid-out width for the Profile page's drop-downs (conditions 80 Co-op Difficulty, 82 Taunt, 108, 135
+Matchmaking; the lobby's rows are unchanged). Not verified in the game.
+
 ### 3.3 PAGE_MULTIPLAYER_PLAYER_OPTIONS ("Profile"; page handler `5ed8b0` = remaining.cpp)
 
 Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boosters Slot 1/2
@@ -158,6 +172,12 @@ intact; their data is NetPlayerData (now loaded and saved). Restored texts: NET_
 (d4143b18 "Clan Tag") and the empty-tag text (639e0fa8 "None"). The clan tag button explains it is
 not available on PC (remaining.cpp). Boosters and Hero / Villain are kind-8 carousels, Co-op Difficulty, Taunt and
 Matchmaking kind-13 drop-downs: no "<>" beside a focused closed carousel in multiplayer (3.2).
+
+Boosters greyed out in a co-op custom game (owner report 2026-11-27): PS3 does the same. The booster list query (PS3
+`0x4be788`, PS4 `0x659bd0`) answers op 7 (enabled) with 0 when the lobby's current net game is a co-op type (PS3
+`0x4a0bcc`: game type 4, 8, 9 or 12; PS4 inlines the same test) and the page under the Profile is PAGE_LOBBY in
+custom game mode (net info `+0x2c4` == 2; PS3 `+0x2b4`) or page `e35f0f1a` otherwise.
+Not changed.
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
