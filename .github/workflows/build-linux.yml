@@ -286,7 +286,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      SDL3_VERSION: release-3.2.0
+      SDL3_VERSION: release-3.4.10   # as the Windows build (MSYS2 sdl3 3.4.10)
     steps:
       - name: Check out (with submodules)
         uses: actions/checkout@v4
@@ -334,17 +334,42 @@ jobs:
       - name: Small FFmpeg
         run: CC=clang bash tools/build_ffmpeg.sh
 
-      # the GPU code needs the Vulkan headers the Windows build has (MSYS2 vulkan-headers, 1.4.350): Ubuntu's are older
-      # (no vk::DriverId::eMesaKosmickrisp, vk::PipelineBinaryKeyKHR, ...); the system's loader stays the one linked
-      - name: Vulkan headers
+      # The GPU code is built on Windows with MSYS2's libraries; Ubuntu 24.04's are older (Vulkan headers 1.3.275 without
+      # vk::DriverId::eMesaKosmickrisp or vk::PipelineBinaryKeyKHR, VMA 3.0.1 without VmaAllocationInfo2, fmt 9,
+      # robin-map 1.2). The MSYS2 versions are built here into ~/deps: the header-only ones installed, fmt as a static
+      # library (position-independent), so the package bundles no new library. The system's Vulkan loader stays linked.
+      - name: Reuse the libraries of the Windows build
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ~/deps
+          key: deps-vulkan1.4.350-vma3.4.0-fmt12.1.0-robinmap1.4.1-ubuntu-24.04
+
+      - name: Libraries of the Windows build
+        if: steps.deps.outputs.cache-hit != 'true'
         run: |
-          git clone -q --depth 1 -b "$VULKAN_HEADERS" https://github.com/KhronosGroup/Vulkan-Headers.git "$HOME/vulkan-headers"
-          grep -m1 'define VK_HEADER_VERSION ' "$HOME/vulkan-headers/include/vulkan/vulkan_core.h"
-          # searched before the system's /usr/include by every C/C++ compile of the later steps (the unit tests and the
-          # package's runtime build compile too)
-          echo "CPATH=$HOME/vulkan-headers/include" >> "$GITHUB_ENV"
-        env:
-          VULKAN_HEADERS: v1.4.350
+          dep() {   # dep <GitHub repository> <tag> [CMake options]
+            local src=$RUNNER_TEMP/dep-${1##*/}
+            git clone -q --depth 1 -b "$2" "https://github.com/$1.git" "$src"
+            cmake -S "$src" -B "$src/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/deps" \
+              "${@:3}" > "$src.log" 2>&1 || { cat "$src.log"; exit 1; }
+            cmake --build "$src/build" >> "$src.log" 2>&1 || { cat "$src.log"; exit 1; }
+            cmake --install "$src/build" >> "$src.log" 2>&1 || { cat "$src.log"; exit 1; }
+            echo "$1 $2 installed"
+          }
+          dep KhronosGroup/Vulkan-Headers v1.4.350 -DVULKAN_HEADERS_ENABLE_TESTS=OFF -DVULKAN_HEADERS_ENABLE_MODULE=OFF
+          dep GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator v3.4.0
+          dep Tessil/robin-map v1.4.1
+          dep fmtlib/fmt 12.1.0 -DFMT_DOC=OFF -DFMT_TEST=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+      - name: Use them
+        run: |
+          grep -m1 'define VK_HEADER_VERSION ' ~/deps/include/vulkan/vulkan_core.h
+          grep -m1 'define VMA_VERSION ' ~/deps/include/vk_mem_alloc.h
+          # every later compile (the runtime, the unit tests, the package's runtime build) and every find_package take
+          # them before the system's
+          echo "CPATH=$HOME/deps/include" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$HOME/deps" >> "$GITHUB_ENV"
 
       - name: Build the runtime
         run: |
@@ -353,6 +378,12 @@ jobs:
             cat build.log
             grep -E 'error|undefined reference|CMake Error' gow3_pc/out/gpu-build.log build.log 2>/dev/null | head -20 |
               while IFS= read -r l; do echo "::error::$(cut -c1-900 <<< "$l")"; done
+            # every other failing file too (ninja stopped at the first), so one run shows them all
+            if [[ -f gow3_pc/out/gpu/build.ninja ]]; then
+              ninja -C gow3_pc/out/gpu -k 0 gow3-probe gow3-gpu-capabilities > keep-going.log 2>&1 || true
+              grep -E ': error: |undefined reference' keep-going.log | sort -u | head -40 |
+                while IFS= read -r l; do echo "::error title=also::$(cut -c1-600 <<< "$l")"; done
+            fi
             exit 1
           fi
           cat build.log
