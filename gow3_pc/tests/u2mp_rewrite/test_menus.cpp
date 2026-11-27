@@ -958,32 +958,36 @@ bool help_bar_shows(const std::string &prev, const std::string &next) {
 }
 
 void help_bar_scenarios() {
-    run_new("HB-1 help bar icons: L1 / R1, exchanged and back (new only)", [](const Api &a) {
+    run_new("HB-1 help bar icons: always the L1 / R1 pictures, whatever the shoulder setting (new only)",
+            [](const Api &a) {
+        const char *on = "log menus: help bar shoulder icons L1 / R1 (shoulder setting 1: tokens |L1| / |R1|)";
+        const char *off = "log menus: help bar shoulder icons L1 / R1 (shoulder setting 0: tokens |L2| / |R2|)";
         help_bar_image();
         menus_ready(a);
         EXPECT(lines(kHelpBarDiffer) == 0);
         EXPECT(help_bar_shows("L1-NOSWAP", "R1-NOSWAP"));   // install only checks
         u2mp::menus_help_bar_frame();
-        EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));   // setting on: the printer draws |L1| / |R1| as L1 / R1
+        EXPECT(lines(on) == 1);
         u2mp::menus_help_bar_frame();   // nothing to write: no log
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
-        put<uint32_t>(kPadExchange, 7);
-        u2mp::menus_help_bar_frame();
-        u2mp::menus_help_bar_frame();
-        EXPECT(help_bar_shows("|R1| ", "|L1| "));
-        EXPECT(lines("log menus: help bar shoulder icons exchanged") == 1);
-        put<uint32_t>(kPadExchange, 0);
+        EXPECT(lines(on) == 1);
+        put<uint32_t>(kPadExchange, 7);   // the exchange word does not change the pictures (PS3 NOSWAP)
         u2mp::menus_help_bar_frame();
         EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
+        put<uint32_t>(kPadSetting, 0);   // setting off: the printer draws |L2| / |R2| as L1 / R1
+        u2mp::menus_help_bar_frame();
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L2| ", "|R2| "));
+        EXPECT(lines(off) == 1);
+        put<uint32_t>(kPadSetting, 1);
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));
+        EXPECT(lines(on) == 2);
         // a record put back to its token (e.g. by the game) is fixed again without a new log
         put<uint64_t>(kHelpRecs[1].off, addr(kTokR1));
         u2mp::menus_help_bar_frame();
         EXPECT(help_bar_shows("|L1| ", "|R1| "));
-        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
-        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
+        EXPECT(lines(on) == 2);
     });
     // any checked byte different: logged at install, no record is ever written
     struct Bad {

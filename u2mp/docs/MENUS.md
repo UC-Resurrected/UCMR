@@ -276,39 +276,41 @@ image offsets, file offset = address + 0x4000):
   always 6 (R1); plain "L1" / "R1" give 8 / 6 or 6 / 8 by a PS3 swap word (+0x21bc of the object in r15), "L2" / "R2"
   9 / 7 or 7 / 9 by +0x21c0. NOSWAP = "the picture of the button this entry's action is on, whatever the swap
   setting": the same codes as the PS4 font.
+- The PS4 printer has the opposite tokens too (`0xccbab7` R2 `0x2c553fae`, `0xccbdbc` L2 `0x539a5849`): `|R2|` draws
+  the R1 picture while the setting is 0 and the R2 picture otherwise, `|L2|` the L1 / L2 picture
+  (`0xccbaeb` / `0xccbf01`: the same `+0x4888` test with the two codes the other way round).
 
 Fix (runtime, menus.cpp; no import step, no new asset, no PS3 asset):
 
 1. At install: check the four records' bytes +8..+0x17 and the two token strings above. If any differ, log
    `menus: help bar shoulder records differ, Prev / Next icons left alone` and do nothing more.
-2. Keep two strings of our own: "|L1| " and "|R1| ".
-3. Every frame (from the per-frame page handler session.cpp already registers for every page): exchange = u32
-   `[0x1059640 + 0x4870]` != 0. For each of the four records: wanted = "|L1| " when (action 0xb and not exchange) or
-   (action 0xa and exchange), else "|R1| ". When the u64 at record +0 is not the address of wanted, write it (8 bytes;
-   the segment is read-only: make it writable for the write and put it back, as `netinit.cpp` `write_code` does with
-   `HostCodeWrite`) and log `menus: help bar shoulder icons %s` (`L1 / R1` or `exchanged`) once per change.
-   At the first write it also logs `menus: shoulder setting %u, exchange %u` (u32 `+0x4888`, `+0x4870`; test (a)).
+2. Keep four strings of our own: "|L1| ", "|R1| ", "|L2| ", "|R2| ".
+3. Every frame (from the per-frame page handler session.cpp already registers for every page): swapped = u32
+   `[0x1059640 + 0x4888]` == 0. For each of the four records: wanted = the token that draws the NOSWAP picture under
+   the current setting: action 0xb "|L1| " (not swapped) or "|L2| " (swapped), action 0xa "|R1| " or "|R2| ". The
+   `+0x4870` exchange word is not read (PS3's NOSWAP ignores the swap setting). When the u64 at record +0 is not the
+   address of wanted, write it (8 bytes; the segment is read-only: make it writable for the write and put it back,
+   as `netinit.cpp` `write_code` does with `HostCodeWrite`) and log `menus: help bar shoulder icons L1 / R1 (shoulder
+   setting %u: tokens %s)` (`|L1| / |R1|` or `|L2| / |R2|`) once per change of the setting.
    If a record cannot be made writable: log `menus: help bar record 0x%llx cannot be made writable (%lu), Prev /
    Next icons left alone` and stop the fix-up for the session.
 
-Built 2026-11-25 (`menus.cpp` `menus_help_bar_frame()`, called first in `session.cpp` `page_handler` after the
-version text; old-vs-new harness `menus`: scenarios HB-1 and HB-2). Not yet checked in the game.
+Built 2026-11-25, changed 2026-11-27 (owner: PS3 always shows L1 / R1, also with the L2 / R2 setting; the first
+version followed the setting and showed L2 / R2 with it at 0, the owner's `menus: shoulder setting 0, exchange 0`).
+`menus.cpp` `menus_help_bar_frame()`, called first in `session.cpp` `page_handler` after the version text; old-vs-new
+harness `menus`: scenarios HB-1 and HB-2. Not yet checked in the game.
 
-Result: "[L1] Prev [R1] Next" exactly as PS3 while the PS4 shoulder setting is on (the menu then runs Prev / Next
-from L1 / R1, as PS3); with the setting off (0, what the game's initializers `0x90dd64` / `0xdc6563` write before the
-options are applied by `0x9efa9a`, option id `0x9201cbe6`) the same entries show the L2 / R2 pictures, which are
-then the buttons that work. The PC prompt shim redraws codes 6-9 / 40-43 for keyboard
-and Xbox pads like every other button icon. If the owner wants L1 / R1 for Prev / Next whatever the setting, that is
-a change of the input mapper, not of the icons (not specified here).
+Result: "[L1] Prev [R1] Next" and "[R1] Store" / "[R1] Rewards" as PS3, whatever the PS4 shoulder setting. The PC
+prompt shim redraws codes 6-9 / 40-43 for keyboard and Xbox pads like every other button icon (code 6 / 8: the key
+bound to PS4 R1 / L1).
 
 Not covered: the PS4-only string "|R1_NOSWAP| %s" (`0xe8721f`, used once at `0x5ae6a0`) is equally undrawn.
 
-Tests: (a) read u32 `[0x1059640 + 0x4888]` and `+0x4870` in the running game (log them once at the first fix-up).
-(b) Multiplayer > Leaderboards: "△ Filter [L1] Prev [R1] Next □ Top of List" (setting on) or "[L2] / [R2]" (off);
-press the shown shoulder buttons: the board changes (Next, callback `0x64e120`: Kills -> Money -> Wins -> Co-op ->
-Kills; Prev, `0x64e0f0`: the other way). (c) Multiplayer page: the Store entry shows the R-side picture. (d) Keyboard /
-Xbox pad: the two pictures carry the bound key / Xbox labels. (e) Change the controller option in the game's
-options and come back: the pictures follow (one `menus: help bar shoulder icons` log).
+Tests: (a) Multiplayer > Leaderboards: "△ Filter [L1] Prev [R1] Next □ Top of List" with the shoulder setting on and
+off; press L1 / R1: the board changes (Next, callback `0x64e120`: Kills -> Money -> Wins -> Co-op -> Kills; Prev,
+`0x64e0f0`: the other way). (b) Multiplayer, Find Match and Custom Game pages: the Store / Rewards entry shows R1.
+(c) Keyboard / Xbox pad: the two pictures carry the bound key / Xbox labels. (d) Change the controller option in the
+game's options and come back: the pictures stay L1 / R1 (one `menus: help bar shoulder icons` log).
 PAGE_NET_TROPHIES: DROPPED (owner 2026-11-25: PC has no trophies). Its only route, BUTTON_NETTROPHIES, is removed by
 the overlay (3.1); the page stays in menu.bin unused and its title MENU_TITLE_TROPHIES (85ed01cc) and the button label
 f1b9728c are no longer served. Its list LIST_STATS stays: it is the game's own code (it reads NetPlayerData), and
