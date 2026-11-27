@@ -113,6 +113,12 @@ Status: **DONE (CHECK)** 2026-11-25. `gow3_pc/src/u2mp/ticker.cpp`: install chec
 logged once (`ticker: first text added ...` or `ticker: add left entry ...`). Rules: `overlay_rules.cpp`, test
 `u2mp-overlay-test`.
 
+Owner report 2026-11-27: the strip stays empty on PC (PS3 scrolls the results), although the log shows the first text
+added at start 770. Not explained from the code: the add places the text as PS3 does and the PS4 draw `0x5d6860` moves
+it by the frame delta and draws it clipped to the strip. ticker.cpp now logs the ticker state while the strip is drawn
+(every 4 s, 8 times: `ticker: t ... strip x .. y .. w .. h .., drawn ..; [k] start .. width .. "text"`), which shows
+whether the entries move, sit outside the strip or are freed.
+
 ## 2. "Respawn in [A]..." and the co-op "Tries Remaining" line
 
 ### 2.1 Where PS3 shows it
