@@ -119,7 +119,10 @@ Owner report 2026-11-27: the strip stayed empty on PC. A diagnostic run showed t
 the 2D command arena (the renderer's text case queues it with `0xbda9c0(0x124a000, struct, text)` and calls `0xcc9a70`
 only to measure). ticker.cpp points that call at `ticker_print`, which queues the same text struct and string in the
 arena (checked: the call's target and the queue function's first 11 bytes; else `ticker: the strip's text print
-stays direct, so the strip shows no text`). The diagnostic log is gone.
+stays direct, so the strip shows no text`). The diagnostic log is gone. Colours (owner report: values blue): the arena draws a
+`|@CAARRGGBB|` code with red and blue swapped, so PS3's gold value colour F0C828 came out light blue; the text gets
+its codes as AABBGGRR before it is added (`overlay::ticker_arena_colours`, test `u2mp-overlay-test`): labels white,
+names grey (999999), values gold, as PS3.
 
 ## 2. "Respawn in [A]..." and the co-op "Tries Remaining" line
 

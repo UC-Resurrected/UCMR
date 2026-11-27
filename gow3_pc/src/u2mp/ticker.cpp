@@ -109,7 +109,8 @@ void ticker_refresh() {
         return;
     next_refresh = now + kRefreshSeconds;
 
-    const std::string text = online::stats_ticker_text();
+    // PS3's colours (labels white, names grey, values gold) in the arena's colour order (ticker_print queues it there)
+    const std::string text = overlay::ticker_arena_colours(online::stats_ticker_text());
     if (text.empty()) return;
     if (text.size() >= overlay::kTickerTextMax) {   // the builder keeps it below 511 characters; never overflow
         log("ticker: text of %zu bytes is too long for an entry, not added", text.size());
