@@ -14,9 +14,9 @@
   <a href="https://discord.com/invite/T545xWcpSw"><img src="https://img.shields.io/badge/JOIN-DISCORD-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
-A free, non-commercial fan project that runs the PS4 *Uncharted: The Nathan Drake Collection* natively on Windows, using your own copy. Includes *Drake's Fortune*, *Among Thieves* and *Drake's Deception*, plus an experimental **Uncharted 2 & Uncharted 3 multiplayer restoration**.
+A free, **NON-COMMERCIAL** fan project that aims to run PS4 *Uncharted: The Nathan Drake Collection* natively on Windows, using your own copy. Includes *Drake's Fortune*, *Among Thieves* and *Drake's Deception*, plus **Uncharted 2 & Uncharted 3 multiplayer restoration**.
 
-The games' x86-64 code runs directly on your PC, with a runtime for PS4 system libraries and a Vulkan renderer. This fork adds a C++ launcher based on the original launcher.
+The games' x86-64 code runs directly on your PC, with a runtime for PS4 system libraries and a Vulkan renderer.
 
 > **No game files included. Legally obtained copies required.** Not affiliated with or endorsed by Sony Interactive Entertainment, Naughty Dog or Bluepoint Games.
 
@@ -24,7 +24,7 @@ The games' x86-64 code runs directly on your PC, with a runtime for PS4 system l
 
 - **Singleplayer:** All three games play, with working menus, game switching, saves, audio, cutscenes and controllers. Uncharted 2 and 3 have been played at up to 4K and above 60 FPS on fast GPUs; Uncharted 3 has had less testing.
 [Releases](../../releases)
-- **Multiplayer:** Still in testing, but you can try it out already! See the [**progress**](/assets/DEVELOPMENT_PLAN.md) for our long-term development plan! You can also join our [**Discord server**](https://discord.com/invite/T545xWcpSw) to play with the community or report any issues!
+- **Multiplayer:** Besta version, around 90% ported for both U2 and U3! See the [**progress**](/assets/DEVELOPMENT_PLAN.md) for our long-term development plan! We plan to add crossplay by introducing Linux support, and also PS3, PS4 and PS5 (research being made about how to approach this the best way possible, while keeping it legal). You can also join our [**Discord server**](https://discord.com/invite/T545xWcpSw) to play with the community or report any issues!
 
 ## Requirements
 
@@ -56,8 +56,9 @@ See [Controls and PC setup](tools/README-Windows.txt) for more help.
 
 Competitive, co-op and LAN party modes are restored through the **MULTIPLAYER** tab. Import requires your own copies and:
 
-- **PS4 Collection 1.02:** CUSA02320 (EU) or CUSA02343 (US); their 1.02 executables are byte-identical.
+- **PS4 Collection 1.02 . Any game region is supported!
 - **PS3 Uncharted 3 GOTY:** BCES01670, BCES01692, BCUS99086 or BCAS25014.
+- **PS3 Uncharted 2 GOTY:** At the moment, just NPUA80698.
 - **PS3 data:** The game folder and RPCS3's `dev_hdd0/game` folder with Uncharted 2 GOTY update **1.10** and Uncharted 3 GOTY update **1.19**, the game data install and DLC map packs.
 - **Executable:** Your Uncharted 2 decrypted 1.10 `EBOOT.elf` and Uncharted 3 decrypted 1.19 `EBOOT.elf`.
 - **Storage:** About **14 GB free**.
@@ -67,14 +68,14 @@ Press **IMPORT** and follow the progress log.  Conversion takes approximately 12
 ## Legal status
 
 - **No game content distributed:** The repository and releases contain no game files, game code or game-derived data. The launcher and importer download none; they use local files only.
-- **Your copies, local processing:** You need legally obtained PS4 and, for multiplayer, PS3 copies. Converted files and patched game images are made on your PC and never shared by the project.
+- **Your copies, local processing:** You need a legally obtained PS4 copy and, for multiplayer, PS3 copies. Converted files and patched game images are generated directly on your own PC and never shared by the project.
 - **No piracy or decryption:** The project does not obtain games, decrypt them or help bypass protection on games you do not own. It uses your own dumps and rejects encrypted store PKGs.
 - **Restoration code:** Multiplayer code was written from scratch to reproduce PS3 behaviour. Apart from short instruction patterns used to locate and verify patches, it contains no code from either game.
 - **No bundled game keys or secrets:** Online-profile values are read locally from your own decrypted PS3 executable and placed only in your locally built game image. They never leave your PC.
 - **Online service:** Community RPCN servers, with no connection to PlayStation Network, which no longer hosts these games' multiplayer.
 - **No affiliation:** Not endorsed or supported by Sony Interactive Entertainment, Naughty Dog, Bluepoint Games or their affiliates. *Uncharted* belongs to Sony Interactive Entertainment LLC; PlayStation, PS3, PS4 and PlayStation logos are trademarks of Sony Interactive Entertainment Inc. Game content and other trademarks belong to their owners and are used only for identification.
 - **Free and open source:** No donations, sales or ads. GPL v2 or later source is included for everything covered by that license. Provided “as is”, without warranty. See the license details below for separate packaged components.
-- **Rights holders:** [Open an issue](../../issues) with any concern; it will be reviewed promptly.
+- **Rights holders:** [Open an issue](../../issues) with any concern; it will be reviewed promptly!
 
 ## Contributing
 
@@ -88,11 +89,11 @@ A small number of regular contributors are welcome through fork-based pull reque
 - Build and release setup: `.github/workflows/`, `tools/release.sh`, `tools/VERSION`, launcher self-updates and `u3mp/patcher/maintainer/`.
 - Game files in any form. Fixes must be code or recipes that run on the player's PC.
 
-Comment on an issue and wait for a reply before starting. Submit one small fix per branch, rebased on `main`, with the problem, reproduction steps, changes and test results. The maintainer reviews, tests and merges. Follow [CONTRIBUTING.md](CONTRIBUTING.md); all pull requests are GPL v2 or later.
+Comment on an issue and wait for a reply before starting. Submit one small fix per branch, rebased on `main`, with the problem, reproduction steps, changes and test results. The maintainer reviews, tests and merges. If you are interested in contributing, please follow [CONTRIBUTING.md](CONTRIBUTING.md); all pull requests are GPL v2 or later. And thank you in advance! ❤️
 
 ## Credits and license
 
-- [**João Fidalgo**](https://github.com/fidalgojoao): launcher, Uncharted 2 and 3 multiplayer restoration, pak tools.
+- [**Johnny**](https://github.com/fidalgojoao): launcher, Uncharted 2 and 3 multiplayer restoration, pak tools.
 - [**Tha14**](https://github.com/Tha14): launcher, Uncharted 2 and 3 multiplayer.
 - [**33martyr**](https://github.com/33martyr): Uncharted 3 multiplayer map and character visual fixes.
 - [**BilalReloaded**](https://github.com/bc160201983): the [original PC port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port), whose PC runtime (`gow3_pc`) this project started from.
@@ -100,6 +101,6 @@ Comment on an issue and wait for a reply before starting. Submit one small fix p
 - **Online:** [RPCN](https://github.com/RipleyTom/rpcn) by RipleyTom and [RPCS3](https://github.com/RPCS3/rpcs3); this project is independent and not endorsed by either.
 - **Anti-aliasing:** camera motion follows [SuperMedo's Uncharted port](https://github.com/Supermedo/uncharted_pc) (GPL v2).
 - **DLSS / DLAA:** NVIDIA DLSS SDK 310.9.16; bridge adapted from [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) (MIT). NVIDIA, RTX and DLSS are NVIDIA trademarks.
-- **Libraries:** FSR, imgui, magic_enum, miniz, xbyak, LibAtrac9, FFmpeg, SDL3, Qt 6 (LGPL v3), Python, Pillow, NumPy, Opus, BearSSL; licenses in `licenses/`.
+- **Libraries:** FSR, imgui, magic_enum, miniz, xbyak, LibAtrac9, FFmpeg, SDL3, Qt 6 (LGPL v3), Python, Pillow, NumPy, Opus, BearSSL.
 - **License:** GNU GPL v2 or later ([LICENSE](gow3_pc/LICENSE)). The online components and the multiplayer helper are separate works outside the GPL: building this source alone gives no online play.
 - **Reusing:** keep the notices, publish your source under the same license, and link to [this project](https://github.com/UC-Resurrected/UCMR).
