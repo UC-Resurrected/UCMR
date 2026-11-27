@@ -158,6 +158,7 @@ u3_patcher() {   # the Uncharted 3 recipe and tools, and the newest multiplayer 
 launcher_core() {   # the launcher's native code: its core and the game starter
     bash launcher/native/build.sh
     cp launcher/native/libuncharted_native.so launcher/native/game_starter "$out/launcher/native/"
+    cp launcher/native/apply_update "$out/tools/"   # the launcher update's installer (as tools\apply_update.exe on Windows)
     cp tools/game_files_102.json.gz "$out/tools/"
     cp launcher/assets/UCMR.ico launcher/assets/icon.png launcher/assets/window_icon.bmp "$out/launcher/assets/"
 }

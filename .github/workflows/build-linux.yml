@@ -63,6 +63,7 @@ jobs:
           path: |
             launcher/native/libuncharted_native.so
             launcher/native/game_starter
+            launcher/native/apply_update
 
   # The importers (u2import, u3import, u3fix: tools/build_importers_linux.sh, the same sources as
   # tools/package_windows.sh) and the package's build tools. tools/importer_smoke.sh runs the importers' checks that
@@ -187,6 +188,9 @@ jobs:
           fi
           cat selfcheck.log
           grep -q 'self-check: window and launcher core ready' selfcheck.log
+          # the launcher update's installer, which an update of this package needs (updater.cpp REQUIRED)
+          "$pkg/tools/apply_update" --help | grep -q '^usage: apply_update' ||
+            { echo "::error title=package::tools/apply_update is missing or does not start"; exit 1; }
           OUT=$pkg bash tools/importer_smoke.sh
           # the game runtime (built on Ubuntu 24.04 by the runtime job): its libraries, and a start without a game where
           # this system's C library is new enough for it

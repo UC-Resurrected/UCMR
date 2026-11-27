@@ -23,6 +23,8 @@ if [[ $(uname -s) == Linux ]]; then
         -o libuncharted_native.so "${OBJECTS[@]}" -ldl -lpthread -lcurl -lz   # libcurl: the launcher update (updater.cpp); zlib: Steam artwork (steam.cpp)
     sha256sum libuncharted_native.so
     "${CXX[@]}" "${FLAGS[@]}" -s -static-libstdc++ -static-libgcc -o game_starter game_starter.cpp -ldl
+    # the launcher update's installer (apply.cpp: tools/apply_update in the package; it stands alone, as on Windows)
+    "${CXX[@]}" "${FLAGS[@]}" -s -static-libstdc++ -static-libgcc -o apply_update apply.cpp
     exit 0
 fi
 CLANG64=${CLANG64:-/c/msys64/clang64}
