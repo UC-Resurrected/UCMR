@@ -747,9 +747,9 @@ side, no behaviour change on Windows, the simplest form that does the full job.
 - The launcher core, the importers, the runtime and its unit tests build and run on Linux (§7.4); no game has been
   played on Linux yet (no game files in CI), so the runtime's Linux paths past the loader (guest memory, threads,
   files, the GPU on a real driver) are built and unit-tested but not seen in a game.
-- The shipped U3 multiplayer helper (v7.266) still looks for the Windows process block, which Linux does not have (its
-  `gs:0x60` read lands in the guest's zeroed thread block): every PC call is skipped there, so the game runs without
-  LAN or online play and without voice on Linux until helper v7.267 (the host table, §4.10) ships. The host table, the
+- U3 multiplayer helpers up to v7.266 looked for the Windows process block, which Linux does not have (their
+  `gs:0x60` read lands in the guest's zeroed thread block), so they skip every PC call there; helper v7.267 (release
+  0.10.173) reaches the PC through the host table (§4.10) on both systems, but no match has been played on Linux. The host table, the
   online programs and the Linux exec watch, profiler and old-CPU code were tested with unit tests and small test
   programs on a Linux kernel (WSL2), not in a game.
 - The Linux bodies of the imports, PLAY and the game start were built and run with made-up folders and `sh`, never

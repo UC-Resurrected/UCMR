@@ -47,9 +47,9 @@ What works in this preview
 - The launcher's own update: it updates itself once a release carries the Linux package; until
   then download the new tarball and extract it over this folder.
 - Online and LAN multiplayer: the online programs (the RPCN sign-in and Uncharted 2's online link)
-  have Linux builds in a release package, but no match has been played on Linux yet. Uncharted 3
-  finds its network on Linux only with the next multiplayer helper version (the one in this
-  package still looks for Windows).
+  have Linux builds in a release package, and the Uncharted 3 multiplayer helper (v7.267 and
+  newer) reaches the network through the game runtime on Linux as on Windows, but no match has
+  been played on Linux yet.
 - Not on Linux: DLSS (Windows only).
 
 Good to know
