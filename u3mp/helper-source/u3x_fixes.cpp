@@ -50731,7 +50731,7 @@ CG_FN uint32_t u3x_cg_mask(uintptr_t base, int match, uint32_t *n) {
 //  * R8 + the "likely bug": a guest restarts its time sync when the owner's settings event #2 arrives at 0x30 (the owner
 //    zeroed its net time before sending it); sub 29 (LoadLevels guest gate) holds the guest's ReadyToStart {start}
 //    until 8 samples since that restart. PS3 path: no limit; v7.252 path (mixed party, Custom Game only): samples
-//    count only after #2, at most 10 s; matchmaking guests pass as x023 did.
+//    count only after #2, at most 10 s; v7.267: matchmaking guests too (before: they passed as x023 did).
 extern "C" int u3x_jip2_ll_gate(uintptr_t base);   // v7.254 jip block (A7 R7): sub 29 for a late joiner
 #define ST_FN [[gnu::section(".text.ext"), gnu::noinline, clang::minsize]]
 #define ST_RO [[gnu::section(".rodata.ext")]]
@@ -51055,7 +51055,12 @@ ST_FN int loadlevels_gate(uintptr_t base) {   // H2, sub 29 (replaces the owner 
     if ((ext_eb()[0] & 8u) || at<uint32_t>(base + v7252::JIP_STATUS) == 6) return 0;   // no sync / a late joiner: as x023
     const uint32_t t = v7252::now(base);
     const bool on = member_on(room);
-    if (!on && at<uint32_t>(base + MODE) != 2) return 0;   // v7.252 path: the hold is for the Custom Game start only
+    // v7.252 path: the hold is for the Custom Game start (mode 2). v7.267: and the matchmaking start (mode 1): a guest
+    // that left LoadLevels on an unsynced net clock (no samples since the owner zeroed its time at settings #2) played
+    // ~2 minutes with every remote character on its newest snapshot only (frozen on both PCs, the owner invisible to
+    // the guest) until its time sync caught up (2026-11-27 test, 99.5% newest-only picks until then, 0 after)
+    const uint32_t mode = at<uint32_t>(base + MODE);
+    if (!on && mode != 2 && mode != 1) return 0;
     if (!st.hold.seen || t - st.hold.seen > 2 * TICKS) {   // entering: no restart for this match yet = restart here
         Line l;
         if (st.restart_room != room) {

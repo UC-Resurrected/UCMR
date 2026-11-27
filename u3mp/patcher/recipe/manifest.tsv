@@ -559,6 +559,7 @@ overlay-r3	u3data/build/main/dc1/ps4/skel-retargets.bin	30993	1237caf2ab9c7b1a20
 overlay-r3	u3data/build/main/dc1/ps4/ss-coop-adv-fort.bin	446067	2640b620b64e6371caa9a14669a85f8d0c8aba69acd038ca96e9db8011026269	1793586023
 overlay-r3	u3data/build/main/dc1/ps4/vox-mp.bin	154477	637d7d389d87f03366482b90087ab170507c226edc663268d2be49853bb68bc5	1793568555
 overlay-r3	u3data/build/main/dc1/ps4/vox.bin	145767	9247aac73c256fc57d284ea72ddd677fa841bf813a831aa753e3a5ddb6a83fa7	1793587797
+overlay-r3	u3data/build/main/dc1/ps4/water-parameters.bin	39484	1ca56e17f9ddc18eacae40b639cbe9570455e01546054362c6bebcb1c7658081	1795730706
 overlay-r3	u3data/build/main/dc1/ps4/weapon-art.bin	87429	1ec3bdd57b4c1c6762164c52e675a63d173328826bc530bff8102af71c6c1cc9	1793540238
 overlay-r3	u3data/build/main/dc1/ps4/weapon-gameplay.bin	40044	35d0c8a0c0659d8eddde11e6ab12694e8073c9419623d14b41925e0e620b636b	1793271645
 overlay-r3	u3data/build/main/dc1/ps4/render-settings/game/cave-multi.bin	9722	992ab5c90d7ba0f3a258036e9741a3a081e598360a626f87a3e571da5ffe57a3	1793198994
