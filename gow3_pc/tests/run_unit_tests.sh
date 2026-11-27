@@ -2,7 +2,7 @@
 # Builds and runs the unit tests that need no game (gpu/CMakeLists.txt, EXCLUDE_FROM_ALL targets) in a configured
 # build folder: bash tests/run_unit_tests.sh out/gpu [test ...]. Used by build.sh --test and the Linux CI. Each test
 # runs from gpu/ (its data paths are relative to it); a failing build or run is named, and in GitHub Actions also
-# annotated. isa-test is Windows-only (runtime_isa.c works on a Windows CONTEXT). On Windows run the tests that write
+# annotated. isa-test needs a CPU with MOVBE, BMI1, LZCNT and F16C (it compares the emulation with it). On Windows run the tests that write
 # temporary files from PowerShell, not MSYS2 bash (its TMP is a POSIX path).
 set -uo pipefail
 cd -- "$(dirname -- "$0")/.."
@@ -29,7 +29,7 @@ if (( ${#tests[@]} == 0 )); then
         tsc-clock-test pokes-test name-dictionary-test debug-menus-test u3-tonemap-test u3-job-trace-test
         u2mp-net-test u2mp-voice-test u2mp-progression-test u2mp-events-test u2mp-roster-test u2mp-gamenet-test
         u2mp-cinema-test u2mp-peer-rules-test u2mp-overlay-test u2mp-clantag-test u2mp-start-rules-test
-        u2mp-presence-test u2mp-coop-rules-test host-api-test
+        u2mp-presence-test u2mp-coop-rules-test host-api-test isa-test
     )
 fi
 # test arguments (data files, relative to gpu/)

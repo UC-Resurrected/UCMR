@@ -315,14 +315,11 @@ set_target_properties(clocks-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
 target_compile_options(clocks-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(clocks-test PRIVATE .. ../src)
 target_link_libraries(clocks-test PRIVATE ${GOW3_TEST_LIBS} -pthread)
-if (WIN32)
-    # gow3 1 Nov 2026: runtime_isa.c (old-CPU instruction emulation) against the CPU; Windows only until the
-    # emulation has a Linux body (it works on a Windows CONTEXT).
-    add_executable(isa-test EXCLUDE_FROM_ALL ../tests/test_isa.c ../src/runtime_isa.c)
-    set_target_properties(isa-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(isa-test PRIVATE -Wall -Wextra -Werror)
-    target_link_libraries(isa-test PRIVATE Zydis::Zydis)
-endif()
+# gow3 1 Nov 2026: runtime_isa.cpp (old-CPU instruction emulation) against the CPU, on a Windows CONTEXT or a Linux
+# ucontext_t ("isa-test fast": the stubs too). Needs a CPU that has MOVBE, BMI1, LZCNT and F16C (the native side).
+add_executable(isa-test EXCLUDE_FROM_ALL ../tests/test_isa.cpp ../src/runtime_isa.cpp)
+target_compile_options(isa-test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(isa-test PRIVATE Zydis::Zydis)
 # gow3 1 Nov 2026 (#311): save data backup at unmount and repair at mount.
 add_executable(savedata-test EXCLUDE_FROM_ALL ../tests/test_savedata.c ../src/runtime_savedata.c ${GOW3_TEST_HOST})
 set_target_properties(savedata-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
