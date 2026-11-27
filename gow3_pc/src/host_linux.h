@@ -35,6 +35,14 @@ unsigned char *host_linux_alloc_between(uintptr_t lo, uintptr_t hi, size_t bytes
  * Returns 1 when it changed path. */
 int host_linux_fold_case(char *path, size_t fixed_length);
 
+/* In host_linux_shared.cpp, which the runtime's tests link (as they link compat_win.c on Windows) without the signal
+ * handlers of host_linux.cpp: */
+/* The CPU's time stamp counter frequency in Hz, measured across a 100 ms sleep (GOW3_NATIVE_TSC, runtime_kernel.c). */
+uint64_t host_linux_tsc_hz(void);
+/* Deletes path and everything below it (symbolic links themselves, not what they point to); 0 when it is gone or was
+ * never there, -1 when something could not be deleted. The Windows body is in compat_win.c. */
+int compat_remove_tree(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

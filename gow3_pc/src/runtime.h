@@ -10,6 +10,7 @@ typedef gow3_jmp_buf sigjmp_buf;
 #define sigsetjmp(buffer, save) gow3_setjmp(buffer)
 #else
 #include <setjmp.h>
+#include "host_linux.h"
 #endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;

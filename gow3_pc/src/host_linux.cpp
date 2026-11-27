@@ -96,20 +96,27 @@ void report(int sig, siginfo_t *info, ucontext_t *uc) {
     _exit(128 + sig);
 }
 
+// How deep the fault handler runs inside itself on this thread (fault below).
+thread_local int fault_depth;
+
+void fault_level(int sig, siginfo_t *info, void *context);
+
 void fault(int sig, siginfo_t *info, void *context) {
-    ucontext_t *uc = static_cast<ucontext_t *>(context);
-    greg_t &rip = uc->uc_mcontext.gregs[REG_RIP];
     // A fault in the handler itself is legitimate a level or two deep (a GPU handler touching another tracked page);
-    // deeper than that is a bug: report and stop (SA_NODEFER lets the nested signal in).
-    static thread_local int depth;
-    if (depth >= 8) {
+    // deeper than that is a bug: report and stop (SA_NODEFER lets the nested signal in). The count is kept by hand,
+    // not by a destructor, because the recovery path leaves through siglongjmp.
+    if (fault_depth >= 8) {
         put("Fault handler: faulted inside itself 8 levels deep\n");
         _exit(128 + sig);
     }
-    struct Level {
-        Level() { ++depth; }
-        ~Level() { --depth; }
-    } level;
+    ++fault_depth;
+    fault_level(sig, info, context);
+    --fault_depth;
+}
+
+void fault_level(int sig, siginfo_t *info, void *context) {
+    ucontext_t *uc = static_cast<ucontext_t *>(context);
+    greg_t &rip = uc->uc_mcontext.gregs[REG_RIP];
     // Uncharted 3, 10 Nov 2026: Naughty Dog's assertion trap, int 0x41 (cd 41), after the assertion's message. The
     // console returns from it and the game goes on; Linux reports it as a general protection fault (SIGSEGV from
     // the kernel). Stepped over and logged once per address.
@@ -181,7 +188,7 @@ void fault(int sig, siginfo_t *info, void *context) {
             sigemptyset(&unblock);
             sigaddset(&unblock, sig);
             pthread_sigmask(SIG_UNBLOCK, &unblock, nullptr);
-            --depth;
+            --fault_depth;
             siglongjmp(*recover, 1);
         }
     }
@@ -284,6 +291,15 @@ extern "C" void host_linux_restart(void) {
     execl("/bin/sh", "sh", "-c", command, static_cast<char *>(nullptr));
     std::perror("runtime_restart: exec");
     _exit(1);
+}
+
+// The exec watch (probe.c, GOW3_EXEC_WATCH, hardware breakpoints set through the Windows thread context) has no Linux
+// body yet; the GPU library's GOW3_SRT_WATCH diagnostics asks for one through this call. Said once, then ignored.
+extern "C" void runtime_exec_watch_retarget(uint64_t address) {
+    static bool said;
+    if (said) return;
+    said = true;
+    std::fprintf(stderr, "Exec watch: not on Linux yet (watch of 0x%" PRIx64 " ignored)\n", address);
 }
 
 extern "C" unsigned char *host_linux_alloc_between(uintptr_t lo, uintptr_t hi, size_t bytes, int prot) {

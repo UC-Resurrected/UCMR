@@ -10,6 +10,10 @@
 // x86-64 has one C calling convention; the Windows keyword marks it in function pointer types.
 #define __cdecl
 
-// _putenv_s(name, value): set (or replace) one environment variable of this process.
-inline int _putenv_s(const char *name, const char *value) { return setenv(name, value, 1) == 0 ? 0 : errno; }
+// _putenv_s(name, value): set (or replace) one environment variable of this process; an empty value removes it, as on
+// Windows.
+inline int _putenv_s(const char *name, const char *value) {
+    const int failed = *value ? setenv(name, value, 1) : unsetenv(name);
+    return failed == 0 ? 0 : errno;
+}
 #endif

@@ -36,7 +36,7 @@ fi
 args_of() {
     case $1 in
     mp3-test) echo ../tests/data/sine.mp3 ;;
-    videodec-test) echo ../tests/data/tiny.h264 ;;
+    videodec-test|videodec2-test) echo ../tests/data/tiny.h264 ;;
     esac
 }
 annotate() { [[ -n ${GITHUB_ACTIONS:-} ]] && echo "::error title=$1::$(tr '\n' ' ' < "$2" | cut -c1-900)"; }

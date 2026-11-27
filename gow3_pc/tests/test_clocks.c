@@ -22,7 +22,6 @@ int main(void) {
     assert(process_time_frequency()==tsc_frequency());
     const double proc_elapsed=(double)(proc_end.sec-proc_begin.sec)+(double)(proc_end.nsec-proc_begin.nsec)/1e9;
     assert(proc_elapsed/elapsed>0.98 && proc_elapsed/elapsed<1.02);
-#ifdef _WIN32
     if (native_tsc_hz) {
         const uint64_t raw_begin=__rdtsc();
         sleep_ns(100000000);
@@ -30,6 +29,5 @@ int main(void) {
         const double raw_elapsed=(double)(raw_end-raw_begin)/frequency;
         assert(raw_elapsed>0.09 && raw_elapsed<0.2);
     }
-#endif
     puts("Clock API and inline CPU clock agree with elapsed time");
 }

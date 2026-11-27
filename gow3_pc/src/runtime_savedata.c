@@ -18,8 +18,6 @@
 #include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
-#else
-#include <ftw.h>
 #endif
 
 #define ERR_PARAMETER ((int32_t)0x809F0000)
@@ -107,14 +105,8 @@ static int read_param(const char *meta, Param *p) {
     if (!stat(path,&st)) p->mtime=st.st_mtime;
     return n==1 ? 0 : -1;
 }
-#ifdef _WIN32
+/* compat_win.c on Windows, host_linux_shared.cpp on Linux */
 static void remove_tree(const char *path) { compat_remove_tree(path); }
-#else
-static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
-    (void)st; (void)flag; (void)ftw; return remove(path);
-}
-static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
-#endif
 
 /* 1 Nov 2026 (GitHub #311, a power cut while playing Uncharted 2, the save was gone): on the
  * PS4 a save is committed when the game unmounts it. Here the game writes the files in place,
