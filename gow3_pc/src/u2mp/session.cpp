@@ -2539,25 +2539,39 @@ U2MP_GUEST void state_send_trace(void *tracker) {
     ++calls;
 }
 
-U2MP_GUEST void button_multiplayer(void *, void *, void *) {
-    log("Multiplayer selected");
-    multiplayer_page_seen = false;
-    netheap_install();
-    netinit_prepare();
-    progression_multiplayer_entered();   // the PS3 NetInit leaderboard start-over (progression.md 1.5.19)
-    netpatch_load();
-    if (!active) {
-        voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)
-        if (!start_transport()) {
-            // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
-            log("Multiplayer could not start: network message, staying in the main menu");
-            close_transport();
-            online::on_transport_closed("Multiplayer could not start");
-            game_message_box(kNoNetworkText, 0);
-            return;
-        }
-        active = true;
-    }
+// ---- Multiplayer entry: the connecting page (PS3 PAGE_MULTIPLAYER_CONNECTING) ---------------------------------
+// On PS3 the main menu's Multiplayer button starts the network start-up and shows PAGE_MULTIPLAYER_CONNECTING: the
+// "Connecting..." box with a progress bar, which follows the start-up's step count, then the Multiplayer page (or a
+// message box over the main menu when the network cannot start). PS4 kept the page and its control: the label is
+// text ad9f50d9 and the bar shows netInfo +0x2c0 as steps of 44 (0x5ae980); nothing writes that word on PS4. Ours:
+// the button shows the page; a page handler runs our start-up over the next frames (the same calls as before, in the
+// same order), moves the bar with it and then opens the Multiplayer page. The box stays at least kConnectingShown
+// seconds so it can be seen (PS3's start-up took seconds; ours takes a few frames).
+constexpr uint32_t kPageConnecting = sid("PAGE_MULTIPLAYER_CONNECTING");
+static_assert(kPageConnecting == 0x9e1863b1u, "connecting page id");
+constexpr uint64_t kConnectSteps = 0x2c0;   // netInfo s32: start-up steps done, the bar shows steps / 44
+constexpr int32_t kConnectStepCount = 44;
+constexpr double kConnectingShown = 1.0;
+
+struct Connecting {
+    bool on = false;
+    int step = 0;
+    double since = 0.0;
+};
+Connecting connecting;
+
+void set_connect_steps(int32_t steps) { put<int32_t>(g(kNetInfo) + kConnectSteps, steps); }
+
+// The connecting page is on top: take it off (the Multiplayer page or the main menu comes back under it).
+void pop_connecting_page() {
+    uint8_t *m = menu();
+    const int32_t top = get<int32_t>(m + 0x1010);
+    uint8_t *page = top >= 0 && top <= 0x40 ? ptr_at(m + 0x9d0 + 8 * uint64_t(top)) : nullptr;
+    if (page && get<uint32_t>(page + 0x10) == kPageConnecting) guest<void(U2MP_GUEST *)(void *)>(kPopPage)(m);
+}
+
+// The rest of the Multiplayer entry once the network runs (unchanged from the direct entry).
+void enter_multiplayer() {
     g(kNetInfo)[0x1c] = 0;
     put<int32_t>(g(kNetInfo) + 0x34, 0);
     put<int16_t>(ngm() + 0x1ca0, -1);
@@ -2570,6 +2584,66 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     keep_net_package();
     preload_packages();
     show_page(kPageMultiplayer);
+}
+
+// One start-up step per frame while the connecting page is up.
+U2MP_GUEST void connecting_handler(uint32_t *event) {
+    if (!event || event[0] != 6 || !connecting.on) return;   // 6: per-frame update
+    switch (connecting.step) {
+    case 0:
+        netheap_install();
+        netinit_prepare();
+        progression_multiplayer_entered();   // the PS3 NetInit leaderboard start-over (progression.md 1.5.19)
+        netpatch_load();
+        set_connect_steps(kConnectStepCount / 2);
+        connecting.step = 1;
+        return;
+    case 1:
+        if (!active) {
+            voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)
+            if (!start_transport()) {
+                // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
+                log("Multiplayer could not start: network message, staying in the main menu");
+                connecting.on = false;
+                pop_connecting_page();
+                close_transport();
+                online::on_transport_closed("Multiplayer could not start");
+                game_message_box(kNoNetworkText, 0);
+                return;
+            }
+            active = true;
+        }
+        connecting.step = 2;
+        return;
+    default: {
+        const double shown = gamenet::clock() - connecting.since;
+        const double part = shown >= kConnectingShown ? 1.0 : shown / kConnectingShown;
+        set_connect_steps(kConnectStepCount / 2 + int32_t(part * double(kConnectStepCount / 2)));
+        if (shown < kConnectingShown) return;
+        connecting.on = false;
+        log("connecting page done (%.1f s)", shown);
+        pop_connecting_page();
+        enter_multiplayer();
+        return;
+    }
+    }
+}
+
+U2MP_GUEST void button_multiplayer(void *, void *, void *) {
+    log("Multiplayer selected");
+    if (connecting.on) return;
+    multiplayer_page_seen = false;
+    set_connect_steps(0);
+    connecting = {true, 0, gamenet::clock()};
+    // The handler stays in the table afterwards (inactive); adding it again finds it there.
+    if (!add_page_handler(reinterpret_cast<void *>(&connecting_handler))) {
+        log("connecting page: no page handler slot, entering Multiplayer directly");
+        uint32_t frame[1] = {6};
+        connecting.since -= kConnectingShown;   // no page to show: the same steps at once
+        while (connecting.on) connecting_handler(frame);
+        return;
+    }
+    show_page(kPageConnecting);
 }
 
 // ---- player rows (PS3 0x4bc728 party / lobby, 0x4bfac8 matchmaking) ----------------------------------------
