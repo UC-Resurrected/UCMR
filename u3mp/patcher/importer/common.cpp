@@ -307,16 +307,44 @@ uint64_t tree_size(const fs::path &folder) {
     }
     return n;
 }
-void rmtree(const fs::path &p) {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
 #ifdef _WIN32
-        SetFileAttributesW(it->path().c_str(), FILE_ATTRIBUTE_NORMAL);
+// One entry and everything below it. A link (a junction, a symbolic link) is removed itself and never entered:
+// std::filesystem takes a junction for an ordinary folder, so remove_all would delete the files it points to (the
+// hard-link view of earlier versions links the player's own PS4 game folders that way).
+static void rmtree_entry(const std::wstring &p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) return;
+    const bool link = a & FILE_ATTRIBUTE_REPARSE_POINT, dir = a & FILE_ATTRIBUTE_DIRECTORY;
+    if (dir && !link) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((p + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                const std::wstring n = fd.cFileName;
+                if (n != L"." && n != L"..") rmtree_entry(p + L"\\" + n);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    if (!link && (a & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(p.c_str(), a & ~DWORD(FILE_ATTRIBUTE_READONLY));
+    if (dir) RemoveDirectoryW(p.c_str());
+    else DeleteFileW(p.c_str());
+}
+#endif
+void rmtree(const fs::path &p) {
+#ifdef _WIN32
+    std::wstring w = p.native();
+    for (wchar_t &c : w)
+        if (c == L'/') c = L'\\';
+    while (w.size() > 3 && w.back() == L'\\') w.pop_back();
+    rmtree_entry(w);
 #else
+    std::error_code ec;   // here remove_all removes a symbolic link itself, never what it points to
+    for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
         if (std::error_code e2; it->is_directory(e2) && !it->is_symlink(e2))   // a read-only folder keeps its files here
             fs::permissions(it->path(), fs::perms::owner_all, fs::perm_options::add, e2);
-#endif
     fs::remove_all(p, ec);
+#endif
 }
 bool rmtree_retry(const fs::path &p, double seconds) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(int64_t(seconds * 1000));

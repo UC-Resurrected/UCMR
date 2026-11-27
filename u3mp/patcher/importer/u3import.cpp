@@ -485,7 +485,7 @@ void discard_next(const fs::path &data) {
 fs::path ps4_manifest(const Args &a, const fs::path &data) {
     const fs::path manifest = data / "ps4-manifest.tsv";
     std::error_code ec;
-    if (present(data / "ps4-view")) {   // the hard-link view of earlier versions (rmtree never follows its junctions)
+    if (present(data / "ps4-view")) {   // the hard-link view of earlier versions (rmtree removes its junctions, never what they link)
         rmtree(data / "ps4-view");
         log("PS4 game: the hard-link view of an earlier version was removed");
     }
