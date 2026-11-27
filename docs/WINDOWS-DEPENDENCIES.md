@@ -29,8 +29,10 @@ checks for its own updates over libcurl, and `u2import`, `u3import` and `u3fix` 
 §4.8). Phase 3 is done too: the Qt window runs on Linux (§4.2) and every push builds `UCMR_linux.tar.gz` (§7.4, §7.5).
 Phase 4 is done in code: one `gow3-probe` CMake target for both systems, the runtime's Linux platform functions in C++
 (`host_linux.cpp`, `host_linux_shared.cpp`), the unit tests out of `if (WIN32)`, and the runtime in the Linux package
-(§4.3–§4.6). The runtime starts on Linux and its tests pass there; no game has been played on Linux yet, and online
-and LAN multiplayer wait for phase 5. Phase 6 is done for the launcher (Add to Steam, shortcuts, freeze report, memory monitor, window icon) and phase 7 for the launcher update on Linux; still open: phase 5, the runtime parts of phase 6 and the release job (§13).
+(§4.3–§4.6). The runtime starts on Linux and its tests pass there; no game has been played on Linux yet. Phase 5 is
+done in code: the runtime's host function table, the helper's one PC backend over it (helper v7.267, not shipped yet:
+it needs a LAN and online test first) and both online programs on Linux. Phase 6 is done except DLSS and the U2 crash
+log (§13), phase 7 except the AppImage (the tarball comes first, as decided).
 
 ## How to help
 
@@ -49,8 +51,9 @@ This is a large job and contributions are welcome. To keep two people from chang
    what CI will use).
 5. **Update this file** in the same PR: mark the row done (or "Linux body is a stub"), so the next person sees the
    current state.
-6. Not yet open for outside work: the U3 helper's PC backend (§4.10, phase 5) and the online programs. They depend on
-   the shared host-function table and on code outside this repository; the maintainers do those.
+6. The U3 helper's PC backend (§4.10) and the online programs depend on code outside this repository; the maintainers
+   change those. The host function table (`gow3_pc/src/uncharted_host.h`, `runtime_host_api.cpp`) is open like any
+   other runtime file, but its layout is fixed (version 1): new functions go at the end with a new version.
 
 Contents
 
@@ -130,11 +133,12 @@ files, `U3VOICE_ABI` 19 uses, plain `__attribute__((sysv_abi))` 41 uses in `u3fi
    read-only image: either ship the Linux build as a folder/tarball with the same layout (same updater flow), or make
    the AppImage keep its data root outside the image. See §7.6.
 7. **Online programs** (`uncharted_online.exe`, `u2_online.exe`, built outside this repository) use Winsock, BCrypt
-   and DPAPI (`CryptProtectData`) for the stored sign-in token. Linux needs BSD sockets, `getrandom`, and a decision
-   for the token store (Secret Service or a `0600` file).
-8. **Windows-only runtime features with Linux stubs today:** old-CPU instruction emulation (`runtime_isa.c`, a `#UD`
-   handler on `CONTEXT`), freeze report / minidump (`hang.cpp`, dbghelp), guest profiler (`gow3_profiler.cpp`), DLSS
-   (MSVC bridge). They can ship as "not available on Linux" first and gain Linux bodies later.
+   and DPAPI (`CryptProtectData`) for the stored sign-in token. **Done** (phase 5): the same sources build
+   `uncharted_online` and `u2_online` on Linux (BSD sockets with Winsock error numbers, own hashes, the token in the
+   `0600` settings file as decided); the Linux package job builds them on Ubuntu 22.04.
+8. **Windows-only runtime features with Linux stubs:** old-CPU instruction emulation, the freeze report and the guest
+   profiler have Linux bodies now (phase 6); minidumps (dbghelp) have no Linux counterpart without a debugger, and DLSS
+   (MSVC bridge) stays Windows-only.
 
 ## 3. Already portable: do not redo
 
@@ -223,12 +227,12 @@ own `CreateProcessW` body unchanged beside the Linux one. `launcher/native/port_
 
 | File | Lines | Sites | Windows constructs | Linux body | Effort |
 |---|---:|---:|---|---|---|
-| `probe.c` (loader, fault handler) | 1 643 | 125 | VEH (`AddVectoredExceptionHandler`, `EXCEPTION_*`, `CONTEXT`), `SetUnhandledExceptionFilter`, `RtlLookupFunctionEntry`/`RtlVirtualUnwind`, TEB (`NtCurrentTeb`, stack bounds), `VirtualAlloc`/`VirtualQuery`/`FlushInstructionCache`, toolhelp thread suspend for the exec watch, `GetModuleFileNameA`, `CreateProcessA` restart (`GOW3_RESTART_COMMAND`), TEB TLS slot patch (`patch_tcb_loads`) | **done**: the Linux signal handlers, the watchdog (off unless `--timeout`, as Windows has none), the restart and the near-image stub memory are C++ in `host_linux.cpp`; they step over the `int 0x41` assertion trap and a lone `int3` as the Windows handler does, and a crash on a pipeline cache warm-up thread leaves the cache mark. Still Windows-only: the exec watch (`GOW3_EXEC_WATCH`; Linux says "not on Linux yet"), guest affinity/scheduling | M — **done** (exec watch: phase 6) |
+| `probe.c` (loader, fault handler) | 1 643 | 125 | VEH (`AddVectoredExceptionHandler`, `EXCEPTION_*`, `CONTEXT`), `SetUnhandledExceptionFilter`, `RtlLookupFunctionEntry`/`RtlVirtualUnwind`, TEB (`NtCurrentTeb`, stack bounds), `VirtualAlloc`/`VirtualQuery`/`FlushInstructionCache`, toolhelp thread suspend for the exec watch, `GetModuleFileNameA`, `CreateProcessA` restart (`GOW3_RESTART_COMMAND`), TEB TLS slot patch (`patch_tcb_loads`) | **done**: the Linux signal handlers, the watchdog (off unless `--timeout`, as Windows has none), the restart and the near-image stub memory are C++ in `host_linux.cpp`; they step over the `int 0x41` assertion trap and a lone `int3` as the Windows handler does, and a crash on a pipeline cache warm-up thread leaves the cache mark. The exec watch (`GOW3_EXEC_WATCH`, `GOW3_EXEC_WATCH_FILE`) is in `host_linux.cpp` too (phase 6): one hardware breakpoint per watch and thread through `perf_event_open` with a synchronous `SIGTRAP` (`TRAP_PERF`; Linux 5.13 or newer, `perf_event_paranoid` 2 or less), logged in the Windows format. Still Windows-only: guest affinity/scheduling | M — **done** |
 | `compat_win.c` / `compat_win.h` | 253 / 88 | 44 | Windows-only by design: `pread`/`pwrite`/`fsync`/`realpath`/`mkdir` shims, `timeBeginPeriod`, high-resolution waitable timers, `BCryptGenRandom`, `GetProcessTimes`, `gow3_setjmp`/`gow3_longjmp` (asm), `compat_remove_tree` | Not compiled on Linux (the POSIX calls are native); `compat_remove_tree` has its Linux body in `host_linux_shared.cpp` (`std::filesystem::remove_all`), which the Linux tests link as the Windows tests link `compat_win.c` | none |
 | `runtime_memory.c` | 1 192 | 32 | `VirtualAlloc2` placeholders for the PS4 range, `VirtualProtect`/`VirtualQuery`/`VirtualFree` | `mmap`/`mprotect` bodies exist (`#else` at 405–430); build and tests checked on Linux | S — **done** (no game run yet) |
 | `runtime_thread.c` | 538 | 29 | TEB TLS slot for the guest TCB (`TlsAlloc`, `gs:[0x1480+8*slot]`), `__chkstk`/`StackLimit` widening, `SetThreadDescription`, affinity, priorities | `arch_prctl(ARCH_SET_GS)` exists; `pthread_setname_np`, `pthread_setaffinity_np`; build and tests checked on Linux | S — **done** (no game run yet) |
-| `runtime_redzone.c` | 727 | 29 | Windows-only: rewrites guest leaf functions because Windows exception frames overwrite the red zone | Linux stub present (signal frames skip the 128-byte red zone): nothing to do | none |
-| `runtime_isa.c` | 1 201 | 20 | Windows-only: emulates MOVBE/BMI1/F16C/LZCNT/TZCNT on CPUs without them, on a `CONTEXT` | Linux stub returns "inactive": old CPUs unsupported on Linux until the emulation reads a `ucontext_t` (shared code behind a small register-view struct) | M (later, phase 6) |
+| `runtime_redzone.cpp` (was `.c`) | 727 | 29 | Rewrites guest leaf functions because Windows exception frames overwrite the red zone; the same pass prepares the old-CPU instructions | **done** (phase 6, C++): signal frames skip the 128-byte red zone, so on Linux only the old-CPU part runs (the functions from `.eh_frame_hdr`, LZCNT/TZCNT to their faulting form) when `runtime_isa` is on | S — **done** |
+| `runtime_isa.cpp` (was `.c`) | 1 201 | 20 | Emulates MOVBE/BMI1/F16C/LZCNT/TZCNT on CPUs without them, on a `CONTEXT` | **done** (phase 6, C++): one emulation over a small register view, a `CONTEXT` or a `ucontext_t` (the YMM upper halves from the signal frame's XSAVE area); the stubs' helpers use `ms_abi` on Linux too, so the stub bytes are the same. `isa-test` runs on both (on Windows all three modes pass; on Linux the register view was checked on a real kernel, the whole test runs in CI) | M — **done** |
 | `runtime_file.c` | 718 | 10 | `_stat64` + reparse-point fix (UCRT symlink stat), `GetDiskFreeSpaceExA`, `MoveFileExA`, `_chsize_s`, drive-root handling | `statvfs`, `rename`, `ftruncate` bodies exist; **done**: a name the game asks for in another case is looked up in the game folder (`host_linux_fold_case`, only when the path does not exist as written, §8.4) | M — **done** |
 | `runtime_kernel.c` | 426 | 5 | `QueryPerformanceCounter`, `Sleep`, `__rdtsc` native TSC | `clock_gettime`/`nanosleep` exist; **done**: `GOW3_NATIVE_TSC` (which the launcher turns on for every game) measures the TSC against the monotonic clock on Linux (`host_linux_tsc_hz`), so the guest's inline `rdtsc` and the reported frequency agree on both systems | S — **done** |
 | `runtime_services.c` | 925 | 4 | Winsock headers | BSD sockets exist | S — **done** |
@@ -244,8 +248,8 @@ avoids touching each file twice.
 | `pokes.cpp` | unguarded `<windows.h>`, `CreateThread`, `ReadProcessMemory`/`WriteProcessMemory` on its own process (so unmapped addresses are skipped, not faulted) | **done**: `std::thread` on both; Linux reads and writes through `/proc/self/mem`, so an unmapped address is skipped there too (Windows keeps `Read/WriteProcessMemory`) | S — **done** |
 | `name_dictionary.cpp` | `FindFirstFileW`, `_wfopen` (guarded) | both bodies present (builds and its test passes on Linux) | S — **done** |
 | `u2mp/session.cpp:3054` | `_putenv_s` (unguarded) | **done** without touching the file: `src/linux_compat.h` (force-included into the runtime's C++ on Linux only) maps `_putenv_s` to `setenv`/`unsetenv` (an empty value removes the variable, as on Windows) | S — **done** |
-| `u2mp/u2_online_abi.h` | 30 `__cdecl` function pointer types | **done** without touching the file: `linux_compat.h` defines `__cdecl` empty (x86-64 has one C convention). U2 online stays off on Linux until its online program has a Linux build (phase 5) | S — **done** |
-| `u2mp/crashlog.cpp` | VEH, `RtlVirtualUnwind`, `psapi` | `#else` stub exists; Linux crash log via `sigaction` + frame walk later | M (later, phase 6) |
+| `u2mp/u2_online_abi.h` | 30 `__cdecl` function pointer types | **done** without touching the file: `linux_compat.h` defines `__cdecl` empty (x86-64 has one C convention). The online program has a Linux build since phase 5 (`u2_online`, built by the Linux package job) | S — **done** |
+| `u2mp/crashlog.cpp` | VEH, `RtlVirtualUnwind`, `psapi` | `#else` stub exists; Linux crash log via `sigaction` + frame walk later (left to the `u2mp` maintainer; the runtime's own fault report covers Linux crashes meanwhile) | M (u2mp maintainer) |
 | `u2mp/online_link.cpp` | `CreateProcessW` + job object `KILL_ON_JOB_CLOSE`, pipes, `CREATE_SUSPENDED` | `__linux__` branch exists; later reuse `port::spawn` | S (with phase 5) |
 | `u2mp/net.cpp`, `u2mp/host_memory.h` | Winsock / `VirtualAlloc` | both bodies present (`u2mp-net-test` passes on Linux) | none |
 | `u3fix/*` (5 files) | `VirtualQuery` readability checks, `VirtualAlloc` near image | both bodies present (the u3fix tests pass on Linux) | none |
@@ -259,7 +263,7 @@ Our code:
 
 | File | Windows constructs | Linux | Effort |
 |---|---|---|---|
-| `shim/gow3_profiler.cpp` | `SuspendThread`/`GetThreadContext` sampling, `RtlVirtualUnwind`, `psapi` | `#else` branch exists (reduced); full sampler later (`perf_event_open` or `SIGPROF`) | M (later) |
+| `shim/gow3_profiler.cpp` | `SuspendThread`/`GetThreadContext` sampling, `RtlVirtualUnwind`, `psapi` | **done** (phase 6): sampling and reports shared; Linux samples with `SIGPROF` (the handler reads the signal frame and follows the saved frame pointers with checked reads) and names addresses with `dladdr`; the same files as on Windows | M — **done** |
 | `shim/gow3_perf_stats.cpp` | `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GlobalMemoryStatusEx`, NVML via `LoadLibraryExW("nvml.dll")` | `getrusage`, `/proc`, `dlopen("libnvidia-ml.so.1")` | S |
 | `shim/gow3_terminate.cpp` | `RtlCaptureStackBackTrace`, `GetModuleHandleExA` | `backtrace()` / `dladdr` (branch exists) | S |
 | `shim/gow3_threads.h`, `gow3_write_log.cpp`, `gow3_overlay.cpp`, `gow3gpu.cpp`, `window.cpp` | priorities, `EXCEPTION_POINTERS`, `_putenv_s` (guarded) | branches exist; `window.cpp` handles X11 and Wayland | none |
@@ -339,13 +343,22 @@ game; it is not a Windows program. Two parts depend on the **host** OS:
 
 | File | What | Linux | Effort |
 |---|---|---|---|
-| `helper-source/plat_pc.inc` (277 lines) | PC backend of `plat.h`: PEB walk + PE export lookup of `ws2_32.dll`, `kernel32.dll`, `kernelbase.dll`, `user32.dll`, `gdi32.dll`, `advapi32.dll`, `ucrtbase.dll`; `ms_abi` thunks (`WSF`); Winsock sockets, `VirtualAlloc`, `CreateThread`, `Sleep`, `GetSystemTime`, `RtlGenRandom`, a Win32 one-line text box, `Get/SetEnvironmentVariableA` hand-off (`U3MP_HANDOFF`, `U3MP_RELAY`) | Either a third backend (`plat_linux.inc`) that finds libc through the runtime, or **one PC backend for both systems**: the runtime exports a small table of host functions in the SysV ABI (sockets, alloc, thread, sleep, time, random, env, text box via SDL3), found the way `uncharted_u3_voice` is found today. The second keeps one backend and removes the PEB walk; it is a normal helper version | L |
-| `helper-source/plat.h` | `PLAT_THREAD_ATTR __attribute__((ms_abi,force_align_arg_pointer))` for threads on PC | follows the backend choice | S |
+| `helper-source/plat_pc.inc` (277 lines) | PC backend of `plat.h`: PEB walk + PE export lookup of `ws2_32.dll`, `kernel32.dll`, `kernelbase.dll`, `user32.dll`, `gdi32.dll`, `advapi32.dll`, `ucrtbase.dll`; `ms_abi` thunks (`WSF`); Winsock sockets, `VirtualAlloc`, `CreateThread`, `Sleep`, `GetSystemTime`, `RtlGenRandom`, a Win32 one-line text box, `Get/SetEnvironmentVariableA` hand-off (`U3MP_HANDOFF`, `U3MP_RELAY`) | Either a third backend (`plat_linux.inc`) that finds libc through the runtime, or **one PC backend for both systems**: the runtime exports a small table of host functions in the SysV ABI (sockets, alloc, thread, sleep, time, random, env, text box via SDL3), found the way `uncharted_u3_voice` is found today. The second keeps one backend and removes the PEB walk; it is a normal helper version. **Done** that way (v7.267, below) | L — **done** |
+| `helper-source/plat.h` | `PLAT_THREAD_ATTR __attribute__((ms_abi,force_align_arg_pointer))` for threads on PC | **done** (v7.267): System V threads started by the host table; `PLAT_BIND` reads the table at kind 44 | S — **done** |
 | `helper-source/u3_bearssl.inc` | BearSSL's own `_WIN32` autodetection (third-party) | unchanged | none |
 | `helper/u3_pool_init.c` | `movq %gs:0` (guest TCB through the runtime's GS setup) | same on Linux (GS base = guest TCB there) | none |
 
 The runtime makes `sceNetSocket` answer `ENETUNREACH` on PC so the helper uses host sockets (`plat_net_pick`); on
 Linux the same switch applies with the new backend.
+
+**Done in code (phase 5, helper v7.267, not shipped yet):** the second way. The runtime hands the helper one table of
+host functions (`gow3_pc/src/uncharted_host.h`: System V calls, Winsock error numbers and option values on both
+systems; version 1, 208 bytes) through its own `sceKernelOpen` of `/dev/uncharted_host`: the helper reads 8 bytes, the
+table's address, at kind 44 (`PLAT_BIND`, `u3x_host_bind` in `u3x_fixes.cpp`). `plat_pc.inc` calls only the table: no
+PEB walk, no `ms_abi` thunks, the Win32 text box moved into the runtime (zenity or kdialog on Linux). An older runtime
+has no such file: the helper then finds no host functions (no LAN or online play, as on Linux before). The image is
+built by the maintainer's helper build; Windows behaviour must be checked with a LAN and an online test before it
+ships.
 
 ## 5. Calling convention, TLS, stack, exceptions
 
@@ -357,14 +370,14 @@ the Windows code paths stay as they are.
 |---|---|---|---|
 | Functions the guest calls (HLE exports) | `ABI` = `__attribute__((sysv_abi))` (`runtime.h`, 415 uses, 28 files), `U2MP_GUEST` (`u2mp_internal.h`, 658 uses, 54 files), `U3VOICE_ABI`, `sysv_abi` in `u3fix` (41), `gow3_fiber.h`, `gow3_orbs.cpp` | the attribute is the default: keep it (no-op), one source | none |
 | Pointers to guest functions | `GuestCallback`, `CounterUpdate`, `SplitPadUpdate` typed `sysv_abi` | same | none |
-| ms_abi in guest code | helper `plat_pc.inc` `WSF`, `PLAT_THREAD_ATTR` | new backend (§4.10) | L |
+| ms_abi in guest code | helper `plat_pc.inc` `WSF`, `PLAT_THREAD_ATTR` | **done**: gone with the host table (§4.10, v7.267) | L — **done** |
 | `__cdecl`, `WINAPI`, `CALLBACK` | `u2_online_abi.h` (30), `gamepads.cpp` (10), `system.cpp`, `config.cpp`, Windows-only files | empty macro or removed in shared headers | S |
 | Guest TLS (TCB) | Guest code reads its TCB with `mov rax, fs:[0]`. `launcher/native/link.cpp` rewrites these to `gs:` (shared step). On Windows GS is the TEB and cannot move: `probe.c patch_tcb_loads` changes the displacement to a TEB TLS slot `gs:[0x1480+8*slot]`, the slot must be below 64 and taken before drivers load (`runtime_thread.c`, `probe.c:1252`) | GS is free under glibc: `arch_prctl(ARCH_SET_GS, tcb)` per guest thread (already in `runtime_thread.c:127`), no displacement patch | none (verify) |
 | Guest main stack | Runs on the process stack: `--stack 16777216,16777216` linker flag, committed; `__chkstk` probes vs TEB `StackLimit` (`runtime_thread_widen_stack_limit`); TEB stack bounds patched so `RtlGuardRestoreContext` accepts resumed contexts (`probe.c:361`) | `pthread_attr_setstacksize` / `enter_on_stack` (exists, `probe.c:126`); no TEB | none (verify) |
-| Red zone | Windows builds exception frames below `rsp` without the 128-byte red zone: `runtime_redzone.c` rewrites guest leaf functions | kernel signal frames skip the red zone; stub exists | none |
+| Red zone | Windows builds exception frames below `rsp` without the 128-byte red zone: `runtime_redzone.cpp` rewrites guest leaf functions | kernel signal frames skip the red zone: only the old-CPU part of the pass runs | none |
 | Faults | VEH on `CONTEXT` (`probe.c`), `SetUnhandledExceptionFilter`, `crashlog.cpp`, `page_manager.cpp` | `sigaction(SA_SIGINFO|SA_ONSTACK)` + `sigaltstack` on `ucontext_t` (exists in `probe.c fault()`) | none (verify) |
 | Fault recovery | `gow3_setjmp`/`gow3_longjmp` (asm in `compat_win.c`: no SEH unwinding through guest frames, saves xmm6–15) | `sigsetjmp`/`siglongjmp` (`runtime.h` already maps) | none |
-| Old-CPU instruction emulation | `runtime_isa.c` on `CONTEXT` | needs a register view filled from `ucontext_t` (shared emulation code) | M (later) |
+| Old-CPU instruction emulation | `runtime_isa.cpp` on `CONTEXT` | **done**: the same code on a `ucontext_t` (register view, XSAVE area) | M — **done** |
 | Unwinding for diagnostics | `RtlLookupFunctionEntry`/`RtlVirtualUnwind` (`probe.c`, `crashlog.cpp`, `gow3_profiler.cpp`), `RtlCaptureStackBackTrace` | frame-pointer walk / `_Unwind_Backtrace` / `backtrace()`; guest frames have no unwind data on either OS | M (later) |
 | PS4 address range 64 GiB–1 TiB | `-Wl,--disable-high-entropy-va`, `VirtualAlloc2` placeholders reserved early (`probe.c:1251`) | `mmap(MAP_FIXED_NOREPLACE)` reservation early; `-no-pie` already in `build.sh`; glibc maps near `0x7f...`, so the range is normally free | S (verify) |
 | Hooks near the image | `VirtualAlloc` search within ±2 GiB (`u3fix/hook.cpp`, `probe.c:842`) | `mmap` with hint / `MAP_32BIT` (exists) | none |
@@ -722,9 +735,9 @@ in both CI jobs.
 | 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs. **Done**: both CI jobs run `tools/importer_smoke.sh` (no game files; no fixture test exists yet, §7.4) and Linux runs `port_smoke`. Still stubs on Linux: unpacking the update tarball and the apply step (phase 7), the window icon's PNG decode, the online program (phase 5), the runtime itself (phase 4) |
 | 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push. **Done** (§4.2, §7.4, §7.5): the window runs on Linux (checked headless in CI with `--self-check`), `UCMR_linux.tar.gz` from every push and PR; no game runtime in it yet, no release yet |
 | 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests). **Done** (§4.3–§4.6): the CI job builds the runtime with every subsystem, starts it without a game (usage, a missing boot file, `--vulkan-only` on lavapipe, the `uncharted_u3_voice` export) and runs the 63 unit tests; the package carries the runtime. Found and fixed on the way: native TSC, the GPU user folder, the warm-up crash mark, save data removal. Not yet: a game played on Linux; exec watch, old-CPU emulation, DLSS and the freeze report stay Windows-only (phase 6); multiplayer needs phase 5 |
-| 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged. **Not started.** Today on Linux the helper finds no Windows process block and skips every PC call (no network, no voice, no crash; §14). Plan: the runtime adds one import the helper can resolve like its other imports (a table of SysV host functions: sockets, alloc, thread, sleep, UTC time, random, environment hand-off, the voice table, a text box over SDL3), `plat_pc.inc` calls it on both systems instead of the PEB walk; this changes the Windows helper and needs a LAN and online test with two PCs before it ships, as does each new helper build |
-| 6. Linux bodies for Windows-only features | `runtime_isa` on `ucontext_t`, hang watchdog (`ptrace`), Add to Steam on Linux, `.desktop` shortcuts, display info, profiler, DLSS (optional) | feature parity list shrinks. **Done in the launcher**: Add to Steam, desktop shortcuts, the freeze watchdog and thread report, the memory monitor, the window icon (§4.1); display info was done in phase 1. **Still Windows-only**: old-CPU emulation (`runtime_isa.c` needs a Linux pass over game functions like `runtime_redzone.c` does on Windows, as well as a `ucontext_t` view), the exec watch (`GOW3_EXEC_WATCH`, says "not on Linux yet"), the guest profiler, DLSS, the U2 crash log (`u2mp/crashlog.cpp`), minidumps (no Linux equivalent without gdb) |
-| 7. Releases | release job attaches `UCMR_windows.zip` + `UCMR_linux.tar.gz` (+ AppImage with a movable data root); updater picks its asset by OS; `recomplauncher.json` gains the Linux program name and `system.linux` | one tag, both packages. **Done**: the launcher update on Linux (download, unpack `UCMR_linux.tar.gz`, `tools/apply_update`, restart). **Open**: the release job does not attach the Linux tarball yet: a release package needs the private helper build, which only the Windows job fetches (the Linux CI builds its package with `PACKAGE_WITHOUT_HELPER=1`), and publishing a Linux package with each release is the owner's call; `recomplauncher.json` gets `UCMR_Launcher` and `system.linux` together with that asset (§7.7) |
+| 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged. **Done in code**: the runtime's host function table (`uncharted_host.h`, `runtime_host_api.cpp`, found through `/dev/uncharted_host`; `host-api-test` on both systems), `plat_pc.inc` over it on both systems (helper v7.267, built, not shipped: it changes the Windows helper and needs a LAN and online test with two PCs first), and both online programs built and tested on Linux (`u2_online` through the runtime's `online_link.cpp`, `uncharted_online` with the relay sign-out test). Not yet: a multiplayer match on Linux |
+| 6. Linux bodies for Windows-only features | `runtime_isa` on `ucontext_t`, hang watchdog (`ptrace`), Add to Steam on Linux, `.desktop` shortcuts, display info, profiler, DLSS (optional) | feature parity list shrinks. **Done in the launcher**: Add to Steam, desktop shortcuts, the freeze watchdog and thread report, the memory monitor, the window icon (§4.1); display info was done in phase 1. **Done in the runtime**: old-CPU emulation (`runtime_isa.cpp` on a `ucontext_t`, and the pass over the game's functions in `runtime_redzone.cpp`), the exec watch (perf-event breakpoints), the guest profiler (`SIGPROF` sampling). **Still Windows-only**: DLSS, the U2 crash log (`u2mp/crashlog.cpp`, the `u2mp` maintainer's), minidumps (no Linux equivalent without gdb) |
+| 7. Releases | release job attaches `UCMR_windows.zip` + `UCMR_linux.tar.gz` (+ AppImage with a movable data root); updater picks its asset by OS; `recomplauncher.json` gains the Linux program name and `system.linux` | one tag, both packages. **Done**: the launcher update on Linux (download, unpack `UCMR_linux.tar.gz`, `tools/apply_update`, restart); the Linux package job fetches the private package files as the Windows job does (the online programs are built there from their source, then the private `apply` puts the Linux files in), checks the online programs, and on a pushed tag adds `UCMR_linux.tar.gz` to the release the Windows job makes; `recomplauncher.json` names `UCMR_Launcher` after `UCMR_Launcher.exe` and has `system.linux` (glibc 2.38, the game runtime's; Vulkan 1.3). Not run yet: a tag (no release since). **Open**: the AppImage (§7.6) |
 
 Rules kept throughout: C++20 only (no new C, no Python), one platform function per OS call with both bodies side by
 side, no behaviour change on Windows, the simplest form that does the full job.
@@ -734,16 +747,19 @@ side, no behaviour change on Windows, the simplest form that does the full job.
 - The launcher core, the importers, the runtime and its unit tests build and run on Linux (§7.4); no game has been
   played on Linux yet (no game files in CI), so the runtime's Linux paths past the loader (guest memory, threads,
   files, the GPU on a real driver) are built and unit-tested but not seen in a game.
-- On Linux the U3 multiplayer helper finds no Windows process block (its `gs:0x60` read lands in the guest's zeroed
-  thread block), so every PC call it makes is skipped: the game runs without LAN or online play and without voice
-  until phase 5 gives the helper its host-function table.
+- The shipped U3 multiplayer helper (v7.266) still looks for the Windows process block, which Linux does not have (its
+  `gs:0x60` read lands in the guest's zeroed thread block): every PC call is skipped there, so the game runs without
+  LAN or online play and without voice on Linux until helper v7.267 (the host table, §4.10) ships. The host table, the
+  online programs and the Linux exec watch, profiler and old-CPU code were tested with unit tests and small test
+  programs on a Linux kernel (WSL2), not in a game.
 - The Linux bodies of the imports, PLAY and the game start were built and run with made-up folders and `sh`, never
   with a real game or a whole import on Linux.
 - The Linux window was checked headless (`QT_QPA_PLATFORM=offscreen`) in CI only, not yet on a real X11/Wayland
   desktop or a Steam Deck; the QML is unchanged, but Linux has no Segoe UI, so text uses the system's sans font.
 - Counts are token-based (comments included); `helper-source` counts include BearSSL.
 - Submodules under `gow3_pc/gpu/third_party` (FSR-Vulkan, xbyak, ...) were not scanned (not tracked files).
-- How RecompLauncher chooses a release asset per OS (only its JSON schema was read).
+- RecompLauncher picks a release file by the system's word in its name (its SDK page): `UCMR_windows.zip` and
+  `UCMR_linux.tar.gz` qualify; not tried with the launcher itself.
 - Decided (see "Decisions" at the top): tarball first, `0600` token file, one shared helper backend over a runtime
   host-function table. Still open: where an AppImage keeps its data, and whether `gow3gpu` becomes static on Linux.
 - Legal/licensing of bundling SDL3/Qt/FFmpeg in an AppImage follows the same license files as the Windows package;

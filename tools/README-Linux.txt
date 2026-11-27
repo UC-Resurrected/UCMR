@@ -6,18 +6,18 @@ THIS IS A PREVIEW: NO GAME HAS BEEN PLAYED ON LINUX YET.
 This package is a preview of the Linux port: the launcher window, the multiplayer imports and the
 game runtime (gow3_pc/out/gow3-probe), built for Linux. The runtime starts and passes its own tests
 on Linux, but nobody has played Uncharted 1, 2 or 3 with it on Linux yet, so PLAY may fail or the
-game may misbehave. Online and LAN multiplayer do not work on Linux yet (see below). To play
+game may misbehave. Online and LAN multiplayer have not been tried on Linux yet (see below). To play
 today, use the Windows package (UCMR_windows.zip), on Windows or through Proton/Wine. The Linux
 port goes on phase by phase (docs/WINDOWS-DEPENDENCIES.md in the source).
 
 What you need
-- A 64-bit Linux with glibc 2.35 or newer (for example Ubuntu 22.04 or newer), X11 or Wayland.
-  The game runtime is built on a newer system and may need a newer glibc (the package build says
-  which); the launcher and the imports do not.
+- A 64-bit Linux with glibc 2.35 or newer (for example Ubuntu 22.04 or newer), X11 or Wayland,
+  for the launcher and the imports. The game runtime needs glibc 2.38 or newer (for example
+  Ubuntu 24.04 or newer).
 - For the games: a graphics card with Vulkan 1.3 and a current driver (Mesa or the NVIDIA driver),
-  and a CPU with the instructions the PS4's CPU has (MOVBE, BMI1, F16C, LZCNT: Intel 4th
-  generation "Haswell" or newer, any AMD Ryzen). On Windows older CPUs work through an emulation
-  that Linux does not have yet.
+  and a CPU with AVX (Intel "Sandy Bridge" 2011 or newer, AMD FX or newer). CPUs older than Intel
+  "Haswell" or AMD Ryzen lack some instructions the PS4's CPU has (MOVBE, BMI1, F16C, LZCNT); the
+  runtime then carries them out itself, as on Windows (a little slower).
 - The usual desktop libraries: fontconfig, freetype, libxkbcommon, libGL/libEGL, libX11/libxcb
   or libwayland-client. The less common Qt helpers (xcb-cursor, xcb-icccm, ...) ship in
   launcher-qt/lib.
@@ -46,9 +46,11 @@ What works in this preview
   desktop shortcuts, the freeze report and the memory monitor.
 - The launcher's own update: it updates itself once a release carries the Linux package; until
   then download the new tarball and extract it over this folder.
-- Not yet on Linux: online and LAN multiplayer (the Uncharted 3 multiplayer helper and the online
-  program still speak only to Windows; the game starts, but finds no network), the online
-  sign-in, DLSS, and the emulation that lets Windows run the games on older CPUs.
+- Online and LAN multiplayer: the online programs (the RPCN sign-in and Uncharted 2's online link)
+  have Linux builds in a release package, but no match has been played on Linux yet. Uncharted 3
+  finds its network on Linux only with the next multiplayer helper version (the one in this
+  package still looks for Windows).
+- Not on Linux: DLSS (Windows only).
 
 Good to know
 - Settings, saves and logs live in the analysis/ folder beside the launcher, as on Windows.
