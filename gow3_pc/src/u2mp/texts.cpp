@@ -54,6 +54,8 @@ constexpr uint32_t kTextAllCompetitive = sid("u2mp/playlist/all-competitive"),
                    kTextAllCompetitiveDesc = sid("u2mp/playlist/all-competitive/desc"),
                    kTextTheLab = sid("u2mp/playlist/the-lab"), kTextTheLabDesc = sid("u2mp/playlist/the-lab/desc"),
                    kTextEliminationDesc = sid("u2mp/playlist/elimination/desc");
+// The help bar's Store entry in multiplayer (menus.cpp): text 90354b88 reads "Rewards" on PS4, "Store" on PS3.
+constexpr uint32_t kTextStore = sid("u2mp/help/store");
 
 enum Column { EN, FR, IT, DE, ES, DA, PT, NL, JA, KO, FI, NO, SV, ZH, RU, PL, ES419, PTBR, EL, CS, TR, kColumns };
 // language number -> column
@@ -327,6 +329,8 @@ const Text kOwn[] = {
      "Схватки и режимы с заданиями вперемешку", "Mieszanka starć drużyn i trybów z celami", nullptr,
      "Uma mistura de combate mortal e modos de objetivo", "Ένας συνδυασμός Deathmatch και παιχνιδιών με στόχους",
      "Mix deathmatche a her s cíli", "Ölüm Maçı ve hedef tabanlı oyun türlerinin karışımı"}},
+    {kTextStore, {"Store", "Boutique", "Negozio", "Geschäft", "Tienda", "Butik", "Loja", "Winkel", "ストア", "상점",
+     "Kauppa", "Butikk", "Butik", "商店", "Магазин", "Sklep", nullptr, nullptr, "Κατάστημα", "Obchod", "Mağaza"}},
     {kTextTheLab, {"The Lab", "Le Labo", "Il Laboratorio", "Das Labor", "El Laboratorio", "Laboratoriet",
      "O Laboratório", "Het Lab", "ラボ", "실험실", "Laboratorio", "Laboratoriet", "Labbet", "實驗室", "Лаборатория",
      "Laboratorium", nullptr, nullptr, "Το Εργαστήριο", "Laboratoř", "Laboratuvar"}},

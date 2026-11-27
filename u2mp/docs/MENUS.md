@@ -109,6 +109,9 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
   (the 5th of 22 controls), the other 21 in their order; the page's default control (Matchmaking, page record
   `+0x58`) and the mode dispatcher are untouched, the cursor moves over the remaining buttons. Mode 5 and
   PAGE_NET_TROPHIES are no longer reachable (DROPPED, owner 2026-11-25: PC has no trophies).
+- **Store entry (owner report 2026-11-27):** the help bar's Store record (`0x10417a0`) uses text `90354b88` on PS3 and
+  PS4 alike; the PS3 banks say "Store", the PS4 banks "Rewards". menus.cpp gives the record our text
+  `sid("u2mp/help/store")` (texts.cpp: "Store" in every language, the PS3 words), together with its R1 token (3.8.1).
 
 ### 3.2 PAGE_LOBBY (handler `5ebac0`, PS3 `0x443bc8`)
 
@@ -177,7 +180,18 @@ Boosters greyed out in a co-op custom game (owner report 2026-11-27): PS3 does t
 `0x4be788`, PS4 `0x659bd0`) answers op 7 (enabled) with 0 when the lobby's current net game is a co-op type (PS3
 `0x4a0bcc`: game type 4, 8, 9 or 12; PS4 inlines the same test) and the page under the Profile is PAGE_LOBBY in
 custom game mode (net info `+0x2c4` == 2; PS3 `+0x2b4`) or page `e35f0f1a` otherwise.
-Not changed.
+Owner decision (2026-11-27): the boosters stay selectable there anyway. menus.cpp wraps the query for cond 77 and 78
+(`query_boosters`): op 7 always answers 1, every other op is the game's answer. This differs from PS3 on purpose.
+
+Golden Guns (owner report 2026-11-27: missing under Other Settings; PS3 video 2:55 shows "Golden Guns On"). The
+rows cond 108 / 109 / 110 share the query `0x65c610`; the table entry's argument is the row's bit (108: 0x10, the
+Golden Guns label `b8a9d6ed`, values On `d1831446` / Off `32066ec9`). A row shows only when its bit is in the licence
+word `[0x104f4b0 + 0x78]` (or the region bits the query adds); PS3 got 0x10 from the golden-weapons licence (net.bin's
+licence table), PS4 never sets it, so the row had no label and stayed hidden. The setting is NetPlayerData `+0x13c`
+(op 4 reads it, op 5 writes it; inside the saved career blob), and the PS4 spawn code still uses it (`0x663494`: when
+it is 1 and the net game is not co-op, the game's weapon sets `8cf8e1cc` / `469fefc8` become the golden sets
+`e58a9398` / `556dd82a`, which net-patch9 defines). menus.cpp wraps the cond 108 entry (`query_golden_guns`): the
+query runs with bit 0x10 added and the word is put back after, so nothing else sees the bit. Not checked in the game.
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
@@ -331,6 +345,15 @@ off; press L1 / R1: the board changes (Next, callback `0x64e120`: Kills -> Money
 `0x64e0f0`: the other way). (b) Multiplayer, Find Match and Custom Game pages: the Store / Rewards entry shows R1.
 (c) Keyboard / Xbox pad: the two pictures carry the bound key / Xbox labels. (d) Change the controller option in the
 game's options and come back: the pictures stay L1 / R1 (one `menus: help bar shoulder icons` log).
+Leaderboard outline (owner report 2026-11-27: a thick white frame around the table; PS3 has none). The table control
+(kind 10, draw `0x58c7a0`) asks its list for property `0xffce262d` (virtual +0x60) and, while the answer is 0, draws
+an opaque white 20-unit outline around the table and its title tab (`0x58cc72..0x58d181`, polygon `0x5b5de0`). The
+leaderboard list's getter answers 0 for everything on PS4 (`0x5b3990`); on PS3 (`0x4116a4`, vtable `0xd70098` slot
+10) it answers 1 for `0xffce262d` and for `0x348751f2`, and for `0x6a9b4a0c` a row test. menudraw.cpp
+(`install_leaderboard_outline`) puts a getter in the slot (`0x100a360 + 0x60`) that answers 1 for `0xffce262d` only.
+Not taken over: `0x348751f2` (the control's focus type then becomes 4 instead of the record flag, which changes how the
+list takes the D-pad) and `0x6a9b4a0c` (a per-row test); both stay as PS4 until the owner wants them.
+
 PAGE_NET_TROPHIES: DROPPED (owner 2026-11-25: PC has no trophies). Its only route, BUTTON_NETTROPHIES, is removed by
 the overlay (3.1); the page stays in menu.bin unused and its title MENU_TITLE_TROPHIES (85ed01cc) and the button label
 f1b9728c are no longer served. Its list LIST_STATS stays: it is the game's own code (it reads NetPlayerData), and

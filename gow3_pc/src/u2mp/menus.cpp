@@ -722,6 +722,34 @@ U2MP_GUEST void query_join_list(uint8_t *q) {
         plain_list(q, 0, join_cur, [](int32_t) { return kNothing; });
 }
 
+// ---- booster slots (cond 77, 78) -------------------------------------------------------------------------
+// The booster list query answers op 7 (row enabled) with 0 while the lobby's net game is a co-op type and the Profile
+// is open over the custom game lobby; PS3 does the same (MENUS.md 3.3). The owner wants the boosters selectable
+// there too (2026-11-27), so op 7 always answers 1 here; everything else is the game's query.
+uint64_t original_boosters = 0;
+U2MP_GUEST void query_boosters(uint8_t *q) {
+    call(original_boosters, q);
+    if (op_of(q) == 7) put<int32_t>(q + 4, 1);
+}
+
+// ---- Golden Guns (cond 108) --------------------------------------------------------------------------------
+// The Profile's option rows 108 / 109 / 110 share one query (0x65c610, its table argument the row's bit: 0x10 Golden
+// Guns). A row shows only when its bit is in the licence word [0x104f4b0 + 0x78] (or a region bit): on PS3 the
+// golden-weapons licence gave 0x10 (net.bin's licence table, dlc.cpp), on PS4 nothing sets it, so the row had no
+// label and stayed hidden. The setting itself is NetPlayerData +0x13c (saved with the career), and the PS4 spawn code
+// still gives the golden weapon sets of net-patch9 when it is 1 (0x663494). The query runs with the bit added and the
+// word put back after.
+constexpr uint64_t kLicenceWord = 0x104f4b0 + 0x78;
+constexpr uint32_t kGoldenGunsBit = 0x10;
+uint64_t original_golden_guns = 0;
+U2MP_GUEST void query_golden_guns(uint8_t *q) {
+    uint8_t *licences = abs_at(kLicenceWord);
+    const uint32_t kept = get<uint32_t>(licences);
+    put<uint32_t>(licences, kept | kGoldenGunsBit);
+    call(original_golden_guns, q);
+    put<uint32_t>(licences, kept);
+}
+
 // ---- diagnostic trace of the Profile page queries ---------------------------------------------------------
 
 constexpr uint32_t kTracedConds[] = {105, 77, 78, 134, 40, 41, 80, 82, 135, 108, 109, 110};
@@ -751,6 +779,10 @@ template <size_t... N> constexpr auto make_tracers(std::index_sequence<N...>) {
 
 constexpr uint64_t kShoulderSetting = 0x1059640 + 0x4888;    // u32: 0 = the printer swaps L1 / L2 and R1 / R2
 constexpr uint8_t kActionPrev = 0xb;   // the other records' action is 0xa (next)
+// The Multiplayer pages' Store entry: PS3 and PS4 both use text 90354b88, which reads "Store" in the PS3 text banks and
+// "Rewards" in the PS4 ones. The record gets our text "Store" (texts.cpp, every language), as PS3 shows it.
+constexpr uint64_t kStoreRecord = 0x10417a0;
+constexpr uint32_t kStoreText = sid("u2mp/help/store");
 
 struct HelpRecord {
     uint64_t offset;
@@ -859,8 +891,9 @@ void menus_help_bar_frame() {
         const char *token = r.tail[0] == kActionPrev ? (swapped ? kIconL2 : kIconL1) : (swapped ? kIconR2 : kIconR1);
         const uint64_t wanted = reinterpret_cast<uint64_t>(token);
         uint8_t *p = abs_at(r.offset);
-        if (get<uint64_t>(p) == wanted) continue;
-        const HostCodeWrite writable(p, 8);   // read-only data: writable for the write, then put back
+        const uint32_t text = r.offset == kStoreRecord ? kStoreText : get<uint32_t>(p + 0xc);
+        if (get<uint64_t>(p) == wanted && get<uint32_t>(p + 0xc) == text) continue;
+        const HostCodeWrite writable(p, 0x10);   // read-only data: writable for the write, then put back
         if (!writable.ok()) {
             log("menus: help bar record 0x%llx cannot be made writable (%lu), Prev / Next icons left alone",
                 (unsigned long long)r.offset, writable.error());
@@ -868,6 +901,7 @@ void menus_help_bar_frame() {
             return;
         }
         put<uint64_t>(p, wanted);
+        put<uint32_t>(p + 0xc, text);
         written = true;
     }
     if (!written || int(swapped) == help_bar_logged) return;
@@ -901,6 +935,9 @@ void install_menus(int &installed) {
         {55, 0x6562d0, "PLAYLIST", query_playlist, &original_playlist},
         {39, 0x65bcd0, "LIST_PLAYERSMET", query_players_met, &original_met},
         {104, 0x65f3f0, "voice volume slider", query_volume, &original_volume},
+        {77, 0x659bd0, "LIST_BOOSTERS0", query_boosters, &original_boosters},
+        {78, 0x659bd0, "LIST_BOOSTERS1", query_boosters, &original_boosters},
+        {108, 0x65c610, "Golden Guns", query_golden_guns, &original_golden_guns},
     };
     for (const Wrap &w : wraps) {
         uint8_t *e = find_entry(w.cond);

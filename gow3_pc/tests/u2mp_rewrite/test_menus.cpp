@@ -497,11 +497,26 @@ void b2782c2_friend_card_step(int &n) {
 // the old record gets that line. The help-bar scenarios (HB-1, HB-2, new only) build the records.
 const char kHelpBarDiffer[] = "log menus: help bar shoulder records differ, Prev / Next icons left alone";
 
+// (2026-11-27, MENUS.md 3.3) install_menus also wraps the booster list queries (cond 77, 78, the game's 0x659bd0) so
+// op 7 answers 1. The test tables never hold 0x659bd0 there, so the new build logs "left alone" for both, right after
+// the voice volume slider; the old build gets the same two lines in that place.
+void boosters_not_in_old() {
+    static const std::string volume = "log voice volume slider (cond 104): ";
+    for (size_t i = 0; i < hx::calls.size(); ++i)
+        if (hx::calls[i].rfind(volume, 0) == 0) {
+            hx::calls.insert(hx::calls.begin() + std::ptrdiff_t(i) + 1,
+                             {"log LIST_BOOSTERS0 (cond 77): table entry is not 0x659bd0, left alone",
+                              "log LIST_BOOSTERS1 (cond 78): table entry is not 0x659bd0, left alone",
+                              "log Golden Guns (cond 108): table entry is not 0x65c610, left alone"});
+            return;
+        }
+}
 void inst_menus(const Api &a) {
     int n = 100;
     if (a.install_menus == A_old.install_menus) rec("%s", kHelpBarDiffer);
     a.install_menus(n);
     if (a.install_menus == A_old.install_menus) b2782c2_friend_card_step(n);
+    if (a.install_menus == A_old.install_menus) boosters_not_in_old();
     rec("installed %d", n);
 }
 void menus_ready(const Api &a) {
@@ -1010,6 +1025,50 @@ bool help_bar_shows(const std::string &prev, const std::string &next) {
     return true;
 }
 
+// The booster list query (cond 77 / 78, 0x659bd0): op 7 always answers 1 (selectable also in a co-op custom game),
+// every other op is the game's answer.
+U2MP_GUEST void boost_orig(uint8_t *q) {
+    rec("boost orig op %u", get<uint32_t>(q - mem));
+    put<int32_t>(q - mem + 4, get<uint32_t>(q - mem) == 7 ? 0 : 5);
+}
+void boosters_scenario() {
+    run_new("BO-1 booster slots selectable in co-op custom games (new only)", [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 1, 77, 0x659bd0);
+        entry(ETRACE + 2, 78, 0x659bd0);
+        hx::stub(0x659bd0, reinterpret_cast<void *>(&boost_orig));
+        inst_menus(a);
+        EXPECT(lines("log LIST_BOOSTERS0 (cond 77): 0x659bd0 wrapped") == 1);
+        EXPECT(lines("log LIST_BOOSTERS1 (cond 78): 0x659bd0 wrapped") == 1);
+        for (int e : {ETRACE + 1, ETRACE + 2}) {
+            ask(e, 7);
+            EXPECT(get<int32_t>(Q + 4) == 1);
+            ask(e, 3);
+            EXPECT(get<int32_t>(Q + 4) == 5);
+        }
+        EXPECT(lines("boost orig op 7") == 2);
+    });
+}
+
+// The Golden Guns row (cond 108, 0x65c610): the query sees the golden-weapons licence bit 0x10 in [0x104f4b0 + 0x78];
+// the word is put back after the call.
+U2MP_GUEST void golden_orig(uint8_t *q) {
+    rec("golden orig op %u licences %08x", get<uint32_t>(q - mem), get<uint32_t>(0x104f4b0 + 0x78));
+}
+void golden_guns_scenario() {
+    run_new("GG-1 Golden Guns row: licence bit set during its query (new only)", [](const Api &a) {
+        menus_image();
+        entry(ETRACE + 9, 108, 0x65c610);
+        hx::stub(0x65c610, reinterpret_cast<void *>(&golden_orig));
+        put<uint32_t>(0x104f4b0 + 0x78, 0x3);
+        inst_menus(a);
+        EXPECT(lines("log Golden Guns (cond 108): 0x65c610 wrapped") == 1);
+        ask(ETRACE + 9, 1);
+        EXPECT(lines("golden orig op 1 licences 00000013") == 1);
+        EXPECT(get<uint32_t>(0x104f4b0 + 0x78) == 0x3);
+    });
+}
+
 void help_bar_scenarios() {
     run_new("HB-1 help bar icons: always the L1 / R1 pictures, whatever the shoulder setting (new only)",
             [](const Api &a) {
@@ -1021,6 +1080,8 @@ void help_bar_scenarios() {
         EXPECT(help_bar_shows("L1-NOSWAP", "R1-NOSWAP"));   // install only checks
         u2mp::menus_help_bar_frame();
         EXPECT(help_bar_shows("|L1| ", "|R1| "));   // setting on: the printer draws |L1| / |R1| as L1 / R1
+        EXPECT(get<uint32_t>(0x10417a0 + 0xc) == sid("u2mp/help/store"));   // Store, not Rewards (PS3 text)
+        EXPECT(get<uint32_t>(0x10416f8 + 0xc) == 0x8994a031);   // the other texts stay
         EXPECT(lines(on) == 1);
         u2mp::menus_help_bar_frame();   // nothing to write: no log
         EXPECT(lines(on) == 1);
@@ -1059,6 +1120,7 @@ void help_bar_scenarios() {
             EXPECT(lines(kHelpBarDiffer) == 1);
             u2mp::menus_help_bar_frame();
             for (const HelpRec &r : kHelpRecs) EXPECT(get<uint64_t>(r.off) == addr(r.action == 0xb ? kTokL1 : kTokR1));
+            EXPECT(get<uint32_t>(0x10417a0 + 0xc) == 0x90354b88 || b.off == 0x10417a0 + 0xc);
             for (const auto &l : hx::calls) EXPECT(l.rfind("log menus: help bar shoulder icons", 0) != 0);
         });
 }
@@ -1154,6 +1216,8 @@ void menus_install_scenarios() {
         ask(ETRACE + 3, 9, 99);
     });
     help_bar_scenarios();
+    boosters_scenario();
+    golden_guns_scenario();
 }
 
 void menus_query_scenarios() {
