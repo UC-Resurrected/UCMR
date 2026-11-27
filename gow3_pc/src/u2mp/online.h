@@ -93,11 +93,12 @@ struct FriendView {
     bool online = false;
     bool this_game = false;      // runs this game (its presence is this game's, or the title is ours)
     bool multiplayer = false;    // in this game's multiplayer, our build (PS3: presence data accepted)
-    bool details = false;        // presence version 2: activity and the values below are known
+    bool details = false;        // activity and the values below are known (not for old PC data version 1)
     bool party_member = false;   // a member of our party room
     bool other_build = false;    // its multiplayer presence is of another build (PC note on View Profile)
-    int activity = 0;            // 1 lobby, 2 cinema, 3 match; 0 unknown (version 1)
-    int level = 0, party = 0, difficulty = 0, net_game = -1;
+    int activity = 0;            // 1 lobby, 2 cinema, 3 match; 0 unknown (old version 1)
+    int mode = 0;                // the multiplayer menu mode (presence +0x08): the row icon value (PS3 0x4c2830)
+    int party = 0, difficulty = 0, net_game = -1;
     uint64_t match_end = 0;      // Unix UTC seconds, 0 none
 };
 bool friend_view(int i, FriendView &v);      // false: row i is no friend (a request, or past the rows)
@@ -114,7 +115,7 @@ bool friend_party(int i, std::vector<std::string> &names);
 
 // ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
 // One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
-// whose presence is this build's multiplayer with stats (presence version 3). No such friend: the heading only.
+// whose presence is this build's multiplayer (a valid presence block; old PC data from version 3 on). No such friend: the heading only.
 // ticker.cpp hands it to the game's ticker add function 0x5d6500 (spec parity-ticker-respawn.md 1).
 std::string stats_ticker_text();
 // The ticker's pieces, for tests: one friend entry appended to `out` (false, `out` unchanged, when it would reach
