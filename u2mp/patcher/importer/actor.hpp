@@ -132,6 +132,7 @@ struct TwinStats {
     double share = 0;   // of the LOD0 triangles, rounded to 3 places
     size_t materials = 0, twin_materials = 0, artgroup_keys_fixed = 0, textures_added = 0, geometry_textures_added = 0, size = 0,
            cbuffer_capacity_raised = 0;
+    std::vector<std::string> retextured;   // MP materials kept from PS3: they bind textures the twin lacks (re-textures)
     std::string note() const;
     Value json() const;
 };
