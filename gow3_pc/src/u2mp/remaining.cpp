@@ -529,15 +529,13 @@ void friend_options(int r) {
         popup.show();
 }
 
-// Offline the list shows the party; online its first row is "join a game" and the rest are friends.
+// Offline the list shows the party; online its rows are the friends (PS3 has no "join a game" row there).
 U2MP_GUEST void friends_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 4));
     if (!online::active())
         player_options(row);
-    else if (row == 0)
-        online::open_join_list();
     else
-        friend_options(row - 1);
+        friend_options(row);
 }
 
 // ---- B11 / B12: players met ----------------------------------------------------------------------------

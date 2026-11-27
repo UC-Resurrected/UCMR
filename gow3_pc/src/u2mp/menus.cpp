@@ -557,22 +557,22 @@ const char *keep(char (&cell)[256], const std::string &text) {
 int32_t friends_row(int32_t count) {
     if (!friends_sel.empty()) {
         const int i = online::friend_index(friends_sel);
-        if (i >= 0) friends_cur = 1 + i;
+        if (i >= 0) friends_cur = i;
     }
     if (count <= 0) return -1;
     return friends_cur < 0 ? 0 : friends_cur >= count ? count - 1 : friends_cur;
 }
 void store_friend_row(int32_t row, int n) {
     friends_cur = row;
-    friends_sel = row >= 1 && row - 1 < n ? online::friend_name(row - 1) : std::string();
+    friends_sel = row >= 0 && row < n ? online::friend_name(row) : std::string();
 }
 
-// Online: row 0 "Browse Online Games" and the friend rows in the PS3 layout (name in column 0, the status block
-// in column 3, status dot and row icon), then the friend requests; PC additions kept: the title with the online
-// count, the browse row, the request rows.
+// Online: the friend rows in the PS3 layout (name in column 0, the status block in column 3, status dot and row
+// icon), then the friend requests; PC additions kept: the title with the online count, the request rows, one hint
+// row while there are no friends. PS3 has no "Browse Online Games" row in this list (owner 2026-11-27): removed.
 void query_friends_online(uint8_t *q) {
     const int n = online::friend_count();
-    const int32_t count = n == 0 ? 2 : 1 + n;
+    const int32_t count = n == 0 ? 1 : std::max(n, 0);
     const int32_t row = get<int32_t>(q + 4);
     switch (op_of(q)) {
     case 1: {
@@ -591,15 +591,14 @@ void query_friends_online(uint8_t *q) {
         }
         const int c = column == 0 ? 0 : 1;
         online::FriendView v;
-        if (row == 0) set_text(q, column == 0 ? "Browse Online Games" : kNothing);
-        else if (n == 0) set_text(q, column == 0 ? "No RPCN friends yet. Add friends in the launcher." : kNothing);
-        else if (online::friend_view(row - 1, v)) set_text(q, keep(friend_cells[row][c], column == 0 ? v.npid : friend_status(v)));
-        else set_text(q, keep(friend_cells[row][c], column == 0 ? online::friend_name(row - 1) : online::request_state(row - 1)));
+        if (n == 0) set_text(q, column == 0 ? "No RPCN friends yet. Add friends in the launcher." : kNothing);
+        else if (online::friend_view(row, v)) set_text(q, keep(friend_cells[row][c], column == 0 ? v.npid : friend_status(v)));
+        else set_text(q, keep(friend_cells[row][c], column == 0 ? online::friend_name(row) : online::request_state(row)));
         break;
     }
     case 3: {
         online::FriendView v;
-        if (row < 1 || !online::friend_view(row - 1, v)) break;
+        if (row < 0 || !online::friend_view(row, v)) break;
         const uint32_t element = get<uint32_t>(q + 0x50);
         auto image = [q](uint32_t type, uint32_t value) {
             put<uint32_t>(q + 8, type);
@@ -633,7 +632,7 @@ U2MP_GUEST void query_friends(uint8_t *q) {
         static int traced = 0;
         if (traced < 96 && op_of(q) != 1) {
             log("friends query: op %u row %d cur %d rows %d", op_of(q), get<int32_t>(q + 4), friends_cur,
-                online::friend_count() == 0 ? 2 : 1 + online::friend_count());
+                online::friend_count() == 0 ? 1 : std::max(online::friend_count(), 0));
             ++traced;
         }
         query_friends_online(q);

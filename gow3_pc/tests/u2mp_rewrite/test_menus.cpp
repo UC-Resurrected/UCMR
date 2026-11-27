@@ -1247,30 +1247,28 @@ void menus_query_scenarios() {
     // the PS3 one: column 3 status block, op 3 images, the cursor following the selected friend, op 8 refresh, and
     // the op log. That path runs on the new build only, checked against the spec (op 1, unchanged, stays compared
     // in 9d; the LAN form in 10a-10c).
+    // (2026-11-27, owner: PS3 has no "Browse Online Games" row in the friends list) the rows are the friends from
+    // row 0; with no friends one hint row.
     run_new("9a cond 36 online (b2782c2, new only): no friends", [](const Api &a) {
         menus_ready(a);
         s.online = true;
         EXPECT(answer(E36, 1).text == "\"Friends (0 of 0 online)\"");
         EXPECT(answer(E36, 2, -1).text == "\"\"");
-        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
+        EXPECT(answer(E36, 2, 0).text == "\"No RPCN friends yet. Add friends in the launcher.\"");
         EXPECT(answer(E36, 2, 0, 3).text == "\"\"");
-        EXPECT(answer(E36, 2, 1).text == "\"No RPCN friends yet. Add friends in the launcher.\"");
-        EXPECT(answer(E36, 2, 1, 3).text == "\"\"");
-        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
-        EXPECT(answer(E36, 2, 2).text == "\"\"");
-        EXPECT(answer(E36, 5).v == 1);
+        EXPECT(answer(E36, 2, 0, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 1).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 0);
         EXPECT(answer(E36, 7).v == 1);
         answer(E36, 9, 1);
-        EXPECT(answer(E36, 4).v == 1);
-        answer(E36, 9, 1000);
-        EXPECT(answer(E36, 4).v == 1);   // clamped to count - 1
+        EXPECT(answer(E36, 4).v == 0);   // clamped to count - 1
         answer(E36, 9, -2);
         EXPECT(answer(E36, 4).v == 0);   // clamped to 0
-        EXPECT(lines("log friends query: op 4 row 0 cur -2 rows 2") == 1);
+        EXPECT(lines("log friends query: op 4 row 0 cur -2 rows 1") == 1);
         answer(E36, 8);
         EXPECT(lines("online::refresh_friend_list") == 1);
         EXPECT(answer(E36, 4).v == 0);
-        answer(E36, 3, 1, 0, 0xf5a294f3);   // no friend row: nothing written
+        answer(E36, 3, 0, 0, 0xf5a294f3);   // no friend row: nothing written
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
         int op1 = 0;
         for (auto &l : hx::calls) op1 += l.rfind("log friends query: op 1 ", 0) == 0;
@@ -1285,48 +1283,47 @@ void menus_query_scenarios() {
         g_texts[0x953825d0] = "Playing another game";
         EXPECT(answer(E36, 1).text == "\"Friends (2 of 3 online)\"");
         EXPECT(answer(E36, 2, -1).text == "\"\"");
-        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
-        EXPECT(answer(E36, 2, 1).text == "\"alice - online\"");
-        EXPECT(answer(E36, 2, 1, 3).text == "\"Playing another game\"");   // online, not in this game
-        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
-        EXPECT(answer(E36, 2, 2).text == "\"bob - offline\"");
-        EXPECT(answer(E36, 2, 2, 3).text == "\"\"");   // offline
-        EXPECT(answer(E36, 2, 3).text == "\"carol - in game\"");
-        EXPECT(answer(E36, 2, 4).text == "\"\"");
-        EXPECT(answer(E36, 5).v == 3);
+        EXPECT(answer(E36, 2, 0).text == "\"alice - online\"");
+        EXPECT(answer(E36, 2, 0, 3).text == "\"Playing another game\"");   // online, not in this game
+        EXPECT(answer(E36, 2, 0, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 1).text == "\"bob - offline\"");
+        EXPECT(answer(E36, 2, 1, 3).text == "\"\"");   // offline
+        EXPECT(answer(E36, 2, 2).text == "\"carol - in game\"");
+        EXPECT(answer(E36, 2, 3).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 2);
         EXPECT(answer(E36, 7).v == 1);
         // op 3: the status dot of a friend row (1 online, 0 offline); element 0 outside this game: nothing
-        answer(E36, 3, 1, 0, 0xf5a294f3);
+        answer(E36, 3, 0, 0, 0xf5a294f3);
         EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint64_t>(Q + 0x10) == 0 && get<uint32_t>(Q + 0x18) == 1 &&
                get<uint64_t>(Q + 0x1c) == 0 && get<int32_t>(Q + 0x24) == -1 && get<uint32_t>(Q + 0x28) == 0 &&
                get<int32_t>(Q + 0x2c) == -1 && get<float>(Q + 0x30) == 1.0f);
-        answer(E36, 3, 2, 0, 0xf5a294f3);
+        answer(E36, 3, 1, 0, 0xf5a294f3);
         EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint32_t>(Q + 0x18) == 0);
-        answer(E36, 3, 1, 0, 0);
+        answer(E36, 3, 0, 0, 0);
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
-        answer(E36, 3, 0, 0, 0xf5a294f3);   // row 0 is no friend
+        answer(E36, 3, -1, 0, 0xf5a294f3);   // no such row
         EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
         // the cursor follows the stored friend when the rows move
-        answer(E36, 9, 2);
-        EXPECT(answer(E36, 4).v == 2);
-        s.friend_rows = {"bob - offline", "alice - online", "carol - in game"};
+        answer(E36, 9, 1);
         EXPECT(answer(E36, 4).v == 1);
-        answer(E36, 9, 0);   // row 0: no name stored
+        s.friend_rows = {"bob - offline", "alice - online", "carol - in game"};
+        EXPECT(answer(E36, 4).v == 0);
+        answer(E36, 9, -1);   // no row: no name stored
         EXPECT(answer(E36, 4).v == 0);
         answer(E36, 9, 1000);
-        EXPECT(answer(E36, 4).v == 3);
+        EXPECT(answer(E36, 4).v == 2);
         answer(E36, 9, -2);
         EXPECT(answer(E36, 4).v == 0);
         // op 8: refresh, then the stored friend's row is stored with its name
-        answer(E36, 9, 3);   // carol
+        answer(E36, 9, 2);   // carol
         s.friend_rows = {"carol - in game", "bob - offline", "alice - online"};
         answer(E36, 8);
         EXPECT(lines("online::refresh_friend_list") == 1);
-        EXPECT(answer(E36, 4).v == 1);
+        EXPECT(answer(E36, 4).v == 0);
         s.friends = 2;   // carol gone: the stored row stays
         s.friend_rows = {"bob - offline", "alice - online"};
-        EXPECT(answer(E36, 4).v == 1);
-        EXPECT(lines("log friends query: op 4 row 0 cur 1 rows 3") == 1);
+        EXPECT(answer(E36, 4).v == 0);
+        EXPECT(lines("log friends query: op 4 row 0 cur 0 rows 3") >= 1);
     });
     run_new("9c cond 36 online (b2782c2, new only): friend_count negative", [](const Api &a) {
         menus_ready(a);

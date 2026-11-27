@@ -368,19 +368,20 @@ Building happens only from the cond 55 entry point. Before the first successful 
 ## 1.9 cond 36: LIST_FRIENDS (replaces the `ret` stub 0x65bbb0)
 
 **Online** (`online::active()` true). PS3 `0x4c1fe0` behaviour (spec parity-b-menus.md 3) with the PC rows kept
-(owner decision): row 0 `"Browse Online Games"`, the title with the online count, the friend request rows.
+(owner decision): the title with the online count, the friend request rows. No "Browse Online Games" row (PS3 has
+none; owner 2026-11-27): row r is online.cpp's row r.
 
 1. The first op of every call (except op 1) is logged while fewer than 96 were: `"friends query: op %u row %d
-   cur %d rows %d"`. n = `online::friend_count()`; count = 1 + n when n > 0, else 2. Rows 1..n are
-   online.cpp's rows r - 1, which it keeps in the PS3 order (friends in this game, then the others online, then
+   cur %d rows %d"`. n = `online::friend_count()`; count = n when n > 0, 1 when n == 0, 0 when n < 0. Rows
+   0..n-1 are online.cpp's rows r, which it keeps in the PS3 order (friends in this game, then the others online, then
    offline, each by online id in byte order), then the requests to us, then ours.
 2. op 1: k = number of i in 0..n-1 with `online::friend_online(i)`. `"Friends (%d of %d online)"` (k, n) into
    the 96-byte title buffer; `q+0x40` = it.
 3. op 2 (row = `q+4`, column = `q+0x54`): only columns 0 and 3 have text (others, and rows outside 0..count-1,
-   get the empty string). Row 0: column 0 `"Browse Online Games"`. n == 0, row 1: column 0 `"No RPCN friends yet.
-   Add friends in the launcher."`. A friend row (`online::friend_view(r - 1)`): column 0 its online id, column
-   3 the status block; a request row: column 0 `online::friend_name(r - 1)`, column 3
-   `online::request_state(r - 1)` ("Friend request" / "Request sent"). Each cell has its own 256-byte buffer.
+   get the empty string). n == 0, row 0: column 0 `"No RPCN friends yet.
+   Add friends in the launcher."`. A friend row (`online::friend_view(r)`): column 0 its online id, column
+   3 the status block; a request row: column 0 `online::friend_name(r)`, column 3
+   `online::request_state(r)` ("Friend request" / "Request sent"). Each cell has its own 256-byte buffer.
    Status block, with H = `"|@H|"` + text fd2de693 (the game's title) + `"|@N|"` and B = `"\"` (line break):
    - not in this game's multiplayer: in this game -> H B 77f62775 ("Playing Single-Player"); else online ->
      953825d0 ("Playing another game"); offline -> empty.
@@ -392,7 +393,7 @@ Building happens only from the cond 55 entry point. Before the first successful 
    member of our party room, 1 online, 0 offline; element 0 -> type 0x21 with value max(level, 1) in
    multiplayer, value 0 in this game outside multiplayer, else nothing. The avatar (0x2138a9b2): nothing.
 5. The cursor follows the selected friend: op 9 stores the row and the online id / request name of that row
-   ("" for row 0); op 4 answers the stored name's current row (`online::friend_index`), else the stored row,
+   ("" for a row with no friend); op 4 answers the stored name's current row (`online::friend_index`), else the stored row,
    clamped to 0..count-1; op 8 asks `online::refresh_friend_list()`, then stores the row op 4 would answer
    (and its name); op 5 = count - 1; op 7 = 1.
 

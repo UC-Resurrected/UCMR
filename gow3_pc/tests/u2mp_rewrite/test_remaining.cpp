@@ -956,7 +956,7 @@ int main() {
         friends5();
         st.party_known = true;
         st.party = {"p1", "p2"};
-    }, [](const Ns &) { cb(0x5ebde0, 0, 2, 0); call_registered(0x3fe6f70e); }, [](const Rec &r) {
+    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); call_registered(0x3fe6f70e); }, [](const Rec &r) {   // row 1: the second friend (no browse row since 2026-11-27)
         EXPECT(count_of(r, "online::friend_party 1 -> 1") == 1);
         EXPECT(count_of(r, "text_set_player [profile of ben\\PCTEXT\\p1\\p2]") == 1);
         EXPECT(count_of(r, "show_page 0x719e9fec") == 1);
@@ -964,7 +964,7 @@ int main() {
     // Friend popup of a friend already in our party (parity-e-flow2.md 2.8, fa52c63), new only: no Join / Invite
     // (Ann is online and joinable), View Profile and Remove Friend stay
     run_new("2.8 friend popup, friend in our party", [] { st.active = true; friends5(); st.party_member_friend = 0; },
-            [](const Ns &) { cb(0x5ebde0, 0, 1, 0); }, [](const Rec &r) {
+            [](const Ns &) { cb(0x5ebde0, 0, 0, 0); }, [](const Rec &r) {
         std::string p;
         for (const auto &l : r)
             if (l.rfind("ShowPopup", 0) == 0) p = l;
