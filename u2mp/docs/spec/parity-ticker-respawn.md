@@ -113,11 +113,13 @@ Status: **DONE (CHECK)** 2026-11-25. `gow3_pc/src/u2mp/ticker.cpp`: install chec
 logged once (`ticker: first text added ...` or `ticker: add left entry ...`). Rules: `overlay_rules.cpp`, test
 `u2mp-overlay-test`.
 
-Owner report 2026-11-27: the strip stays empty on PC (PS3 scrolls the results), although the log shows the first text
-added at start 770. Not explained from the code: the add places the text as PS3 does and the PS4 draw `0x5d6860` moves
-it by the frame delta and draws it clipped to the strip. ticker.cpp now logs the ticker state while the strip is drawn
-(every 4 s, 8 times: `ticker: t ... strip x .. y .. w .. h .., drawn ..; [k] start .. width .. "text"`), which shows
-whether the entries move, sit outside the strip or are freed.
+Owner report 2026-11-27: the strip stayed empty on PC. A diagnostic run showed the entries in the strip, scrolling at
+40 units a second as on PS3. Cause: the strip draw prints each entry with a direct call of the text printer
+(`0x5d6b2c` -> `0xcc9a70`), as PS3 drew text; on PS4 a direct print shows nothing, because the menus' text goes into
+the 2D command arena (the renderer's text case queues it with `0xbda9c0(0x124a000, struct, text)` and calls `0xcc9a70`
+only to measure). ticker.cpp points that call at `ticker_print`, which queues the same text struct and string in the
+arena (checked: the call's target and the queue function's first 11 bytes; else `ticker: the strip's text print
+stays direct, so the strip shows no text`). The diagnostic log is gone.
 
 ## 2. "Respawn in [A]..." and the co-op "Tries Remaining" line
 
