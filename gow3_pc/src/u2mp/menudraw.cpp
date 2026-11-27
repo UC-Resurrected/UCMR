@@ -32,7 +32,8 @@
 // quad that still does not fit is dropped instead of written past the end.
 //
 // Also (install_dropdown_rows): hidden lobby option rows take no space and the Profile option rows span their
-// column, as PS3 (control kind 13, below).
+// column, as PS3 (control kind 13, below). And (install_leaderboard_outline): the leaderboard table has no white
+// outline, as PS3.
 //
 // Also (install_carousel_hint): the picture carousels (control kind 8) draw no "<>" beside a focused, closed
 // row while a multiplayer session is up, as PS3 (u2mp/docs/MENUS.md 3.2).
@@ -43,6 +44,7 @@
 #include <initializer_list>
 #include <iterator>
 
+#include "host_memory.h"
 #include "u2mp_internal.h"
 
 namespace u2mp {
@@ -420,12 +422,46 @@ void install_dropdown_rows(int &installed) {
     ++installed;
 }
 
+// ---- leaderboard list: no white outline -----------------------------------------------------------------------
+// The table control (kind 10, draw 0x58c7a0) asks its list object for named properties (virtual +0x60: row, id).
+// While the answer to 0xffce262d is 0 it draws an opaque white 20-unit outline around the table and its title tab
+// (0x58cc72..0x58d181, polygon 0x5b5de0). The leaderboard list (class vtable 0x100a360) answers every property with 0
+// on PS4 (0x5b3990); on PS3 its getter (0x4116a4) answers 1 for 0xffce262d, so PS3 draws no outline. The slot gets a
+// getter that does the same for that property and keeps 0 for every other one, as PS4.
+constexpr uint64_t kLeaderboardPropertySlot = 0x100a360 + 0x60;
+constexpr uint64_t fLeaderboardProperty = 0x5b3990;   // xor eax,eax; ret
+constexpr uint32_t kPropertyNoOutline = 0xffce262d;
+
+U2MP_GUEST uint32_t leaderboard_property(void *, int32_t, uint32_t id) { return id == kPropertyNoOutline ? 1u : 0u; }
+
+void install_leaderboard_outline(int &installed) {
+    static const unsigned char ret0[] = {0x31, 0xc0, 0xc3};
+    uint64_t slot = 0;
+    std::memcpy(&slot, image.base + kLeaderboardPropertySlot, 8);
+    if (slot != uint64_t(uintptr_t(image.base + fLeaderboardProperty)) ||
+        !image.matches(fLeaderboardProperty, ret0, sizeof ret0)) {
+        log("menu draw: leaderboard list property slot 0x%llx differs, outline left as on PS4",
+            (unsigned long long)kLeaderboardPropertySlot);
+        return;
+    }
+    const HostCodeWrite writable(image.base + kLeaderboardPropertySlot, 8);   // read-only data
+    if (!writable.ok()) {
+        log("menu draw: leaderboard list property slot cannot be made writable (%lu)", writable.error());
+        return;
+    }
+    const uint64_t host = uint64_t(uintptr_t(&leaderboard_property));
+    std::memcpy(image.base + kLeaderboardPropertySlot, &host, 8);
+    log("menu draw: leaderboard table drawn without the white outline (property 0x%08x, as PS3)", kPropertyNoOutline);
+    ++installed;
+}
+
 }  // namespace
 
 void install_menudraw(int &installed) {
     install_streams(installed);   // first: more surviving 2D commands need room in the streams
     install_carousel_hint(installed);
     install_dropdown_rows(installed);
+    install_leaderboard_outline(installed);
 
     static const unsigned char mov_size[] = {0xbf, 0x00, 0x00, 0x03, 0x00, 0xe8};
     static const unsigned char or_flags[] = {0x48, 0x0d, 0x00, 0x00, 0x0c, 0x00};
