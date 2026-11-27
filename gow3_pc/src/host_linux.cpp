@@ -36,6 +36,7 @@ extern __thread sigjmp_buf *runtime_fault_recover;      // runtime.h
 int runtime_isa_emulate(void *context);                  // runtime_isa.c (inactive on Linux)
 int gow3gpu_handle_fault(void *ucontext, void *address);  // gpu/gow3gpu.h
 void gow3gpu_dump_guest_writes(void *ucontext);
+void gow3gpu_note_fatal_fault(void);                      // vk_pipeline_serialization.cpp: crash during the cache warm-up
 }
 
 namespace {
@@ -93,6 +94,8 @@ void report(int sig, siginfo_t *info, ucontext_t *uc) {
             std::snprintf(line, sizeof line, "  #%d %p\n", i, frames[i]);
         put(line);
     }
+    // a crash on a pipeline cache warm-up thread: the next start clears the cache (as the Windows handler does)
+    if (gpu_enabled()) gow3gpu_note_fatal_fault();
     _exit(128 + sig);
 }
 

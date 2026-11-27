@@ -16,6 +16,9 @@
 #include <map>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 #include "common/hash.h"
 #include "common/serdes.h"
@@ -469,7 +472,9 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
 // the cache folder (gow3gpu_note_fatal_fault, from the fatal fault handler) and the next start
 // clears the cache and rebuilds it as the game plays, instead of crashing on the same pipeline.
 thread_local bool t_warmup_thread = false;
-wchar_t g_warmup_mark[1024] = {};
+// the mark's path in the system's own path text (UTF-16 on Windows, the file system's bytes on Linux), so the fault
+// handler can create it without converting anything
+std::filesystem::path::value_type g_warmup_mark[1024] = {};
 
 std::filesystem::path WarmupMarkPath() {
     const auto folder = Storage::DataBase::Instance().Folder();
@@ -484,7 +489,7 @@ bool TakeWarmupMark() {
     if (mark.empty()) {
         return false;
     }
-    const std::wstring path = mark.wstring();
+    const auto& path = mark.native();
     if (path.size() < std::size(g_warmup_mark)) {
         std::copy(path.begin(), path.end(), g_warmup_mark);
         g_warmup_mark[path.size()] = 0;
@@ -1714,6 +1719,21 @@ extern "C" void gow3gpu_note_fatal_fault(void) {
         DWORD written = 0;
         WriteFile(file, text, DWORD(sizeof(text) - 1), &written, nullptr);
         CloseHandle(file);
+    }
+    std::fprintf(stderr, "Pipeline cache: this crash happened while loading the pipeline cache "
+                         "(graphics driver); the next start clears the cache and rebuilds it\n");
+#else
+    // the same mark from the Linux fault report (host_linux.cpp); open/write only, as the process is going down
+    if (!Vulkan::t_warmup_thread || !Vulkan::g_warmup_mark[0]) {
+        return;
+    }
+    const int file = open(Vulkan::g_warmup_mark, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (file >= 0) {
+        static const char text[] = "The game stopped while loading the pipeline cache; the next "
+                                   "start clears the cache.\n";
+        if (write(file, text, sizeof(text) - 1) < 0) {
+        }
+        close(file);
     }
     std::fprintf(stderr, "Pipeline cache: this crash happened while loading the pipeline cache "
                          "(graphics driver); the next start clears the cache and rebuilds it\n");
