@@ -289,6 +289,10 @@ std::string progression_player_summary(const std::string &name) {
 
 // gpu/shim/gow3gpu.cpp: the runtime's text input (renamed *_old for the old build by OLD_FLAGS)
 extern "C" int gow3gpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8) {
+#ifdef u2mp   // the old build (-Du2mp=u2mp_old): (2026-11-27, remaining.md 2.3) the prompt no longer says "letters or digits"
+    if (prompt_utf8 && std::strcmp(prompt_utf8, "Clan Tag (up to 4 letters or digits; empty = none)") == 0)
+        prompt_utf8 = "Clan Tag (up to 4 characters; empty = none)";
+#endif
     hx::rec("text_input_begin [%s] [%s]", show(initial_utf8), show(prompt_utf8));
     return st.begin_result;
 }
