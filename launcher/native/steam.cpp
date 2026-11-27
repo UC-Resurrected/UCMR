@@ -25,6 +25,16 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wincodec.h>
+#else
+// Linux: the same logic; the few OS calls (files, Steam's folders, its process, PNG pictures) have their own bodies
+// below, marked "Linux", beside the Windows ones
+#include <cerrno>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+
+#include <zlib.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +50,7 @@ namespace {
 
 // ------------------------------------------------------------------------------------------------ text helpers
 
+#ifdef _WIN32
 std::wstring widen(const std::string &s) {
     if (s.empty()) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -62,6 +73,16 @@ std::string folded(const std::string &s) {
     if (!w.empty()) CharLowerBuffW(w.data(), (DWORD)w.size());
     return narrow(w);
 }
+#else   // Linux: UTF-8 <-> UTF-32 (port.h); towlower in the library's C locale folds ASCII letters (the names and
+        // options compared here are the launcher's own, which it writes the same way each time)
+std::wstring widen(const std::string &s) { return port::wide(s); }
+std::string narrow(const std::wstring &w) { return port::utf8(w); }
+std::string folded(const std::string &s) {
+    std::wstring w = widen(s);
+    for (wchar_t &c : w) c = (wchar_t)std::towlower((wint_t)c);
+    return narrow(w);
+}
+#endif
 
 std::string trimmed(const std::string &s, const char *chars = " \t\r\n") {
     size_t a = s.find_first_not_of(chars);
@@ -87,6 +108,7 @@ std::vector<std::string> split(const std::string &s, char sep) {
 
 // ------------------------------------------------------------------------------------------------ files
 
+#ifdef _WIN32
 bool read_file(const std::wstring &path, std::string &data) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -156,6 +178,90 @@ std::vector<FoundFile> list_files(const std::wstring &folder, const std::wstring
     FindClose(h);
     return out;
 }
+#else   // Linux: the same helpers on std::filesystem; a backslash in our path text is a folder separator (port::path)
+namespace fs = std::filesystem;
+
+bool read_file(const std::wstring &path, std::string &data) {
+    std::error_code ec;
+    const fs::path p = port::path(path);
+    const auto size = fs::file_size(p, ec);
+    if (ec || size >= (1ull << 30)) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    data.assign((size_t)size, '\0');
+    return data.empty() || (bool)f.read(data.data(), (std::streamsize)data.size());
+}
+
+bool write_file(const std::wstring &path, const std::string &data) {
+    std::ofstream f(port::path(path), std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(data.data(), (std::streamsize)data.size());
+    f.close();
+    return !f.fail();
+}
+
+bool is_file(const std::wstring &path) {
+    std::error_code ec;
+    return fs::exists(port::path(path), ec) && !fs::is_directory(port::path(path), ec);
+}
+
+bool is_dir(const std::wstring &path) {
+    std::error_code ec;
+    return fs::is_directory(port::path(path), ec);
+}
+
+void make_dirs(const std::wstring &path) {
+    std::error_code ec;
+    if (!path.empty()) fs::create_directories(port::path(path), ec);
+}
+
+std::wstring join(const std::wstring &a, const std::wstring &b) {
+    std::wstring tail = b;
+    for (wchar_t &c : tail)
+        if (c == L'\\') c = L'/';
+    if (a.empty()) return tail;
+    return a.back() == L'/' ? a + tail : a + L"/" + tail;
+}
+
+std::wstring last_error_text(const wchar_t *what, const std::wstring &path) {
+    return std::wstring(what) + L" " + path + L" (" + port::wide(std::strerror(errno)) + L")";
+}
+
+struct FoundFile {
+    std::wstring name;
+    fs::file_time_type written;
+};
+
+// FindFirstFileW's pattern rules: * and ? over the whole name, letters compared without case
+bool name_matches(const std::wstring &name, const std::wstring &pattern) {
+    size_t n = 0, p = 0, star = std::wstring::npos, resume = 0;
+    auto same = [](wchar_t a, wchar_t b) { return std::towlower((wint_t)a) == std::towlower((wint_t)b); };
+    while (n < name.size()) {
+        if (p < pattern.size() && (pattern[p] == L'?' || (pattern[p] != L'*' && same(pattern[p], name[n])))) { ++n; ++p; }
+        else if (p < pattern.size() && pattern[p] == L'*') { star = p++; resume = n; }
+        else if (star != std::wstring::npos) { p = star + 1; n = ++resume; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == L'*') ++p;
+    if (p == pattern.size()) return true;
+    // as with FindFirstFileW, "name.*" also finds a file called just "name"
+    if (pattern.size() >= 2 && pattern.compare(pattern.size() - 2, 2, L".*") == 0 && name.size() == pattern.size() - 2)
+        return name_matches(name, pattern.substr(0, pattern.size() - 2));
+    return false;
+}
+
+std::vector<FoundFile> list_files(const std::wstring &folder, const std::wstring &pattern, bool dirs) {
+    std::vector<FoundFile> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path(folder), ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (it->is_directory(e2) != dirs) continue;
+        const std::wstring name = port::wide(it->path().filename().string());
+        if (name_matches(name, pattern)) out.push_back({name, it->last_write_time(e2)});
+    }
+    return out;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ binary key/value
 
@@ -435,6 +541,7 @@ MergeResult merge(std::vector<Item> &top, const std::vector<Target> &targets, co
 
 // ------------------------------------------------------------------------------------------------ Steam's folders
 
+#ifdef _WIN32
 std::wstring registry_text(HKEY hive, const wchar_t *path, const wchar_t *value) {
     wchar_t buf[MAX_PATH * 2];
     DWORD size = sizeof(buf);
@@ -484,6 +591,46 @@ std::vector<std::wstring> steam_folders() {
     }
     return out;
 }
+#else   // Linux: Steam's folders in the home folder (native, Flatpak, Snap); no registry
+std::wstring full_path(const std::wstring &p) {
+    std::error_code ec;
+    fs::path a = fs::absolute(port::path(p), ec);
+    if (ec) a = port::path(p);
+    std::wstring s = port::wide(a.lexically_normal().string());
+    while (s.size() > 1 && s.back() == L'/') s.pop_back();
+    return s;
+}
+
+// the folder with symbolic links resolved (~/.steam/steam is a link to ~/.local/share/Steam)
+std::wstring real_path(const std::wstring &p) {
+    std::error_code ec;
+    const fs::path r = fs::canonical(port::path(p), ec);
+    return ec ? full_path(p) : port::wide(r.string());
+}
+
+// paths keep their case on Linux; only the shared code's spelling of the comparison
+std::wstring lower_w(std::wstring s) { return s; }
+
+std::vector<std::wstring> steam_folders() {
+    std::string home;
+    if (!port::env("HOME", home) || home.empty()) return {};
+    std::string data;
+    if (!port::env("XDG_DATA_HOME", data) || data.empty() || data[0] != '/') data = home + "/.local/share";
+    const std::vector<std::string> found = {
+        home + "/.steam/steam", home + "/.steam/root", data + "/Steam",
+        home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam",   // Flatpak
+        home + "/.var/app/com.valvesoftware.Steam/.steam/steam",
+        home + "/snap/steam/common/.local/share/Steam",                  // Snap
+    };
+    std::vector<std::wstring> out;
+    std::set<std::wstring> seen;
+    for (const std::string &f : found)
+        if (is_dir(port::wide(f)) && seen.insert(full_path(port::wide(f))).second) out.push_back(port::wide(f));
+    return out;
+}
+
+unsigned long long _strtoui64(const char *s, char **end, int base) { return std::strtoull(s, end, base); }
+#endif
 
 // pairs of (userdata folder number, persona name), taken from the text-format config/loginusers.vdf
 std::vector<std::pair<std::string, std::string>> persona_names(const std::wstring &root) {
@@ -554,6 +701,7 @@ struct Picture {
     const uint8_t *at(int x, int y) const { return &px[((size_t)y * w + x) * 4]; }
 };
 
+#ifdef _WIN32
 struct Com {
     IWICImagingFactory *factory = nullptr;
     bool owns = false;
@@ -641,6 +789,197 @@ bool save_picture(Com &com, const Picture &pic, const std::wstring &path) {
     return SUCCEEDED(frame->WritePixels((UINT)pic.h, stride, (UINT)rows.size(), rows.data())) &&
            SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
 }
+#else   // Linux: PNG in and out over zlib (the same pictures WIC gives: 8-bit RGBA in, RGB or RGBA PNG out)
+struct Com {};   // no imaging library to start
+
+uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+// the PNG filter's predictor of byte i of a row (a: left, b: up, c: up-left)
+uint8_t paeth(int a, int b, int c) {
+    const int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+    return (uint8_t)(pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+}
+
+// undoes the filters of `rows` rows of `stride` bytes (each row begins with its filter type); bpp: bytes per pixel,
+// at least 1. false on an unknown filter type.
+bool unfilter(uint8_t *data, size_t rows, size_t stride, size_t bpp) {
+    std::vector<uint8_t> zero(stride, 0);
+    const uint8_t *prior = zero.data();
+    for (size_t y = 0; y < rows; ++y) {
+        uint8_t *row = data + y * (stride + 1);
+        const uint8_t type = row[0];
+        uint8_t *x = row + 1;
+        for (size_t i = 0; i < stride; ++i) {
+            const int a = i >= bpp ? x[i - bpp] : 0, b = prior[i], c = i >= bpp ? prior[i - bpp] : 0;
+            switch (type) {
+            case 0: break;
+            case 1: x[i] = (uint8_t)(x[i] + a); break;
+            case 2: x[i] = (uint8_t)(x[i] + b); break;
+            case 3: x[i] = (uint8_t)(x[i] + ((a + b) >> 1)); break;
+            case 4: x[i] = (uint8_t)(x[i] + paeth(a, b, c)); break;
+            default: return false;
+            }
+        }
+        prior = x;
+    }
+    return true;
+}
+
+bool load_picture(Com &, const std::wstring &path, Picture &pic) {
+    std::string file;
+    if (!is_file(path) || !read_file(path, file) || file.size() < 8 + 25 ||
+        file.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) != 0)
+        return false;
+    const uint8_t *d = (const uint8_t *)file.data();
+    uint32_t w = 0, h = 0;
+    int depth = 0, type = -1, interlace = 0;
+    std::vector<uint8_t> palette, packed;
+    for (size_t at = 8; at + 12 <= file.size();) {
+        const uint32_t n = be32(d + at);
+        if (n > file.size() - at - 12) return false;
+        const std::string kind(file, at + 4, 4);
+        const uint8_t *body = d + at + 8;
+        if (kind == "IHDR" && n >= 13) {
+            w = be32(body);
+            h = be32(body + 4);
+            depth = body[8];
+            type = body[9];
+            interlace = body[12];
+            if (body[10] != 0 || body[11] != 0 || interlace > 1) return false;
+        } else if (kind == "PLTE") {
+            palette.assign(body, body + n);
+        } else if (kind == "IDAT") {
+            packed.insert(packed.end(), body, body + n);
+        } else if (kind == "IEND") {
+            break;
+        }
+        at += 12 + n;
+    }
+    if (!w || !h || w > 16384 || h > 16384) return false;
+    int channels;
+    switch (type) {
+    case 0: channels = 1; break;
+    case 2: channels = 3; break;
+    case 3: channels = 1; break;
+    case 4: channels = 2; break;
+    case 6: channels = 4; break;
+    default: return false;
+    }
+    const bool depth_ok = type == 0 ? (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)
+                        : type == 3 ? (depth == 1 || depth == 2 || depth == 4 || depth == 8)
+                                    : (depth == 8 || depth == 16);
+    if (!depth_ok || (type == 3 && palette.size() < 3)) return false;
+    const size_t bits = (size_t)channels * depth, bpp = std::max<size_t>(1, bits / 8);
+    // the passes: the whole image, or Adam7's seven (start x, start y, step x, step y)
+    static const int adam7[7][4] = {{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}};
+    struct Pass { uint32_t x0, y0, dx, dy, w, h; };
+    std::vector<Pass> passes;
+    if (!interlace) {
+        passes.push_back({0, 0, 1, 1, w, h});
+    } else {
+        for (auto &a : adam7) {
+            const uint32_t x0 = (uint32_t)a[0], y0 = (uint32_t)a[1], dx = (uint32_t)a[2], dy = (uint32_t)a[3];
+            const uint32_t pw = w > x0 ? (w - x0 + dx - 1) / dx : 0, ph = h > y0 ? (h - y0 + dy - 1) / dy : 0;
+            passes.push_back({x0, y0, dx, dy, pw, ph});
+        }
+    }
+    size_t total = 0;
+    for (const Pass &p : passes)
+        if (p.w && p.h) total += (size_t)p.h * (1 + (p.w * bits + 7) / 8);
+    std::vector<uint8_t> raw(total);
+    uLongf got = (uLongf)raw.size();
+    if (uncompress(raw.data(), &got, packed.data(), (uLong)packed.size()) != Z_OK || got != raw.size()) return false;
+    pic.w = (int)w;
+    pic.h = (int)h;
+    pic.px.assign((size_t)w * h * 4, 255);
+    size_t offset = 0;
+    for (const Pass &p : passes) {
+        if (!p.w || !p.h) continue;
+        const size_t stride = (p.w * bits + 7) / 8;
+        uint8_t *data = raw.data() + offset;
+        if (!unfilter(data, p.h, stride, bpp)) return false;
+        offset += (size_t)p.h * (stride + 1);
+        for (uint32_t y = 0; y < p.h; ++y) {
+            const uint8_t *row = data + (size_t)y * (stride + 1) + 1;
+            // sample k of the row (a channel value, depth bits, the most significant first), as 8 bits
+            auto sample8 = [&](size_t k) -> uint8_t {
+                if (depth == 16) return row[k * 2];
+                if (depth == 8) return row[k];
+                const size_t bit = k * depth;
+                const unsigned v = (row[bit / 8] >> (8 - depth - bit % 8)) & ((1u << depth) - 1);
+                return type == 3 ? (uint8_t)v : (uint8_t)(v * 255 / ((1u << depth) - 1));
+            };
+            for (uint32_t x = 0; x < p.w; ++x) {
+                uint8_t *o = pic.at((int)(p.x0 + x * p.dx), (int)(p.y0 + y * p.dy));
+                const size_t k = (size_t)x * channels;
+                if (type == 3) {
+                    const size_t i = (size_t)(depth == 8 ? row[x] : sample8(x)) * 3;
+                    if (i + 2 < palette.size()) { o[0] = palette[i]; o[1] = palette[i + 1]; o[2] = palette[i + 2]; }
+                    else o[0] = o[1] = o[2] = 0;
+                } else if (channels <= 2) {
+                    o[0] = o[1] = o[2] = sample8(k);
+                } else {
+                    o[0] = sample8(k);
+                    o[1] = sample8(k + 1);
+                    o[2] = sample8(k + 2);
+                }
+            }
+        }
+    }
+    return true;   // source art is treated as fully opaque (as the Windows body: alpha 255)
+}
+
+void put_chunk(std::string &out, const char *kind, const std::string &body) {
+    auto u32 = [&](uint32_t v) { for (int s = 24; s >= 0; s -= 8) out += (char)(v >> s); };
+    u32((uint32_t)body.size());
+    const size_t start = out.size();
+    out.append(kind, 4);
+    out += body;
+    u32((uint32_t)crc32(0, (const Bytef *)out.data() + start, (uInt)(out.size() - start)));
+}
+
+// opaque pictures are written as 24-bit RGB, the logo (has_alpha) as RGBA; each row with the filter that leaves the
+// smallest sum of byte values (the usual choice), the whole compressed at zlib's best level
+bool save_picture(Com &, const Picture &pic, const std::wstring &path) {
+    if (pic.w <= 0 || pic.h <= 0) return false;
+    const size_t channels = pic.has_alpha ? 4 : 3, stride = (size_t)pic.w * channels;
+    std::vector<uint8_t> rows((stride + 1) * pic.h), plain(stride), prior(stride, 0), best(stride), trial(stride);
+    for (int y = 0; y < pic.h; ++y) {
+        for (int x = 0; x < pic.w; ++x)
+            for (size_t c = 0; c < channels; ++c) plain[(size_t)x * channels + c] = pic.at(x, y)[c];
+        unsigned long best_sum = ~0ul;
+        uint8_t best_type = 0;
+        for (uint8_t type = 0; type < 5; ++type) {
+            unsigned long sum = 0;
+            for (size_t i = 0; i < stride; ++i) {
+                const int a = i >= channels ? plain[i - channels] : 0, b = prior[i], c = i >= channels ? prior[i - channels] : 0;
+                const int pred = type == 0 ? 0 : type == 1 ? a : type == 2 ? b : type == 3 ? (a + b) >> 1 : paeth(a, b, c);
+                trial[i] = (uint8_t)(plain[i] - pred);
+                sum += trial[i] < 128 ? trial[i] : 256 - trial[i];
+            }
+            if (sum < best_sum) { best_sum = sum; best_type = type; best = trial; }
+        }
+        uint8_t *row = rows.data() + (size_t)y * (stride + 1);
+        row[0] = best_type;
+        std::memcpy(row + 1, best.data(), stride);
+        prior = plain;
+    }
+    std::vector<uint8_t> packed(compressBound((uLong)rows.size()));
+    uLongf size = (uLongf)packed.size();
+    if (compress2(packed.data(), &size, rows.data(), (uLong)rows.size(), Z_BEST_COMPRESSION) != Z_OK) return false;
+    std::string ihdr;
+    for (uint32_t v : {(uint32_t)pic.w, (uint32_t)pic.h})
+        for (int s = 24; s >= 0; s -= 8) ihdr += (char)(v >> s);
+    ihdr += (char)8;
+    ihdr += (char)(pic.has_alpha ? 6 : 2);
+    ihdr.append(3, '\0');
+    std::string out("\x89PNG\r\n\x1a\n", 8);
+    put_chunk(out, "IHDR", ihdr);
+    put_chunk(out, "IDAT", std::string((const char *)packed.data(), size));
+    put_chunk(out, "IEND", "");
+    return write_file(path, out);
+}
+#endif
 
 // Lanczos-3 kernel; resized() applies it in two separable passes on float channels, premultiplying by alpha when the
 // image carries transparency
@@ -817,6 +1156,7 @@ int write_pictures(Com &com, const std::wstring &grid, const std::vector<uint32_
 
 const wchar_t *const BACKUP_END = L".uncharted-backup";
 
+#ifdef _WIN32
 std::wstring keep_backup(const std::wstring &file) {
     if (!is_file(file)) return std::wstring();
     std::time_t now = std::time(nullptr);
@@ -836,6 +1176,26 @@ std::wstring keep_backup(const std::wstring &file) {
     for (size_t i = 0; i + 5 < old.size(); ++i) DeleteFileW(join(folder, old[i].name).c_str());
     return copy;
 }
+#else   // Linux: the same backup (a new file, never over an old one) and the same five kept
+std::wstring keep_backup(const std::wstring &file) {
+    if (!is_file(file)) return std::wstring();
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+    std::wstring copy = file + L"." + port::wide(stamp) + BACKUP_END;
+    for (int n = 2; is_file(copy); ++n) copy = file + L"." + port::wide(stamp) + L"-" + std::to_wstring(n) + BACKUP_END;
+    std::error_code ec;
+    if (!fs::copy_file(port::path(file), port::path(copy), fs::copy_options::none, ec) || ec) return std::wstring();
+    size_t cut = file.find_last_of(L"\\/");
+    std::wstring folder = file.substr(0, cut), name = file.substr(cut + 1);
+    std::vector<FoundFile> old = list_files(folder, name + L".*" + BACKUP_END, false);
+    std::sort(old.begin(), old.end(), [](const FoundFile &a, const FoundFile &b) { return a.written < b.written; });
+    for (size_t i = 0; i + 5 < old.size(); ++i) fs::remove(port::path(join(folder, old[i].name)), ec);
+    return copy;
+}
+#endif
 
 struct AccountResult {
     std::wstring file, backup;
@@ -870,8 +1230,6 @@ std::vector<std::vector<std::string>> records(const char *text) {
 
 }  // namespace
 
-#endif   // _WIN32 (the Steam code above)
-
 extern "C" {
 
 UN_API int un_version(void) { return UN_VERSION; }
@@ -889,6 +1247,16 @@ UN_API int un_steam_running(void) {
     CloseHandle(snap);
     return running;
 }
+
+#else   // Linux: the Steam client's process is called "steam" (native, Flatpak and Snap alike)
+
+UN_API int un_steam_running(void) {
+    for (const port::ProcessInfo &p : port::list_processes())
+        if (p.name == "steam") return 1;
+    return 0;
+}
+
+#endif
 
 UN_API int un_steam_targets(const char *request, char *out, int cap) {
     std::string root, starter, python, script;
@@ -968,7 +1336,12 @@ UN_API int un_steam_add(const char *request, char *out, int cap) {
         std::string data;
         write_entries(top, data);
         std::wstring writing = file + L".writing";
+#ifdef _WIN32
         if (!write_file(writing, data) || !MoveFileExW(writing.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+#else
+        std::error_code moved;
+        if (!write_file(writing, data) || (fs::rename(port::path(writing), port::path(file), moved), moved)) {
+#endif
             int r = give(narrow(last_error_text(L"failed to write", file)), out, cap);
             return r < 0 ? r : UN_ERR_OS;
         }
@@ -995,37 +1368,4 @@ UN_API int un_steam_roundtrip(const char *path) {
     return write_file(file + L".roundtrip", data) ? 0 : 1;
 }
 
-#endif   // _WIN32
-
 }  // extern "C"
-
-#ifndef _WIN32   // Linux: Steam's folders (~/.steam, Flatpak) and process list come in a later phase (§13 phase 6)
-
-#include <cstring>
-
-extern "C" {
-
-UN_API int un_steam_running(void) { return 0; }
-
-UN_API int un_steam_targets(const char *request, char *out, int cap) {
-    port::not_yet("Add to Steam");
-    if (cap < 1) return -1;
-    out[0] = '\0';
-    return 0;
-}
-
-UN_API int un_steam_add(const char *request, char *out, int cap) {
-    port::not_yet("Add to Steam");
-    if (cap < 1) return -1;
-    out[0] = '\0';
-    return UN_ERR_NO_STEAM;
-}
-
-UN_API int un_steam_roundtrip(const char *path) {
-    port::not_yet("shortcuts.vdf round trip");
-    return 1;
-}
-
-}  // extern "C"
-
-#endif

@@ -407,8 +407,13 @@ Value add_to_steam(const Request &q) {
                                          "right-click its tray icon -> Exit) and then press Retry.", 1);
     }
     if (q.step > 1) return done();
+#ifdef _WIN32
     std::vector<std::vector<std::string>> rows = {{"root", q.root}, {"starter", q.root + "\\UCMR_Launcher.exe"},
                                                   {"python", q.python}, {"script", q.script}};
+#else   // the package's start script (tools/linux_starter)
+    std::vector<std::vector<std::string>> rows = {{"root", q.root}, {"starter", q.root + "/UCMR_Launcher"},
+                                                  {"python", q.python}, {"script", q.script}};
+#endif
     std::vector<std::string> names = {APP_TITLE, OLD_APP_TITLE};
     for (auto &g : q.games.items) names.push_back(field(g, "name"));
     if (per_game) {
@@ -424,7 +429,11 @@ Value add_to_steam(const Request &q) {
             add.push_back(row);
         }
     for (auto &n : names) add.push_back({"name", n});
+#ifdef _WIN32
     add.push_back({"icon", q.root + "\\launcher\\assets\\UCMR.ico"});
+#else   // Steam on Linux shows a PNG icon (the package's 256x256 launcher icon)
+    add.push_back({"icon", q.root + "/launcher/assets/icon.png"});
+#endif
     const bool pictures = is_game_dir(q.game_dir);
     if (pictures) add.push_back({"game_dir", q.game_dir});
     for (auto &a : q.steam_accounts.items)

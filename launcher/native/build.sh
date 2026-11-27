@@ -20,7 +20,7 @@ if [[ $(uname -s) == Linux ]]; then
     done
     # every symbol resolved at link time; the C++ runtime linked in, so the library needs only the system's C library
     "${CXX[@]}" -shared -s -Wl,--gc-sections -Wl,--no-undefined -static-libstdc++ -static-libgcc \
-        -o libuncharted_native.so "${OBJECTS[@]}" -ldl -lpthread -lcurl   # libcurl: the launcher update (updater.cpp)
+        -o libuncharted_native.so "${OBJECTS[@]}" -ldl -lpthread -lcurl -lz   # libcurl: the launcher update (updater.cpp); zlib: Steam artwork (steam.cpp)
     sha256sum libuncharted_native.so
     "${CXX[@]}" "${FLAGS[@]}" -s -static-libstdc++ -static-libgcc -o game_starter game_starter.cpp -ldl
     exit 0

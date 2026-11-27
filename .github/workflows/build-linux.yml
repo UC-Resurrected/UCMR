@@ -27,7 +27,7 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends clang-15 libvulkan-dev libcurl4-openssl-dev
+          sudo apt-get install -y -q --no-install-recommends clang-15 libvulkan-dev libcurl4-openssl-dev zlib1g-dev
 
       - name: Build
         run: |
