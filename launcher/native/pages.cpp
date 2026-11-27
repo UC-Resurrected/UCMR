@@ -2162,7 +2162,8 @@ Value page_u2mp(const State &state) {
     setup.push_back(label(p + "line:ps3_elf", elf.empty() ? "Not chosen: looked for as EBOOT.elf in your PS3 folder's USRDIR." : elf,
                           DIM, CARD, 9));
     setup.push_back(row(p + "row:dir", "3. Choose where the files go",
-                        "The U2 Multiplayer folder: the converted files (about 400 MB).",
+                        "The U2 Multiplayer folder: the converted files and the import's caches (about 1.1 GB, "
+                        "2.2 GB with the DLC map packs).",
                         buttons_box(p, "dir", {{"change", "Change"}, {"open", "Open"}})));
     setup.push_back(label(p + "line:dir", mp.get("dir") ? text_of(*mp.get("dir")) : "", DIM, CARD, 9));
     setup.push_back(bold_label(p + "import_title", "4. Import", TEXT));
