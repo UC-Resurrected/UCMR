@@ -887,16 +887,17 @@ void draw_screen(float dt) {
 
     if (cards_ok()) draw_cards(a, target);
 
+    // PS3 places these quads by their two corners (top left, bottom right); menu_draw_quad takes a size.
     if (uint8_t *edge = menu_net_material(kEdgeImage)) {
         menu_draw_quad(edge, 0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 0.0f, 1.0f, 1.0f, a, a);
-        menu_draw_quad(edge, -10.0f, -10.0f, 1290.0f, 730.0f, 0.0f, 0.0f, 1.0f, 1.0f, a, a);
+        menu_draw_quad(edge, -10.0f, -10.0f, 1290.0f + 10.0f, 730.0f + 10.0f, 0.0f, 0.0f, 1.0f, 1.0f, a, a);
     }
 
     const float slide = 1.0f - std::clamp((t - 2.0f) * kRosterSlide, 0.0f, 1.0f);
     draw_rosters(a * std::clamp(t - 3.0f, 0.0f, 1.0f), 0.0f, (slide * slide) * 200.0f, dt);
 
     if (uint8_t *band = menu_net_material(kBandImage))
-        menu_draw_quad(band, 128.0f, 22.0f, 1152.0f, 278.0f, 0.0f, 0.0f, 1.0f, 1.0f, a * 0.75f, a);
+        menu_draw_quad(band, 128.0f, 22.0f, 1152.0f - 128.0f, 278.0f - 22.0f, 0.0f, 0.0f, 1.0f, 1.0f, a * 0.75f, a);
 
     const char *map_name;
     char description[128];
