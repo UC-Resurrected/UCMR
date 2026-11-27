@@ -240,7 +240,7 @@ Run 45: the hero's render object is collected every frame, but its draw data fla
 
 | bit | set by | cleared by (campaign) | effect |
 |---|---|---|---|
-| 0x0200 | Character::Init 0x473f80 (0x474003, object +0x155 \|= 2) for every character | the active-state enters: NdGameObject 0x987840 / 0x988c00 (states 0x9ad5f0 / 0x9adbb0), the player 0x260920 (0x260c33) | the draw preparation 0xc47790 skips the draw data (0xc47db1: `test byte +0x1b9, 2`) |
+| 0x0200 | Character::Init 0x473f80 (0x474003, object +0x155 \|= 2) for every character | NdGameObject 0x987840 / 0x988c00 (states 0x9ad5f0 / 0x9adbb0); for a character only its death (state Npc "Dead", enter 0x260920: 0x260c33, then 0x40000) | not a hide bit (corrected 2026-11-27, see below): a live character for the GPU mesh ray caster; 0xc47790 is its result pass (meshraycaster.cpp), not a draw preparation |
 | 0x0800 | the player Init 0x724b70 (0x724cf3, also 0x200 at 0x724ca3); player events 0x7edd80 (with 0x20, "hide") | the player event handler / weapon code (0xadada3: `& ~0x820`) | hide |
 | 0x4000 | NetCharacter::Init 0x5fd443 / 0x45ba83 / 0xb21bf3 (object +0x154 \|= 2) | NetCharacter state enter 0x5f9750, player 0x260920 / 0x7a1d80 | spawning / dead hide |
 
@@ -255,6 +255,18 @@ cleared on every draw data of its DrawControl (object +0x180), and object +0x154
 (the effect of the active-state enter). Logged as `render: hero spawned ...: N draw data, flags A -> B`.
 `UNCHARTED_U2MP_HERO_SHOW=0` turns it off. If the log shows 0 draw data at that point (meshes added
 later), or the run-45 style summary shows the bits back, the clearing has to move later (next step).
+
+Correction (2026-11-27, the MP legs bug): 0x200 must stay. The frame's collect only needs
+`(flags & 0x2001) == 0x2000` (0xbd5022), and the NetCharacter state enter 0x5f9750 clears only 0x4000; the
+hero was finally drawn by the bounds and cell fixes below. 0x200 marks a live character for the
+GPU mesh ray caster: the request pass gives such a draw data the target class 8 (0x18 with 0x4000) and takes
+it only for rays asking for that class (0xc4aae8..0xc4ab0d), and the result pass drops hits on it (0xc47db1).
+The leg IK ground probes (leg raycaster 0x472860: from 0.35 m above each foot, 2.2 m down, request flags 5,
+through 0xc471a0) do not ask for it, so no character is ground for its own feet; only a dying NPC drops the
+bit (a body becomes ground). With 0x200 cleared the local hero's probes hit its own shins and shoes and the
+leg IK planted the feet there: in every MP mode the local player ran in a deep crouch and its legs folded
+up and stretched while hanging, while the upper body was right and the campaign was fine. The hook now
+clears 0x4000 and 0x800 (and object +0x154 bit 2) only.
 
 ### Run 46: the render object is the anim data (not fixed yet; run-47 probe)
 
