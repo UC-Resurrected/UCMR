@@ -40,6 +40,7 @@ void menu_draw_quad(uint8_t *material, float x, float y, float w, float h, float
 namespace u2mp {
 void install_menus(int &installed);
 void menus_help_bar_frame();   // MENUS.md 3.8.1 (new only: the HB scenarios)
+int32_t playlist_index(uint32_t id);   // new only: the 14P / 15P scenarios
 void install_menuimages(int &installed);
 int32_t playlist_pick_type();
 bool playlist_game_types(std::vector<int32_t> &types);
@@ -264,6 +265,56 @@ uint32_t hex_u32(const std::string &h, size_t at) {   // little-endian u32 at by
 void put_hex_u32(std::string &h, size_t at, uint32_t v) {
     for (int b = 0; b < 4; ++b, v >>= 8) h.replace(2 * (at + size_t(b)), 2, hex(&v, 1));
 }
+// (2026-11-27, spec menus.md "Definitions") The PS3 playlists are built in the order of the PS3 list: The Lab,
+// Deathmatch, Elimination, Plunder, Objectives, Ranked, All Competitive Modes, Co-op Objective, Co-op Arena, then Gold
+// Rush and Survival. Each built playlist is the same record as before (the picture choice gives the same pictures in
+// both orders); only the order changes. The old build's runs of build log lines and of published records are put
+// in that order (a run is changed only when every line in it is one of these playlists: fallback builds are not).
+const char *const kPs3PlaylistOrder[] = {"the-lab",         "deathmatch",     "elimination", "plunder",
+                                         "objectives",      "ranked",         "all-competitive",
+                                         "coop-objective",  "coop-arena",     "gold-rush",   "survival"};
+int ps3_rank_of_key(const std::string &key) {
+    for (int i = 0; i < 11; ++i)
+        if (key == kPs3PlaylistOrder[i]) return i;
+    return -1;
+}
+int ps3_rank_of_id(uint32_t id) {
+    for (int i = 0; i < 11; ++i)
+        if (sid(("u2mp/playlist/" + std::string(kPs3PlaylistOrder[i])).c_str()) == id) return i;
+    return -1;
+}
+// rank of one record line, -1 when it is not a PS3 playlist line of kind `ngm` (published record) or not (log line)
+int ps3_rank_of_line(const std::string &l, bool ngm) {
+    if (ngm) {
+        static const std::string head = "ngm playlist[";
+        const size_t eq = l.find("] = ");
+        if (l.rfind(head, 0) != 0 || eq == std::string::npos || l.size() < eq + 4 + 8) return -1;
+        return ps3_rank_of_id(hex_u32(l.substr(eq + 4), 0));
+    }
+    static const std::string head = "log menus: playlist ";
+    const size_t arrow = l.find(" -> picture ");
+    if (l.rfind(head, 0) != 0 || arrow == std::string::npos) return -1;
+    return ps3_rank_of_key(l.substr(head.size(), arrow - head.size()));
+}
+void ps3_playlist_order(std::vector<std::string> &r, bool ngm) {
+    for (size_t i = 0; i < r.size();) {
+        size_t j = i;
+        while (j < r.size() && ps3_rank_of_line(r[j], ngm) >= 0) ++j;
+        if (j - i > 1) {
+            const int base = std::atoi(r[i].c_str() + 13);   // "ngm playlist[" is 13 characters
+            std::stable_sort(r.begin() + std::ptrdiff_t(i), r.begin() + std::ptrdiff_t(j),
+                             [ngm](const std::string &x, const std::string &y) {
+                                 return ps3_rank_of_line(x, ngm) < ps3_rank_of_line(y, ngm);
+                             });
+            if (ngm)   // the published slots keep their numbers 0..n-1
+                for (size_t k = i; k < j; ++k) {
+                    const size_t eq = r[k].find("] = ");
+                    r[k] = "ngm playlist[" + std::to_string(base + int(k - i)) + r[k].substr(eq);
+                }
+        }
+        i = j > i ? j : i + 1;
+    }
+}
 void expected_old(std::vector<std::string> &r) {
     for (auto &l : r) {
         // f11e480 (spec parity-g-friends.md G1): the Players Met query takes progression_players_met() instead of
@@ -291,6 +342,8 @@ void expected_old(std::vector<std::string> &r) {
         put_hex_u32(h, 0x1c, coop ? 3 : 5);
         l = l.substr(0, eq + 4) + h;
     }
+    ps3_playlist_order(r, false);
+    ps3_playlist_order(r, true);
 }
 
 // per query of the current run, by side (filled by model_ask, used by cursor_expected)
@@ -1377,8 +1430,10 @@ uint32_t playlist_id(int k) {
     return p ? *reinterpret_cast<const uint32_t *>(p) : 0;
 }
 
-// After a build (the image is fresh, so the first call republishes): descriptors, apply, pick.
-void post_build_scenarios(const std::string &tag, void (*data)()) {
+// After a build (the image is fresh, so the first call republishes): descriptors, apply, pick. `by_index`: the
+// scenarios that ask for playlists by their place in the list; old and new differ there for the PS3 playlists, whose
+// order changed (expected_old), so they run for the fallback builds only.
+void post_build_scenarios(const std::string &tag, void (*data)(), bool by_index = true) {
     run(tag + " 18a count cleared: pointers rewritten, no log", [data](const Api &a) {
         menus_ready(a);
         data();
@@ -1389,6 +1444,7 @@ void post_build_scenarios(const std::string &tag, void (*data)()) {
         put<uint32_t>(NGM + 0x21a0, 2);   // someone else's count: left alone
         ask(E55, 1);
     });
+    if (!by_index) return;
     run(tag + " 19 op 3 descriptors", [data](const Api &a) {
         menus_ready(a);
         data();
@@ -1483,6 +1539,39 @@ void post_build_scenarios(const std::string &tag, void (*data)()) {
         ids.push_back(0);
         pick_and_types(a, ids, 12345);
         pick_and_types(a, ids, 1);
+    });
+}
+
+// The PS3 playlist order and each playlist's index in the PS3 list (also with playlists skipped).
+void playlist_order_scenarios() {
+    run_new("14P all game types playable: PS3 order and PS3 indexes (new only)", [](const Api &a) {
+        menus_ready(a);
+        full_playlist_data();
+        ask(E55, 1);
+        EXPECT(get<uint32_t>(NGM + 0x21a0) == 11);
+        for (int k = 0; k < 11; ++k) {
+            const uint32_t id = sid(("u2mp/playlist/" + std::string(kPs3PlaylistOrder[k])).c_str());
+            EXPECT(playlist_id(k) == id);
+            EXPECT(u2mp::playlist_index(id) == k);
+        }
+        EXPECT(u2mp::playlist_index(0xdeadbeef) == -1);
+    });
+}
+void playlist_partial_order_scenario() {
+    run_new("15P some types playable: skipped playlists keep their PS3 indexes (new only)", [](const Api &a) {
+        menus_ready(a);
+        partial_playlist_data();
+        ask(E55, 1);
+        const uint32_t n = get<uint32_t>(NGM + 0x21a0);
+        EXPECT(n > 0 && n < 11);
+        int last = -1;
+        for (uint32_t k = 0; k < n; ++k) {
+            const int rank = ps3_rank_of_id(playlist_id(int(k)));
+            EXPECT(rank > last);   // PS3 order, gaps where a playlist has no playable game type
+            EXPECT(u2mp::playlist_index(playlist_id(int(k))) == rank);
+            last = rank;
+        }
+        EXPECT(u2mp::playlist_index(sid("u2mp/playlist/plunder")) == -1);   // not built: no plunder game
     });
 }
 
@@ -1997,7 +2086,8 @@ int main(int argc, char **argv) {
         menus_query_scenarios();
         playlist_prebuild_scenarios();
         build_scenario("14 all game types playable: 11 PS3 playlists", full_playlist_data, 3);
-        post_build_scenarios("14", full_playlist_data);
+        post_build_scenarios("14", full_playlist_data, false);
+        playlist_order_scenarios();
         menuimages_install_scenarios();
         lookup_scenarios();
         size_scenarios();
@@ -2016,7 +2106,8 @@ int main(int argc, char **argv) {
     }
     if (mode == "pl-partial") {
         build_scenario("15 some types playable: skipped definitions, dups, 8 cap", partial_playlist_data, 2);
-        post_build_scenarios("15", partial_playlist_data);
+        post_build_scenarios("15", partial_playlist_data, false);
+        playlist_partial_order_scenario();
     } else if (mode == "pl-fallback") {
         build_scenario("16 fallback: Machinima skipped, ids replaced", fallback_playlist_data, 2);
         post_build_scenarios("16", fallback_playlist_data);

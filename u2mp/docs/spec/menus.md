@@ -223,26 +223,30 @@ record sees the same bytes.
 
 ### Playlist definitions
 
-Eleven definitions, in this order. "types" are game type **name text ids**; "pictures" is a
-comma-separated list of picture names, each meaning image id `sid("general/net/playlists/<name>")`.
+Eleven definitions, in this order: the order of the PS3 playlist list (the GOTY server data `*playlists*` table, 9
+records: The Lab, Deathmatch, Elimination, Plunder, Objectives, Ranked, All Competitive Modes, Co-op Objective, Co-op
+Arena; owner 2026-11-27: the Find Match list in the PS3 order), then Gold Rush and Survival, which the PS3 list does
+not have. Each definition also carries its PS3 index (`playlist_index`): # - 1, so 0..8 for the PS3 ones and 9 / 10
+for the other two, also when a definition before it is skipped. "types" are game type **name text ids**; "pictures"
+is a comma-separated list of picture names, each meaning image id `sid("general/net/playlists/<name>")`.
 The playlist id is `sid("u2mp/playlist/<key>")`. A description of 0 means: the description text
 (`+4`) of the playlist's first game type record.
 
 | # | key (id) | name text | description text | pictures | types (name text ids, in order) |
 |---|---|---|---|---|---|
-| 1 | all-competitive (`013dc564`) | `sid("u2mp/playlist/all-competitive")` = `013dc564` | `sid("u2mp/playlist/all-competitive/desc")` = `a2d9233c` | grab-bag | a30341e7, 8dfdede9, 3d9470a5, 0544e6f6, 13f76fcc, 71ede2dc, f625a024, 3b8de400 |
-| 2 | ranked (`d96118bb`) | 47b24464 | 57fc82aa | mlg | same 8 as #1 |
-| 3 | deathmatch (`a14747a2`) | a30341e7 | fc8dd900 | deathmatch | a30341e7, 8dfdede9, 3b8de400 |
-| 4 | elimination (`b81c4496`) | 3b8de400 | `sid("u2mp/playlist/elimination/desc")` = `afdefe07` | elimination | 3b8de400 |
+| 1 | the-lab (`811585a4`) | `sid("u2mp/playlist/the-lab")` = `811585a4` | `sid("u2mp/playlist/the-lab/desc")` = `09af6e6f` | the-lab, default | a30341e7, 8dfdede9 |
+| 2 | deathmatch (`a14747a2`) | a30341e7 | fc8dd900 | deathmatch | a30341e7, 8dfdede9, 3b8de400 |
+| 3 | elimination (`b81c4496`) | 3b8de400 | `sid("u2mp/playlist/elimination/desc")` = `afdefe07` | elimination | 3b8de400 |
+| 4 | plunder (`e16fbf61`) | 3d9470a5 | 32cc1acb | plunder | 3d9470a5 |
 | 5 | objectives (`72a5f8c5`) | 4bf30e73 | 675ef552 | objective | 3d9470a5, 0544e6f6, 13f76fcc, 71ede2dc, f625a024 |
-| 6 | plunder (`e16fbf61`) | 3d9470a5 | 32cc1acb | plunder | 3d9470a5 |
-| 7 | coop-objective (`e0c85229`) | 5136a578 | c35e16e8 | coop | 5136a578 |
-| 8 | coop-arena (`03fdfa7b`) | 2ee192ab | 0 | coop, survival, default | 2ee192ab |
-| 9 | gold-rush (`6590fddd`) | 00248bb5 | 0 | default, survival, coop | 00248bb5, e9995f4c |
-| 10 | survival (`a6481abb`) | 2959eca4 | 0 | survival, default, coop | 2959eca4, b81a7c18 |
-| 11 | the-lab (`811585a4`) | `sid("u2mp/playlist/the-lab")` = `811585a4` | `sid("u2mp/playlist/the-lab/desc")` = `09af6e6f` | the-lab, default | a30341e7, 8dfdede9 |
+| 6 | ranked (`d96118bb`) | 47b24464 | 57fc82aa | mlg | same 8 as #7 |
+| 7 | all-competitive (`013dc564`) | `sid("u2mp/playlist/all-competitive")` = `013dc564` | `sid("u2mp/playlist/all-competitive/desc")` = `a2d9233c` | grab-bag | a30341e7, 8dfdede9, 3d9470a5, 0544e6f6, 13f76fcc, 71ede2dc, f625a024, 3b8de400 |
+| 8 | coop-objective (`e0c85229`) | 5136a578 | c35e16e8 | coop | 5136a578 |
+| 9 | coop-arena (`03fdfa7b`) | 2ee192ab | 0 | coop, survival, default | 2ee192ab |
+| 10 | gold-rush (`6590fddd`) | 00248bb5 | 0 | default, survival, coop | 00248bb5, e9995f4c |
+| 11 | survival (`a6481abb`) | 2959eca4 | 0 | survival, default, coop | 2959eca4, b81a7c18 |
 
-Note: in #1 and #11 the name text id equals the playlist id (both are sids of the same string).
+Note: in #1 and #7 the name text id equals the playlist id (both are sids of the same string).
 
 Picture image ids: grab-bag `f268b146`, mlg `a756f41a`, deathmatch `f892a814`, elimination
 `37ada99e`, objective `9dd25791`, plunder `4f7d9fcd`, coop `e80c4be1`, survival `79c940bf`,
@@ -250,7 +254,7 @@ default `b1d3d87b`, the-lab `2f07a508`.
 
 Picture choice for one definition: walk its picture list in order; take the first picture whose
 id is not the picture (+0x10) of a playlist already built in this build pass. If every one is
-taken, take the first of the list. (With all eleven built: #8 gets survival, #9 default, #10
+taken, take the first of the list. (With all eleven built: #9 gets survival, #10 default, #11
 survival again.)
 
 ### Building the playlists
@@ -827,7 +831,8 @@ record their calls too.
 ### Playlists
 
 14. All game types playable: 11 records, picture log lines (check coop-arena -> survival,
-    gold-rush -> default, survival -> survival again), "11 PS3 playlists", pointer array and count.
+    gold-rush -> default, survival -> survival again), "11 PS3 playlists", pointer array and count. 14P: the records in the PS3 order and
+    `playlist_index` = 0..10; 15P: the built ones keep the PS3 order and their PS3 indexes (gaps for skipped ones).
 15. Only some types playable (dlc false for some games, out-of-range type indices): skipped
     definitions, descriptions taken from the type record where the definition has 0, more than 8
     matching types for one definition, duplicate name ids across several type records.

@@ -205,7 +205,9 @@ void make_record(Playlist &p, uint32_t id, uint32_t name, uint32_t desc, uint32_
     put<uint8_t>(p.bytes + 0x6c, uint8_t(ps3_index));
 }
 
-// The PS3 playlists. Name and description are text ids, pictures are names under
+// The PS3 playlists, in the order of the PS3 list (the GOTY server data's playlist table: The Lab, Deathmatch,
+// Elimination, Plunder, Objectives, Ranked, All Competitive Modes, Co-op Objective, Co-op Arena), then the two co-op
+// playlists of ours the PS3 list does not have. Name and description are text ids, pictures are names under
 // general/net/playlists/, types are the game types' name text ids.
 struct PlaylistDef {
     const char *key;
@@ -213,7 +215,7 @@ struct PlaylistDef {
     uint32_t desc;   // 0: the first game type's description
     const char *pictures[3];
     uint32_t types[8];
-    int8_t ps3_index = -1;   // index in the PS3 playlist list when it differs from this order
+    int8_t ps3_index;   // index in the PS3 playlist list (9, 10: after it), also when a playlist before is skipped
 };
 
 constexpr uint32_t kDeathmatch = 0xa30341e7, kTeamDeathmatch = 0x8dfdede9, kPlunder = 0x3d9470a5,
@@ -221,20 +223,20 @@ constexpr uint32_t kDeathmatch = 0xa30341e7, kTeamDeathmatch = 0x8dfdede9, kPlun
                    kElimination = 0x3b8de400;
 
 const PlaylistDef kDefs[] = {
-    {"all-competitive", sid("u2mp/playlist/all-competitive"), sid("u2mp/playlist/all-competitive/desc"),
-     {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
-    {"ranked", 0x47b24464, 0x57fc82aa, {"mlg"},
-     {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
-    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}, 1},
-    {"elimination", kElimination, sid("u2mp/playlist/elimination/desc"), {"elimination"}, {kElimination}},
-    {"objectives", 0x4bf30e73, 0x675ef552, {"objective"}, {kPlunder, kTurf, kKoh, kObjA, kObjB}},
-    {"plunder", kPlunder, 0x32cc1acb, {"plunder"}, {kPlunder}},
-    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {0x5136a578}},
-    {"coop-arena", 0x2ee192ab, 0, {"coop", "survival", "default"}, {0x2ee192ab}},
-    {"gold-rush", 0x00248bb5, 0, {"default", "survival", "coop"}, {0x00248bb5, 0xe9995f4c}},
-    {"survival", 0x2959eca4, 0, {"survival", "default", "coop"}, {0x2959eca4, 0xb81a7c18}},
     {"the-lab", sid("u2mp/playlist/the-lab"), sid("u2mp/playlist/the-lab/desc"), {"the-lab", "default"},
-     {kDeathmatch, kTeamDeathmatch}},
+     {kDeathmatch, kTeamDeathmatch}, 0},
+    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}, 1},
+    {"elimination", kElimination, sid("u2mp/playlist/elimination/desc"), {"elimination"}, {kElimination}, 2},
+    {"plunder", kPlunder, 0x32cc1acb, {"plunder"}, {kPlunder}, 3},
+    {"objectives", 0x4bf30e73, 0x675ef552, {"objective"}, {kPlunder, kTurf, kKoh, kObjA, kObjB}, 4},
+    {"ranked", 0x47b24464, 0x57fc82aa, {"mlg"},
+     {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 5},
+    {"all-competitive", sid("u2mp/playlist/all-competitive"), sid("u2mp/playlist/all-competitive/desc"),
+     {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}, 6},
+    {"coop-objective", 0x5136a578, 0xc35e16e8, {"coop"}, {0x5136a578}, 7},
+    {"coop-arena", 0x2ee192ab, 0, {"coop", "survival", "default"}, {0x2ee192ab}, 8},
+    {"gold-rush", 0x00248bb5, 0, {"default", "survival", "coop"}, {0x00248bb5, 0xe9995f4c}, 9},
+    {"survival", 0x2959eca4, 0, {"survival", "default", "coop"}, {0x2959eca4, 0xb81a7c18}, 10},
 };
 
 uint32_t picture_id(const char *name) { return sid(("general/net/playlists/" + std::string(name)).c_str()); }
