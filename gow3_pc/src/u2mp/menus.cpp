@@ -822,6 +822,39 @@ void check_help_bar() {
     help_bar_ok = true;
 }
 
+// ---- co-op difficulty: Hard from the start (owner request 2026-11-28) --------------------------------------------
+//
+// The co-op difficulty lists (Profile, cond 80 query 0x65a1e0; custom lobby, cond 65 query 0x6576d0) end at
+// max(highest difficulty won + 1, 2, floor), so a new career sees Easy and Normal until a co-op win on Normal (1 Easy,
+// 2 Normal, 3 Hard, 4 Crushing; the highest win is NetPlayerData +0x120, saved with the career). The floor is a u32 at
+// 0x104f4b0 + 0x74 that nothing in the game writes (0); only those two queries read it. It becomes 3 here, so every
+// player has Hard from the start; Crushing still needs a co-op win on Hard. The career itself is not changed.
+// UNCHARTED_U2MP_COOP_HARD=0 leaves it as shipped.
+constexpr uint64_t kCoopDifficultyFloor = 0x104f4b0 + 0x74;
+constexpr uint32_t kCoopFloorHard = 3;
+const unsigned char kFloorReader[] = {0x48, 0x8d, 0x05, 0, 0, 0, 0, 0x8b, 0x40, 0x74};   // lea rax, [floor base]; mov eax, [rax+0x74]
+
+void unlock_coop_hard() {
+    const char *env = std::getenv("UNCHARTED_U2MP_COOP_HARD");
+    if (env && env[0] == '0') return;
+    // both readers: the lea's displacement points at 0x104f4b0 from its own end
+    bool same = kCoopDifficultyFloor + 4 <= image.size;
+    for (const uint64_t at : {uint64_t(0x65a2d5), uint64_t(0x657817)}) {
+        unsigned char want[sizeof kFloorReader];
+        std::memcpy(want, kFloorReader, sizeof want);
+        const int32_t disp = int32_t(int64_t(0x104f4b0) - int64_t(at + 7));
+        std::memcpy(want + 3, &disp, 4);
+        same = same && image.matches(at, want, sizeof want);
+    }
+    const uint32_t floor = same ? get<uint32_t>(abs_at(kCoopDifficultyFloor)) : 0;
+    if (!same || (floor != 0 && floor != kCoopFloorHard)) {
+        log("menus: co-op difficulty floor not as expected, Hard stays locked until a Normal win");
+        return;
+    }
+    put<uint32_t>(abs_at(kCoopDifficultyFloor), kCoopFloorHard);
+    log("menus: co-op difficulty: Easy, Normal and Hard from the start (Crushing after a win on Hard)");
+}
+
 // ---- install ----------------------------------------------------------------------------------------
 
 uint8_t *entry(int i) { return abs_at(kQueryTable + kEntrySize * uint64_t(i)); }
@@ -936,6 +969,7 @@ void menus_help_bar_frame() {
 
 void install_menus(int &installed) {
     check_help_bar();
+    unlock_coop_hard();
     if (kQueryTable + kQueryEntries * kEntrySize > image.size || get<uint32_t>(entry(0)) != 50 ||
         get<uint64_t>(entry(0) + 8) != reinterpret_cast<uint64_t>(abs_at(kStartMatchQuery))) {
         log("menus: query table 0x%llx differs, menu queries not installed", (unsigned long long)kQueryTable);
