@@ -60,6 +60,7 @@ std::string norm_key(std::string s) {
 // listed the view on Windows (names compared upper-cased). Nothing of the game folder itself is listed in advance.
 struct Ps4View {
     std::string root, root_key, update, update_key;   // the game and update folders: slashes() and norm_key()
+    fs::path::string_type root_native, update_native;  // the norm_keys as the system's path strings
     std::map<std::string, std::string> files, dirs;   // norm_key of a path relative to the folder -> that path as listed
     std::unordered_map<std::string, const std::string *> file_at, dir_at;   // the same, for the lookups (every path)
     std::map<std::string, bool> base_dirs;            // folders of the update: whether the game folder has them too
@@ -100,6 +101,8 @@ struct Ps4View {
         if (update.empty()) throw Stop(utf8(manifest) + ": no update folder");
         for (const auto &[k, v] : files) file_at[k] = &v;
         for (const auto &[k, v] : dirs) dir_at[k] = &v;
+        root_native = raw_path(root_key).native();
+        update_native = raw_path(update_key).native();
         active = true;
     }
 
@@ -191,7 +194,27 @@ fs::path upath(const std::string &s) {
     return raw_path(s);   // the game folder's own path (or no PS4 path): as the step wrote it
 }
 
-fs::path resolve_read_path(const fs::path &p) { return upath(utf8(p)); }
+// read_file, the read cache, Psarc and the copies call this for every file: a path outside the game and update
+// folders (and every path when there is no update folder) is returned as it is, without converting it
+fs::path resolve_read_path(const fs::path &p) {
+    Ps4View &v = view();
+    if (!v.active) return p;
+    const fs::path::string_type &n = p.native();
+    auto below = [&n](const fs::path::string_type &top) {
+        if (n.size() < top.size()) return false;
+        for (size_t i = 0; i < top.size(); i++) {
+            auto c = n[i];
+            if (c == '\\') c = '/';
+#ifdef _WIN32
+            if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+#endif
+            if (c != top[i]) return false;
+        }
+        return n.size() == top.size() || n[top.size()] == '/' || n[top.size()] == '\\';
+    };
+    if (!below(v.root_native) && !below(v.update_native)) return p;
+    return upath(utf8(p));
+}
 
 bool ps4_exists(const std::string &s) {
     Ps4View &v = view();
