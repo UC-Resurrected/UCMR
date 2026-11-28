@@ -1140,6 +1140,9 @@ void Importer::step_items() {
     write_text(work / "level-txt.json", dumps(lt));
     save();
     sha1_memo_save(work);
+    // The PS3 level and actor paks copied to work/src for their conversions (about 1 GB) are only this step's working
+    // files: a later run copies the ones it converts again (src_file), so they are not left in the import folder.
+    if (fs::is_directory(work / "src", ec)) rmtree(work / "src");
 }
 
 namespace {

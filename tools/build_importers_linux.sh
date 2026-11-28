@@ -53,7 +53,7 @@ build u2import "-std=c++20 -O2 -I$u2 -I$im -I$dc -Ilauncher/native" \
     "$dc/hkconvert.cpp" "$dc/ps3fp.cpp" "$dc/ps4mats.cpp" "$dc/ps4actor.cpp" "$dc/anim.cpp" "$dc/skel.cpp" "$dc/fgcoll.cpp" \
     "$dc/dcconv.cpp" "$dc/normal_blend.cpp" || fail=1
 build u3fix "-std=c++20 -O2 -I$dc -Ilauncher/native" \
-    "$dc/u3fix.cpp" "$dc/fixlib.cpp" "$dc/dc.cpp" "$dc/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
+    "$dc/u3fix.cpp" "$dc/fixlib.cpp" "$dc/backup_folder.cpp" "$dc/dc.cpp" "$dc/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
     "$fx/no-rpcn-menu/remove_rpcn_page.cpp" "$fx/netgame-order/netgame_order.cpp" "$fx/enemy-stall/apply_ss_option_defaults.cpp" \
     "$fx/coop-chars/apply_coop_desc_fix.cpp" "$fx/airport-igc3/airport_igc3.cpp" "$dc/psarc.cpp" "$fx/text1-merge/merge_text1.cpp" \
     "$fx/coop-audit/apply_option_defaults_2.cpp" "$fx/registry/run_mkregistry.cpp" "$fx/pak23-registry/apply_registry.cpp" \

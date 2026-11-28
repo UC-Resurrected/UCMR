@@ -38,7 +38,6 @@
  ],
  "writes": [
   "work/overlay-r3/u3data/build/main/pak23/ps4/*.pak",
-  "work/backup-pak23-levels/overlay-r3/*.pak",
   "work/overlay-r3/u3data/build/main/actor33/ps4/*-multi-emblem-*.pak"
  ],
  "must_write": false,

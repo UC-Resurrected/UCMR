@@ -36,8 +36,7 @@
   ]
  ],
  "writes": [
-  "work/overlay-r2/u3data/build/main/pak23/ps4/*.pak",
-  "work/backup-pak23-levels/overlay-r2/*.pak"
+  "work/overlay-r2/u3data/build/main/pak23/ps4/*.pak"
  ],
  "must_write": false,
  "reference_check": false,

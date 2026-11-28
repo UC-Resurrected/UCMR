@@ -51,7 +51,9 @@ The driver is C++ (`u3mp/patcher/importer`: `recipe.cpp`, the former `rebuild_ov
 launcher's import (`u3import.exe` without `--recipe`) runs the same recipe after the multiplayer image. Every script
 step runs `u3fix.exe` (next to `u3import.exe`); no step needs Python.
 
-Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the fix steps replaced),
+Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the DC fix steps replaced and read back; the
+level and actor converters keep no backup since 1.32.7 and remove the 5+ GB `backup-pak23-levels` / `backup-actor33` of
+older imports, and they drop the PS3 paks they unpacked into `scratch` when they finish),
 `<out>/scratch/<job>` (rendered job folders), `<out>/_recipe/state.json` + `log.txt`. Re-running on the
 same `--out` skips steps whose recorded outputs are unchanged and steps whose files already equal
 the reference manifest, so updates are incremental. ffmpeg for the steps that say so (`--list`, `needs`).
