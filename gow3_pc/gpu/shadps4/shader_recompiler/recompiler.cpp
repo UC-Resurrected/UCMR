@@ -132,6 +132,8 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::EffectLoopClampPass(program);
     Shader::Optimization::SharedMemorySimplifyPass(program, profile);
     Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
+    Shader::Optimization::UniformBarrierPass(program, runtime_info, profile);   // gow3: Intel barriers
+    Shader::Optimization::LdsBoundsPass(program, runtime_info, profile);   // gow3: LDS as the PS4 checks it
     Shader::Optimization::LowerUserClipPlanes(program, runtime_info);
     Shader::Optimization::PhiSimplificationPass(program);
     Shader::Optimization::InverseBallotEliminationPass(program);

@@ -292,6 +292,24 @@ Patch convoy_sink() {
                       B("8a9080000000c0e10280e2fb08ca889080000000"), B("80e101c0e10280a080000000fb08888000000090"))});
 }
 
+// Uncharted 2, chapter 21 (the convoy) above 60 FPS, 28 Nov 2026: a vehicle's speed controller counts its frame time in
+// ticks of the game clock (1/300 s) and divides by that count. A frame shorter than one tick (8 ms at 120 FPS) counts 0
+// ticks, the target speed comes out infinite or NaN, and SetTargetSpeed_mps stops the game on its
+// IsFinite(m_targetSpeed_mps) assert (int 0x41). The assert path now stores a target speed of 0 for that frame and
+// returns as the finite case does; the next frame has whole ticks again. At 60 FPS the path is never taken. The 12
+// changed bytes (a compare of the handler pointer, its je and the start of a lea) are the same in 1.00 and 1.02, and the
+// pattern leaves out every call and address displacement, so one variant serves both. UNCHARTED_VEHICLE_SPEED_RESET=0
+// turns it off.
+Patch vehicle_speed() {
+    return patch("Uncharted 2 vehicle target speed: an infinite or NaN speed becomes 0, no assert",
+                 {one("c5fa108340050000 e8???????? a801 7548 e8???????? 488945e0 48817de000000000 742f 488d3d????????"
+                      " 488d35???????? 488d15???????? 488d0d???????? 49b90000000000000000 41b8???????? ff55e0 eb00 cd41"
+                      " eb00 eb00 4883c418 5b 5d c3",
+                      26, B("48817de000000000742f488d"),
+                      // mov dword [rbx+0x540], 0 (m_targetSpeed_mps); jmp to the epilogue (add rsp, 0x18)
+                      B("c78340050000 00000000 eb35"))});
+}
+
 // gow3, 5 Nov 2026, Uncharted 2: the leg IK code asserts IsFinite(deltaTransform) (character-leg-ik.cpp:391) when the
 // root delta is NaN, which happens at the train wreck in chapter 1. The assert path now sets the delta to zero for that
 // frame and resumes at the same place the finite case does. 1.02 and 1.00. UNCHARTED_LEG_IK_RESET=0 skips it.
@@ -777,6 +795,7 @@ Patches image_patches(const std::string &exe) {
     if (env("UNCHARTED_JOB_PARAMS_GUARD", "1") != "0") add(job_params_guard(exe));
     if ((u1 || u2) && env("UNCHARTED_MOVE_POOL", "1") != "0") patches.push_back(move_action_pool());
     if (u2 && env("UNCHARTED_CONVOY_SINK", "1") != "0") patches.push_back(convoy_sink());
+    if (u2 && env("UNCHARTED_VEHICLE_SPEED_RESET", "1") != "0") patches.push_back(vehicle_speed());
     // Testing aid for the job guard above (the launcher never sets it): in Uncharted 3 the code that creates the job
     // (0xf6da01) is made to write a null descriptor, so every such job sees the same null pointer as in the players'
     // crashes.

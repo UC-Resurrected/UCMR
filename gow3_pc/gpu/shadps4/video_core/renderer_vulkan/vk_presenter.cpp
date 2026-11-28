@@ -55,7 +55,6 @@ namespace {
 /// the assertion stops the port (or waits until another thread's report is complete).
 void ReportDeviceLost(const Instance& instance, vk::Result result) {
     if (result == vk::Result::eErrorDeviceLost) {
-        DumpGpuCheckpoints(instance);
         DumpDeviceFault(instance);
     }
 }
