@@ -11030,6 +11030,7 @@ int u3x_n32_mode(uintptr_t base);
 int u3x_new_marker(int32_t *event, uint32_t flags);
 void u3x_retag_net_profile(uint8_t *page);
 int u3x_net_profile_source(uintptr_t base, int32_t *ev, void *s);
+int u3x_cg_dlc_row(void);   // v7.268 cg block: this PC has one of the map packs 1..5 (the DLC row is shown)
 int u3x_n32_call(uintptr_t base, int32_t *ev, void *s, void (*native)(int32_t *));
 void u3x_n32_retag(uint8_t *page);
 int u3x_n32_source(uintptr_t base, int32_t *ev);
@@ -11151,9 +11152,9 @@ extern "C" U3X_FN int u3x_net_profile_source(uintptr_t base, int32_t *ev, void *
     }
 
     game_call<void, int32_t *>(base + FN_NET_PROFILE, ev);
-    // v7.253 cg R9 (owner decision a008, a deliberate deviation from PS3 1.19): eleven rows, 0..9 and Hat Stats; the DLC
-    // row 11 is never asked and its word is held at "On" (u3x_cg_tick)
-    if (op == OP_LAST_ROW && ev[W_ROW] == 9) ev[W_ROW] = 10;
+    // rows 0..9 and Hat Stats (10); v7.268 (SPEC-dlc-profile A14 1, owner 2026-11-28, replacing decision a008): the DLC
+    // row 11 too, as on PS3 1.19, while this PC has one of the map packs 1..5 (u3x_cg_dlc_row)
+    if (op == OP_LAST_ROW && ev[W_ROW] == 9) ev[W_ROW] = u3x_cg_dlc_row() ? 11 : 10;
     return 1;
 }
 
@@ -46693,6 +46694,7 @@ void u3x_ng_select(uintptr_t base, void *s);
 void u3x_jip2_11b(uintptr_t base, const uint8_t *d, uint32_t n, const char *from);   // v7.254 jip (A7 R2)
 int u3x_mm_msg(uintptr_t base, uint32_t type);   // v7.254 mm (end of the file): 0x107 / 0x108 / 0x118
 void u3x_mm_md_mark(uint8_t *md);                  // v7.254 mm: capability byte 2 (member data +0x2b)
+void u3x_cg_md_mark(uint8_t *md);                  // v7.268 cg: this PC's map pack mark (member data +0x1a / +0x1b)
 int u3x_mm_lobby(uintptr_t base);                  // v7.254 mm: the hs lobby migration step is the mm driver's
 }
 namespace pmsg {
@@ -47380,11 +47382,13 @@ XP_FN void u3x_xp_md_out(uint8_t *o, uint32_t id, uint32_t n) {
         if (st.base) u3x_hs_md_mark(st.base, md);
         pmsg::cap_mark(md);
         u3x_mm_md_mark(md);
+        u3x_cg_md_mark(md);   // v7.268 cg: the map packs of a partial import
         return;
     }
     if (id != 314 || n < 80 || o[4] != 0x40) return;
     if (!o[16 + 0x19]) pmsg::cap_mark(o + 16);   // v7.253 pm (R9): "message layer v2", party and match
     if (!o[16 + 0x19]) u3x_mm_md_mark(o + 16);   // v7.254 mm: "matchmaking v2" (+0x2b bit 0)
+    u3x_cg_md_mark(o + 16);                       // v7.268 cg: the map packs of a partial import (not with +0x19 set)
     if (!st.base) return;
     const uint64_t room = rd<uint64_t>(o, 8);
     for (uint32_t k = 0; k < 2; k++) {
@@ -50416,8 +50420,13 @@ U3X_FN void u3x_sync_tick(uintptr_t base, Log log) {
 //    load. A PS3 joining a PC host's match it lacks refuses itself; the host's late-join timeouts cover it.
 //  * R7 (u3x_cg_load): the server's net18 not in the import's list -> PS3 crossplay off (xp::st.off): PS3 members are
 //    not taken into Custom Games, a PS3 leader is not followed, PS3 hosts' matches are not joined; one boot.log line.
-//  * R9 (u3x_cg_tick, every frame): the profile's DLC word (+0xac8) is held at 0 = "On"; the DLC row is gone
-//    (u3x_net_profile_source: eleven rows). R8 (item ids to PS3 players) is not here: see IMPL-v7.253-cg.md.
+//  * R9, v7.268 (owner 2026-11-28, SPEC-dlc-profile A14; replaces decision a008): the DLC row 11 is shown while this
+//    PC has one of the map packs 1..5 (u3x_net_profile_source); without one the word (+0xac8) is held at "On"
+//    (u3x_cg_tick). "Off" only clears the content flag of the leader's matchmaking search / create (u3x_cg_content_flag).
+//  * v7.268, PC to PC: kind 13 (the map packs the import has; partial imports since the importer's DLC search) gives
+//    this PC's pack mask; a partial import marks its member data (+0x1a / +0x1b, u3x_cg_md_mark) and the vote, the
+//    Custom Game start and the late join (a PC host's net game too) take every PC's packs into account.
+//    R8 (item ids to PS3 players) is not here: see IMPL-v7.253-cg.md.
 // ===== v7.253 cg begin =====
 #ifndef CG_FN
 #define CG_FN [[gnu::section(".text.ext"), gnu::noinline, clang::minsize]]
@@ -50428,22 +50437,35 @@ U3H_IMPORT void u3h_so_note(const char *a, const char *name, int32_t v, const ch
 uint8_t *u3x_player_profile(uintptr_t base);
 }
 namespace cg {
-constexpr uint32_t K_PACKS = 10, K_NET18 = 11, K_PLAYLISTS = 12, NG = 512, SHAS = 8, PLS = 32;
+constexpr uint32_t K_PACKS = 10, K_NET18 = 11, K_PLAYLISTS = 12, K_INSTALLED = 13, NG = 512, SHAS = 8, PLS = 32;
 constexpr uint32_t NONE = 0x100;              // "required": the PS3 cannot have this net game at all
 constexpr uint32_t NO_CONTENT = 0x58d7fbb3u;  // dialog: someone in your party lacks the content
 constexpr uintptr_t PARTY = 0x17dc298, MATCH = 0x17d6420, LOBBY_SEL = 0x17d167c, PROFILE_DLC = 0xac8;
+constexpr uintptr_t NG_CURRENT = 0x17cb060 + 0x661c;   // s16: the net game the applied LoadLevel set
+// v7.268 (SPEC-dlc-profile A14): this PC's pack mask in its member data for other PCs (free range +0x1a..+0x2d, never
+// written while +0x19 is set): +0x1a = PACK_MARK, +0x1b = the mask. A PC block without the mark has every pack (older
+// helpers, full imports).
+constexpr uintptr_t MD_PACK_MARK = 0x1a, MD_PACKS = 0x1b;
+constexpr uint8_t PACK_MARK = 0xc6;
+constexpr uint32_t PACKS_1_TO_5 = 0x1f;   // the packs the DLC row and the content flag look at (A14 1, 3)
 struct State {
     uint32_t n_req, n_sha, n_pl;
     uint8_t req[NG];             // kind 10
     uint8_t sha[SHAS][32];       // kind 11
     uint32_t pl[PLS][2];         // kind 12
-    uint32_t own;                // R1: the usable pack mask
+    uint32_t installed;          // kind 13: the map packs the import has (0x100 | mask), 0 = not given (all)
+    uint32_t own;                // R1: the usable pack mask (what PS3 players see)
+    uint32_t pc_own;             // v7.268: the packs this PC has for other PCs (kind 13; 0xff without it)
     uint32_t net18;              // R7: 0 not checked, 1 the server's current one, 2 changed (crossplay off)
     uint32_t logged;             // R2: the last party mask line: 0x10000 | members << 8 | mask (0 = none)
 };
 U3X_BSS State st;
 U3X_RO const char t_own[] = "content: usable pack mask for PS3 players ";
 U3X_RO const char t_own2[] = ", PS3 net games with pack data ";
+U3X_RO const char t_pcown[] = ", map packs imported ";
+U3X_RO const char t_jip_pc[] = "content: late join left before loading: net game ";
+U3X_RO const char t_jip_pc2[] = " needs packs ";
+U3X_RO const char t_jip_pc3[] = ", this PC has ";
 U3X_RO const char t_same[] = "content: net18 is the server's current one: PS3 crossplay on";
 U3X_RO const char t_changed[] = "content: crossplay off: net18 changed (the server's is not the one the import used): re-import to play with PS3 players";
 U3X_RO const char t_nolist[] = "content: net18 not checked (no net18 record in u3-ps3-values.bin): PS3 crossplay as before";
@@ -50468,6 +50490,7 @@ CG_FN void note(Line &l) { u3h_so_note(l.z(), nullptr, -1, nullptr); }
 // kinds 10..12 of a values file (n bytes at b); bit k - 10 per kind taken (the first record of each kind counts)
 CG_FN uint32_t parse(const uint8_t *b, uint32_t n) {
     st.n_req = st.n_sha = st.n_pl = 0;
+    st.installed = 0;
     uint32_t got = 0;
     if (!b || n < 8 || le32(b) != 0x56503355u || le32(b + 4) != 1) return 0;   // "U3PV", version 1
     for (uint32_t o = 8; n - o >= 12;) {
@@ -50489,15 +50512,19 @@ CG_FN uint32_t parse(const uint8_t *b, uint32_t n) {
             }
             st.n_pl = count;
             got |= 4;
+        } else if (kind == K_INSTALLED && !(got & 8) && count == 1 && len == 4) {
+            st.installed = 0x100u | (le32(d) & 0xff);
+            got |= 8;
         }
         o += 12 + len;
     }
     return got;
 }
 
-// R1: every pack whose levels the PC can all play (a PS3 net game without a PC net game takes its packs out)
+// R1: every pack whose levels the PC can all play (a PS3 net game without a PC net game takes its packs out, and a map
+// pack the import did not have, kind 13)
 CG_FN uint32_t own_mask() {
-    uint32_t m = 0xff;
+    uint32_t m = st.installed ? (st.installed & 0xff) : 0xff;
     for (uint32_t p = 0; p < st.n_req && xp::ng9.n; p++) {
         if (!st.req[p]) continue;
         bool paired = false;
@@ -50555,12 +50582,26 @@ CG_FN uint32_t mask_of(const uint8_t *session, uint32_t *n) {
     return m;
 }
 
-// may every member of the session play PC net game pc (PC players only: always)
+// v7.268: AND of the pack marks of the session's other PC members (a block without the mark: every pack) and this
+// PC's own mask
+CG_FN uint32_t pc_mask_of(const uint8_t *session) {
+    uint32_t m = st.pc_own & 0xff;
+    for (uint32_t i = 0; i < 10 && rd<uint64_t>(session, 0x18); i++) {
+        const uint8_t *s = session + 0x680 + i * 0x120;
+        if (!s[0x25] || rd<uint32_t>(s, 0x2c) == rd<uint32_t>(session, 0x12e4) || xp::is_ps3(reinterpret_cast<const char *>(s))) continue;
+        if (rd<uint32_t>(s, 0x3c) == 0x40 && s[0x40 + 0x19] == 0 && s[0x40 + MD_PACK_MARK] == PACK_MARK) m &= s[0x40 + MD_PACKS];
+    }
+    return m;
+}
+
+// may every member of the session play PC net game pc: its packs in the AND of the PS3 members' masks and every PC's
+// (a PC net game that no PS3 net game is needs nothing more than a PC import has)
 CG_FN bool playable(const uint8_t *session, int32_t pc, uint32_t *need, uint32_t *mask) {
     uint32_t n = 0;
-    *mask = mask_of(session, &n);
-    *need = xp::st.off ? NONE : required(pc);
-    return !n || (*need & ~*mask) == 0;
+    *mask = mask_of(session, &n) & pc_mask_of(session);
+    const uint32_t req = required(pc);
+    *need = n ? (xp::st.off ? NONE : req) : (req == NONE ? 0 : req);
+    return (*need & ~*mask) == 0;
 }
 
 // members of the session (this PC's own block included) whose last three net games hold pc
@@ -50605,9 +50646,10 @@ CG_FN void u3x_cg_load(void *s) {
     const int64_t n = u3h_ps3_values_read(s, &b);
     const uint32_t got = parse(b, n > 0 ? static_cast<uint32_t>(n) : 0);
     st.own = own_mask();
+    st.pc_own = st.installed ? (st.installed & 0xff) : 0xff;
     xp::st.md8 = 0x100u | st.own;
     Line l;
-    l.s(t_own).x(st.own, 2).s(t_own2).d(st.n_req);
+    l.s(t_own).x(st.own, 2).s(t_own2).d(st.n_req).s(t_pcown).x(st.pc_own, 2);
     note(l);
     st.net18 = 0;
     if (!(got & 2)) {
@@ -50629,8 +50671,11 @@ CG_FN void u3x_cg_load(void *s) {
 // every frame (u3x_ring_tick): R9 the DLC word held at "On"; R2 the party's mask line on every change
 CG_FN void u3x_cg_tick(uintptr_t base, Log log) {
     using namespace cg;
-    if (uint8_t *p = u3x_player_profile(base))
-        if (rd<uint32_t>(p, PROFILE_DLC)) *reinterpret_cast<uint32_t *>(p + PROFILE_DLC) = 0;
+    // v7.268: the player sets the DLC word in the DLC row (shown with a map pack); without one the row is gone and the
+    // word stays "On", as a fresh PS3 profile
+    if (!(st.pc_own & PACKS_1_TO_5))
+        if (uint8_t *p = u3x_player_profile(base))
+            if (rd<uint32_t>(p, PROFILE_DLC)) *reinterpret_cast<uint32_t *>(p + PROFILE_DLC) = 0;
     uint32_t n = 0;
     const uint32_t m = mask_of(reinterpret_cast<const uint8_t *>(base + PARTY), &n);
     const uint32_t v = n ? 0x10000u | n << 8 | m : 0;
@@ -50685,9 +50730,20 @@ CG_FN uint32_t u3x_cg_vote_weight(uintptr_t base, int32_t pc, uint32_t weight, u
 
 // R6, the late join wait once the host's LoadLevel is in: 1 = this PC can play the host's net game (a PC host's
 // always; a PS3 host's when it has a PC net game: its paks are there), 0 = leave before loading (one boot.log line)
-CG_FN int u3x_cg_jip_ok(uintptr_t, const uint8_t *host) {
+CG_FN int u3x_cg_jip_ok(uintptr_t base, const uint8_t *host) {
     using namespace cg;
-    if (!host || !xp::is_ps3(reinterpret_cast<const char *>(host))) return 1;
+    if (!host) return 1;
+    if (!xp::is_ps3(reinterpret_cast<const char *>(host))) {
+        // v7.268: a PC host's net game (the applied LoadLevel's) needs a map pack this PC's import does not have: leave
+        // before loading, as PS3 refuses a joiner whose usable mask lacks the running map's packs (A14 5)
+        const int32_t pc = at<int16_t>(base + NG_CURRENT);
+        const uint32_t req = required(pc), need = req == NONE ? 0 : req;
+        if (!(need & ~st.pc_own)) return 1;
+        Line l;
+        l.s(t_jip_pc).d(static_cast<uint32_t>(pc)).s(t_jip_pc2).x(need, 2).s(t_jip_pc3).x(st.pc_own, 2);
+        note(l);
+        return 0;
+    }
     const uint32_t ll = xp::st.ll_ps3;
     const char *why = xp::st.off ? t_jip_off : (ll & 0x10000) ? t_jip_none : nullptr;
     if (!why) return 1;
@@ -50701,6 +50757,29 @@ CG_FN int u3x_cg_jip_ok(uintptr_t, const uint8_t *host) {
 // a session's PS3 mask (R2; match = 1: the match room, else the party; *n = its PS3 members)
 CG_FN int u3x_cg_xp_on(void) { return xp::st.off ? 0 : 1; }
 CG_FN uint32_t u3x_cg_own_mask(void) { return cg::st.own; }
+CG_FN int u3x_cg_dlc_row(void) { return (cg::st.pc_own & cg::PACKS_1_TO_5) ? 1 : 0; }
+
+// v7.268: this PC's pack mark into an outgoing member data block (Create 303, Join 304, 314), for the other PCs'
+// vote / start / late-join checks; only when the import lacks a pack (a full import sends what it always sent)
+CG_FN void u3x_cg_md_mark(uint8_t *md) {
+    using namespace cg;
+    if (md[0x19] || (st.pc_own & 0xff) == 0xff) return;
+    md[MD_PACK_MARK] = PACK_MARK;
+    md[MD_PACKS] = static_cast<uint8_t>(st.pc_own);
+}
+
+// v7.268 (SPEC-dlc-profile A14 3): the leader's content flag for the matchmaking room search (309) and create (303):
+// the party's combined packs (PS3 members' byte +8, every PC's mask) share one of the map packs 1..5 (A14 6.2: the
+// PS3 tunable 0xd47ba504 is not read, packs 1..5 stand for it), and the profile's DLC word is "On" (0)
+CG_FN uint32_t u3x_cg_content_flag(uintptr_t base) {
+    using namespace cg;
+    const uint8_t *party = reinterpret_cast<const uint8_t *>(base + PARTY);
+    uint32_t n = 0;
+    const uint32_t mask = mask_of(party, &n) & pc_mask_of(party);
+    const uint8_t *p = u3x_player_profile(base);
+    const bool off = p && rd<uint32_t>(p, PROFILE_DLC) != 0;
+    return !off && (mask & PACKS_1_TO_5) ? 1 : 0;
+}
 CG_FN uint32_t u3x_cg_mask(uintptr_t base, int match, uint32_t *n) {
     return cg::mask_of(reinterpret_cast<const uint8_t *>(base + (match ? cg::MATCH : cg::PARTY)), n);
 }
@@ -52119,6 +52198,7 @@ JP_FN void u3x_jip2_room_lost(uintptr_t base, const uint8_t *ss, uint64_t room, 
 #endif
 #pragma clang section text=".text.d" rodata=".rodata.d"
 extern "C" int u3x_fam_content_complete(void);   // v7.254 fam block (SPEC-families MM-R1): Search a8 / Create a6
+extern "C" uint32_t u3x_cg_content_flag(uintptr_t base);   // v7.268 cg block (SPEC-dlc-profile A14 3): Search a8 / Create a6
 // ===== v7.254 mm pure begin =====
 namespace mm254 {
 constexpr uint32_t TPS = 300;   // game clock ticks per second
@@ -52722,7 +52802,7 @@ MM_FN bool search(uintptr_t base) {
     const int32_t level = search_level(me ? me[M_DATA + 0xe] : 0);
     const int64_t ok = game_call<int64_t>(entry(m, E_SEARCH), m, ms, r[0], r[1] ? 1u : 0u, level,
                                           static_cast<int32_t>(r[4]), static_cast<int32_t>(r[4]),
-                                          static_cast<uint32_t>(u3x_fam_content_complete()));   // fam MM-R1
+                                          u3x_cg_content_flag(base));   // A14 3 (v7.268; was fam MM-R1)
     Line l;
     put(l.s(t_req).d(mm.row).s(t_req2).d(r[0]).s(t_req3).d(r[1] ? 1 : 0).s(t_req4).d(static_cast<uint32_t>(level)).s(t_req5).d(r[4]).s(t_req6).d(r[2]).s(t_region).x(r[1] ? u3x_svc_region(base) : 0u, 8));
     if (ok < 0) return false;
@@ -52740,7 +52820,7 @@ MM_FN bool host(uintptr_t base) {
     mm.wait_start = now(base) + HOST_WAIT;
     const int64_t r = game_call<int64_t>(entry(m, E_CREATE), m, sess(base, MS), mm.max, 0u,
                                          create_level(me ? me[M_DATA + 0xe] : 0),
-                                         static_cast<uint32_t>(u3x_fam_content_complete()));   // fam MM-R1
+                                         u3x_cg_content_flag(base));   // A14 3 (v7.268; was fam MM-R1)
     Line l;
     put(l.s(t_create).d(mm.max));
     at<uint8_t>(base + NET + 0x18) = 1;
