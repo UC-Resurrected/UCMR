@@ -51,6 +51,8 @@
 #include <cstdio>
 #include <regex>
 #include <atomic>
+#include <exception>
+#include <optional>
 #include <thread>
 
 using namespace u2imp;
