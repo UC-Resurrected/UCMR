@@ -9,7 +9,7 @@ the contribution process and development priorities. Every contribution must fol
 ## 💚 1. Wellbeing — Put yourself first!
 
 A message from the project creator: if you’re reading this, chances are, you may be thinking about contributing. Remember that
-this is a video game, and your personal life comes first. Everyone who wants to contribute is very welcome, but no
+this project revolves around a video game, and your personal life comes first. Everyone who wants to contribute is very welcome, but no
 contribution is worth harming your mental health, physical health, or prioritizing the project over yourself or your loved ones. Please contribute at a pace that feels comfortable,
 and take a break whenever you need one. ❤️
 
@@ -106,10 +106,9 @@ build steps runnable from bash.
 
 ## 🎨 7. Assets: PS4 first, PS3 only when PS4 has none
 
-**Port an asset from the PS3 version only when the PS4 version does not have it.** If PS4 already has the asset
+**Write code to impport an asset from the PS3 version only when the PS4 version does not have it.** If PS4 already has the asset
 anywhere, multiplayer or campaign, the import uses the PS4 one: it usually has better textures, and not bringing
-over a second copy keeps the import smaller. For example, baseball-shirt Drake (red shirt Drake) is already in PS4
-as a campaign skin, so it is not ported from PS3. Before adding a PS3 asset to an import step, check PS4's data for
+over a second copy keeps the import smaller. For example, baseball-shirt Drake (red shirt Drake) is used in a playable skin in both Uncharted 2 and Uncharted 3 Multiplayer. However, the skin is already in the PS4 singleplayer, so instead of writing code to import it from PS3, we can write code to use the PS4 version. Before adding a PS3 asset to an import step, check PS4's data for
 the same asset.
 
 ## 🧩 8. Helper source: working side by side
