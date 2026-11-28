@@ -1171,9 +1171,6 @@ New interface (session_api.h, frontend3.h, online.h's `u2mp::session` part):
   (`UNCHARTED_U2MP_PORT`, else 27210) or, when that port is taken, on any port; hosting, net id 1, member 0 = us,
   party session published, sent mode -1, log `party: hosting a party of our own on UDP port %u`. Neither port:
   log, active = false.
-- `int mm_balance_slot()`: host only, else -1: the slot list (`mm_list`, open slots skipped) sorted stably by the
-  number of listed players sharing the entry's party id (party id 0 counts 1), then party id, then position; the
-  last entry's transport slot when its count is 1 and it is not slot 0 / this PC, else -1.
 - `void online_party_in(bool ok)`: NET_SM 12 -> mailbox 0x10e {ok} (log `party: JOINING gets 0x10e {%u}`), also
   while hosting (a join from the list). Then, not hosting and !ok: NET_SM 17 -> menu reset, PAGE_MULTIPLAYER,
   NET_SM 18 (log); the match session is cleared.

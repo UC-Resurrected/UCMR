@@ -37,9 +37,6 @@ uint32_t net_ticks();
 void create_match();
 // The rank (badge index) a party member published; 0 when unknown.
 uint32_t member_rank(uint32_t net_id);
-// Host: the transport slot of the player the team balance removes before the vote (PS3 0x4b0a58 state 16 with the
-// slot list order 0x4af524): the last of the sorted list when it came alone; -1 none.
-int mm_balance_slot();
 }  // namespace session
 
 namespace matchmaking {
