@@ -1982,8 +1982,10 @@ Value page_u3mp(const State &state) {
     std::vector<Value> setup;
     setup.push_back(row(p + "row:ps3_u3", "1. Add your PS3 Uncharted 3 folders",
                         "Add two folders.\n"
-                        "\xe2\x80\xa2 The game: your Game of the Year disc dump's PS3_GAME/USRDIR (it holds build/main/pak23.psarc).\n"
-                        "\xe2\x80\xa2 RPCS3's dev_hdd0/game: it holds update 1.19 (e.g. BCES01670) and the four DLC map packs. "
+                        "\xe2\x80\xa2 The game: your disc dump's PS3_GAME/USRDIR (it holds build/main/pak23.psarc; a Game of the Year "
+                        "disc also holds the four DLC map packs).\n"
+                        "\xe2\x80\xa2 RPCS3's dev_hdd0/game: it holds update 1.19 (e.g. BCES01670) and the DLC map packs you have, "
+                        "from any region's release. Map packs that are not there are left out: their maps stay off. "
                         "With the DNS of step 1b that is all it needs: the game data the game downloads when it goes "
                         "online (BCES01670DATA2) is downloaded by the import.",
                         buttons_box(p, "ps3_u3", {{"add", "Add folder"}, {"clear", "Clear"}})));

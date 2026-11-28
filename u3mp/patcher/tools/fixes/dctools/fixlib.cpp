@@ -300,6 +300,26 @@ std::string Args::get(const std::string &k, const std::string &def) const {
     return it == val.end() ? def : it->second;
 }
 
+std::vector<std::string> dir_list(const std::string &list) {
+    std::vector<std::string> out;
+    size_t a = 0;
+    for (size_t k = 0; k <= list.size(); k++)
+        if (k == list.size() || list[k] == '|') {
+            if (k > a) out.push_back(list.substr(a, k - a));
+            a = k + 1;
+        }
+    return out;
+}
+
+std::string first_with(const std::string &list, const std::string &name) {
+    for (const std::string &d : dir_list(list)) {
+        const std::string p = d + "/" + name;
+        std::error_code ec;
+        if (fs::is_regular_file(upath(p), ec)) return p;
+    }
+    return "";
+}
+
 // MD5 (RFC 1321), for the plans that name a pak by its md5
 std::string md5_hex(const Bytes &data) {
     static const uint32_t K[64] = {

@@ -18,6 +18,26 @@ On this PC: PS4 `D:/2. PS Games/PS4/Uncharted - The Nathan Drake Collection [CUS
 `.../BCES01176/USRDIR`; PS3 U2 `D:/2. PS Games/PS3/Uncharted 2 - Among Thieves [BCES00757]/PS3_GAME/USRDIR`
 (01.00; RPCS3 also has `BCES00757` 1.09 and `BCUS98123` 1.33).
 
+### Map packs (DLC): where they come from, and when some are missing (PR #54)
+
+The four map packs are optional. The import takes each pack from the first place that has it:
+1. the game folder: a Game of the Year disc's `goty-dlc.psarc` (all four packs and the GOTY-only content), else
+   `dlc-map1..4.psarc` under the disc's own title ID;
+2. RPCS3 `dev_hdd0/game`, found from the game folder (up to 5 folders up), in the order of the U3 title IDs
+   (`launcher/native/ps3titles.h`: BCUS98233, BCUS98379, ... BCKS15011, every region);
+3. any other scanned folder that has one.
+
+A pack is never taken twice (`PS3_DLCMAPS` lists the chosen folders, `|` between them). A pack found nowhere does
+not stop the import: its levels, actors, sounds and registry pieces are left out ("skipped ... its DLC map pack was
+not found"; `scratch/dlc-left-out-<family>.txt` for world-levels), and the `ps3-values` step writes the packs this
+import has (kind 13) and the packs each PS3 net game needs (kind 10, from net18.bin's level table). The helper
+offers only the maps every player in the room has, and the profile's **DLC** row (as PS3 1.19) turns the map
+packs on or off for matchmaking. Bit 4 of the pack masks is the content only `goty-dlc.psarc` has (the
+ship-graveyard, London streets, Oasis and Old Quarter levels): without a GOTY disc it stays off.
+
+Tested 2026-11-28: GOTY disc (all files as before), a non-GOTY disc with all four packs from `BCES01176` (35
+GOTY-only actors and 22 sounds left out, 0 failed), and packs 1 and 3 only (0 failed).
+
 ## Running it
 
 ```
@@ -175,6 +195,12 @@ writer each, their converter step.
   ~105 s, map-colors2 79 s, levels-lab 69 s, cloud-batches 42 s, port 27 s and r2 20 s (were 529 s and 6 146 s in
   the 1.7.0 full build, which built the hidden paks), every other step under 30 s.
 * Level fast paths: 11 large/medium r3 paks in 43 s instead of 90 s (same machine, 10 workers), all identical.
+* Faster import (PR #54, 2026-11-28, GOTY, 12 threads): **482 s instead of about 760 s**, every file identical.
+  The file hashes are remembered between the checks of one run and between runs (`_recipe/hashes.tsv`: size,
+  modification time, SHA-256), so a step no longer hashes the same 3.9 GB again (coop-voice-fort 13 s instead of
+  about 350 s); SHA-256 uses the CPU's SHA instructions when it has them (5x faster); the copy steps run on 8
+  threads; zlib inflate is about 8 % faster. The level builder keeps its workers busy across batches (the next
+  batch's rows start while the last long rows of a batch finish; the writes stay in row order).
 
 * Clean rebuild of everything that can run: **96 s** (copy steps 13 s for 12 868 files / 495 MB; the rest is
   script steps failing fast for lack of converted bases). A second run on the same output: 37 s (copies

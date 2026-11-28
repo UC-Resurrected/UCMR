@@ -16,6 +16,11 @@ bool ps4_exists(const std::string &path);
 std::vector<fs::directory_entry> ps4_dir(const std::string &path);
 std::vector<fs::path> ps4_files(const std::string &path);
 
+// --ps3-dlcmaps: the folders the import takes the DLC map packs from, '|' between them (recipe.cpp choose_dlc; one
+// folder as before). dir_list splits it; first_with = <folder>/<name> of the first folder that has that file, else ""
+std::vector<std::string> dir_list(const std::string &list);
+std::string first_with(const std::string &list, const std::string &name);
+
 // --flag and --name value arguments
 struct Args {
     Args(const std::vector<std::string> &argv, const std::set<std::string> &flags, const std::set<std::string> &values);

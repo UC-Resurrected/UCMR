@@ -55,7 +55,15 @@ int regsources(const std::string &ps4, const std::string &upd, const std::string
     w("retail.txt", read_file(upath(ps4 + "/u3data/build/main/pak23_ps4.txt")));
     if (fs::exists(upath(disc + "/build/main/pak23.txt"))) w("ps3-disc.txt", read_file(upath(disc + "/build/main/pak23.txt")));
     std::vector<std::pair<std::string, std::string>> arcs = {{upd + "\\dlc-patch18.psarc", "p18"}, {upd + "\\dlc-patch13.psarc", "p13"}};
-    const std::vector<std::string> dlcmaps = dlc.empty() ? std::vector<std::string>{} : glob_dir(dlc, is_dlc_map);
+    // the DLC map packs: one or more folders ('|' between them); each pack from the first folder that has it
+    std::vector<std::string> dlcmaps;
+    {
+        std::set<std::string> taken;
+        for (const std::string &d : u3::dir_list(dlc))
+            for (const std::string &f : glob_dir(d, is_dlc_map))
+                if (taken.insert(lower(stem6(f))).second) dlcmaps.push_back(f);
+        std::sort(dlcmaps.begin(), dlcmaps.end(), [](const std::string &x, const std::string &y) { return stem6(x) < stem6(y); });
+    }
     for (const std::string &f : dlcmaps) arcs.push_back({f, stem6(f)});
     for (const char *n : {"goty-patch.psarc", "goty-dlc.psarc"}) arcs.push_back({disc + "\\" + n, std::string(n).substr(0, std::strlen(n) - 6)});
     std::vector<std::string> d2arcs = glob_dir(d2 + "/build/main", is_psarc), p23 = glob_dir(d2 + "/build/main/pak23", is_psarc);
@@ -84,8 +92,9 @@ int regsources(const std::string &ps4, const std::string &upd, const std::string
     return n + 2;
 }
 
-// regbuild: the registry of one recipe; empty message = built (out = the bytes)
-std::string regbuild(const json::Value &recipe, const std::string &srcdir, Bytes &out) {
+// regbuild: the registry of one recipe; empty message = built (out = the bytes). A piece taken from a DLC map pack
+// the import did not find (txt__dlc-map<n>__..., no such source file) is left out and named in `left_out`.
+std::string regbuild(const json::Value &recipe, const std::string &srcdir, Bytes &out, std::vector<std::string> &left_out) {
     std::map<std::string, std::vector<std::string>> cache;
     auto lines = [&](const std::string &sid) -> const std::vector<std::string> & {
         auto it = cache.find(sid);
@@ -110,6 +119,10 @@ std::string regbuild(const json::Value &recipe, const std::string &srcdir, Bytes
             for (const json::Value &x : op.items.at(1).items) o.push_back(x.s + (op.items.at(2).truthy() ? "\r" : ""));
         } else {
             const std::string sid = op.items.at(1).s;
+            if (sid.rfind("txt__dlc-map", 0) == 0 && !fs::exists(upath(srcdir + "/" + sid + ".txt"))) {
+                if (std::find(left_out.begin(), left_out.end(), sid) == left_out.end()) left_out.push_back(sid);
+                continue;
+            }
             const int64_t i = op.items.at(2).i, n = op.items.at(3).i;
             const bool crlf = op.items.at(4).truthy(), strip = op.items.at(5).truthy();
             const auto &src = lines(sid);
@@ -150,7 +163,24 @@ int registry_final(const std::vector<std::string> &argv) {
         }
     }
     const std::string mark = src + "\\sources-v2";
-    if (!fs::exists(upath(src + "\\retail.txt")) || !fs::exists(upath(mark))) {
+    // made again when the DLC map packs found change (a pack found later brings its pieces in): with all four (or a
+    // Game of the Year disc) the mark is the one of earlier versions, else it names the packs and folders
+    const std::string dlc_list = a.get("--ps3-dlcmaps", ""), disc = a.get("--ps3-disc", "");
+    const bool goty = !disc.empty() && fs::exists(upath(disc + "/goty-dlc.psarc"));
+    unsigned packs = 0;
+    for (int n = 1; n <= 4; n++)
+        if (goty || !u3::first_with(dlc_list, "dlc-map" + std::to_string(n) + ".psarc").empty()) packs |= 1u << (n - 1);
+    std::string m = "regsources with GOTY aliases\r\n";
+    if (packs != 0xf) m += "packs " + std::to_string(packs) + " from " + dlc_list + "\r\n";
+    bool stale = !fs::exists(upath(src + "\\retail.txt")) || !fs::exists(upath(mark));
+    if (!stale) {
+        const Bytes have = read_file(upath(mark));
+        stale = std::string(have.begin(), have.end()) != m;
+    }
+    if (stale) {
+        std::error_code ec;
+        for (const auto &e : fs::directory_iterator(upath(src), ec))   // the old pieces go (a pack that is gone now)
+            if (utf8(e.path().filename()).rfind("txt__dlc-map", 0) == 0) fs::remove(e.path(), ec);
         std::string printed, err;
         try {
             printed = "sources " + std::to_string(regsources(a.need("--ps4"), a.get("--ps3-update", ""), a.get("--ps3-dlcmaps", ""), a.get("--ps3-disc", ""),
@@ -160,8 +190,7 @@ int registry_final(const std::vector<std::string> &argv) {
         }
         std::printf("%s %s\n", printed.c_str(), err.c_str());
         if (!err.empty()) return 1;
-        const std::string m = "regsources with GOTY aliases\r\n";   // written in text mode
-        write_file_replace(upath(mark), Bytes(m.begin(), m.end()));
+        write_file_replace(upath(mark), Bytes(m.begin(), m.end()));   // as text mode wrote it (CRLF)
     }
     int rc = 0;
     for (const std::string &o : want) {
@@ -169,8 +198,9 @@ int registry_final(const std::vector<std::string> &argv) {
         if (!ref.count(o)) throw Stop("KeyError: '" + o + "' not in recipes/sha256.tsv");
         Bytes data;
         std::string err;
+        std::vector<std::string> left_out;
         try {
-            err = regbuild(read_json(upath(job + "/recipes/" + o + ".json")), src, data);
+            err = regbuild(read_json(upath(job + "/recipes/" + o + ".json")), src, data, left_out);
         } catch (const std::exception &e) {
             err = e.what();
         }
@@ -180,7 +210,9 @@ int registry_final(const std::vector<std::string> &argv) {
             continue;
         }
         const std::string h = sha256_hex(data);
-        if (h != ref[o]) {
+        for (const std::string &l : left_out)
+            std::printf("%s: left out %s (its DLC map pack was not found)\n", o.c_str(), l.c_str());
+        if (h != ref[o] && left_out.empty()) {   // with a DLC piece left out the registry differs from the reference
             std::printf("MISMATCH %s: built %s, reference %s (not written)\n\n", tmp.c_str(), h.substr(0, 16).c_str(), ref[o].substr(0, 16).c_str());
             rc = 1;
             continue;

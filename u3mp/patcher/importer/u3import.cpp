@@ -153,10 +153,7 @@ std::vector<std::string> data2_problems(const std::vector<std::string> &folders)
     std::vector<fs::path> f;
     for (const auto &x : folders) f.push_back(P(x));
     inp.add_ps3_u3(f);
-    std::vector<std::string> out;
-    for (const auto &p : full_import_problems(inp))
-        if (p.find("DLC map packs") == std::string::npos) out.push_back(p);
-    return out;
+    return full_import_problems(inp);
 }
 
 // the USRDIR of a usable game-data folder among these folders (the one the recipe would read), else empty
@@ -166,9 +163,7 @@ fs::path usable_data2(const std::vector<std::string> &folders) {
     for (const auto &x : folders) f.push_back(P(x));
     inp.add_ps3_u3(f);
     const auto it = inp.ps3.find("data2");
-    if (it == inp.ps3.end()) return {};
-    for (const auto &p : full_import_problems(inp))
-        if (p.find("DLC map packs") == std::string::npos) return {};
+    if (it == inp.ps3.end() || !full_import_problems(inp).empty()) return {};
     return it->second;
 }
 

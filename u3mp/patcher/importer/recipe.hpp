@@ -25,6 +25,15 @@ struct Inputs {
     std::optional<fs::path> u2;
     std::map<std::string, std::string> u2_sfo;
     std::vector<std::string> problems, notes;
+    // The DLC map packs: the folders they are taken from (pack order, each once; ps3["dlcmaps"] is the first) and the
+    // packs found (bit n-1 = dlc-map<n>; a Game of the Year disc's goty-dlc.psarc counts as all four). A missing pack
+    // is left out of the import (its levels and sounds are skipped), never an error.
+    std::vector<fs::path> dlc_dirs;
+    unsigned dlc_packs = 0;
+    bool dlc_goty = false;   // the packs come from the disc's goty-dlc.psarc
+    std::map<std::string, std::map<std::string, std::string>> sfo_of;   // PARAM.SFO values of the DLC folders seen
+    void choose_dlc(const std::vector<fs::path> &roots, const std::vector<fs::path> &seen);
+    std::string dlc_value() const;   // PS3_DLCMAPS: the DLC folders, '|' between them
 
     void set_ps4(const fs::path &folder, const fs::path &update = {});
     void add_ps3_u3(const std::vector<fs::path> &folders, bool scan = true);

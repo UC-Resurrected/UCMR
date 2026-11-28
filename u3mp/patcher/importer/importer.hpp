@@ -71,6 +71,11 @@ std::string sha256_file(const fs::path &p);
 // sha256 of a file, remembered by (path, size, modification time) for this run: the recipe hashes the files of a step
 // before and after it, and the next step's check reads the same files again
 std::string sha256_cached(const fs::path &p);
+// records the sha256 of a file just written (its bytes were hashed already), for the later sha256_cached calls
+void sha256_remember(const fs::path &p, const std::string &hex);
+// the cache of the files below root in a file between runs (_recipe/hashes.tsv; common.cpp says the format)
+void hash_cache_load(const fs::path &file, const fs::path &root);
+void hash_cache_save(const fs::path &file, const fs::path &root);
 uint64_t tree_size(const fs::path &folder);
 bool rmtree_retry(const fs::path &p, double seconds = 10);
 void rmtree(const fs::path &p);   // shutil.rmtree (read-only files too)
