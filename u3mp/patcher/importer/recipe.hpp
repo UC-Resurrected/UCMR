@@ -18,15 +18,24 @@ std::optional<fs::path> find_sfo(const fs::path &folder);
 
 // The validated input folders (recipe_lib.Inputs)
 struct Inputs {
-    std::optional<fs::path> ps4;
+    std::optional<fs::path> ps4, ps4_update;
     std::map<std::string, Value> ps4_sfo;
     std::map<std::string, fs::path> ps3;                         // kind (disc, update, data2, dlcmaps) -> USRDIR
     std::map<std::string, std::map<std::string, std::string>> ps3_sfo;
     std::optional<fs::path> u2;
     std::map<std::string, std::string> u2_sfo;
     std::vector<std::string> problems, notes;
+    // The DLC map packs: the folders they are taken from (pack order, each once; ps3["dlcmaps"] is the first) and the
+    // packs found (bit n-1 = dlc-map<n>; a Game of the Year disc's goty-dlc.psarc counts as all four). A missing pack
+    // is left out of the import (its levels and sounds are skipped), never an error.
+    std::vector<fs::path> dlc_dirs;
+    unsigned dlc_packs = 0;
+    bool dlc_goty = false;   // the packs come from the disc's goty-dlc.psarc
+    std::map<std::string, std::map<std::string, std::string>> sfo_of;   // PARAM.SFO values of the DLC folders seen
+    void choose_dlc(const std::vector<fs::path> &roots, const std::vector<fs::path> &seen);
+    std::string dlc_value() const;   // PS3_DLCMAPS: the DLC folders, '|' between them
 
-    void set_ps4(const fs::path &folder);
+    void set_ps4(const fs::path &folder, const fs::path &update = {});
     void add_ps3_u3(const std::vector<fs::path> &folders, bool scan = true);
     void set_ps3_u2(const std::vector<fs::path> &folders, bool scan = true);
     std::vector<std::string> speech_langs() const;       // the PS3 disc's <lang>-mp.psarc languages
@@ -48,7 +57,7 @@ int ps3values_main(const std::vector<std::string> &v);
 
 // rebuild_overlays: the recipe over the input folders into `out`; returns its exit code (0, 1 failed steps, 2 inputs)
 struct RecipeArgs {
-    std::string ps4;
+    std::string ps4, ps4_update;
     std::vector<std::string> ps3_u3, ps3_u2;
     std::string out, only, from, skip, speech_langs = "english";
     bool force = false, dry_run = false, continue_on_error = false, all_files = false, allow_missing_u2 = false, allow_partial_inputs = false;

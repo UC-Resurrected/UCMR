@@ -2427,6 +2427,10 @@ void new_only_scenarios() {
                 expect(a.mm_pack_mask() == 0, "a map-pack map of another type: 0");
                 st.net_game_pack = {{2, 1}};   // net game 2 is type 1
                 expect(a.mm_pack_mask() == 7, "a type-1 map-pack map: dlc_packs() & 0xff = 7");
+                st.dlc_packs = 3;   // map pack 1 only
+                expect(a.mm_pack_mask() == 3, "map pack 1 only: 3");
+                st.dlc_packs = 1;   // no map pack (a career saved as DLC whose packs are gone): the plain key
+                expect(a.mm_pack_mask() == 0, "no map pack in common: 0 (plain key)");
             });
     add_new("H8 online_network_error: error byte, the transport closes on the next frame", nullptr, [](const Api &a) {
         a.network_error("test");

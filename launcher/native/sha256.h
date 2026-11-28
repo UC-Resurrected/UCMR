@@ -1,5 +1,7 @@
 // sha256.h - SHA-256 (FIPS 180-4) for the launcher: the game starter checks the multiplayer image's digest before it
-// boots the game. Portable, so the same code serves Windows and Linux; no bcrypt, no OpenSSL.
+// boots the game; the Linux imports hash every file they make with it. Portable, so the same code serves Windows and
+// Linux; no bcrypt, no OpenSSL. On an x86-64 CPU with the SHA extensions the blocks are hashed with them (chosen once at
+// run time; the same digests), else in plain C++.
 #pragma once
 
 #include <algorithm>
@@ -8,7 +10,61 @@
 #include <cstring>
 #include <string>
 
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__))
+#define SHA256_X86 1
+#include <cpuid.h>
+#include <immintrin.h>
+#endif
+
 namespace sha256 {
+
+#ifdef SHA256_X86
+// the CPU has the SHA extensions (CPUID 7.0 EBX bit 29) and SSSE3 / SSE4.1 (CPUID 1 ECX bits 9 and 19)
+inline bool has_sha_ni() {
+    static const bool yes = [] {
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 9)) || !(c & (1u << 19))) return false;
+        if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return false;
+        return (b & (1u << 29)) != 0;
+    }();
+    return yes;
+}
+
+// `blocks` 64-byte blocks into the state with the SHA extensions: four rounds per step (two SHA256RNDS2), the message
+// schedule from SHA256MSG1 / SHA256MSG2
+__attribute__((target("sha,sse4.1,ssse3"))) inline void blocks_sha_ni(uint32_t state[8], const uint8_t *p, size_t blocks,
+                                                                     const uint32_t *k) {
+    const __m128i swap = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);   // big-endian words
+    __m128i t = _mm_loadu_si128(reinterpret_cast<const __m128i *>(state));
+    __m128i s1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(state + 4));
+    t = _mm_shuffle_epi32(t, 0xb1);                 // CDAB
+    s1 = _mm_shuffle_epi32(s1, 0x1b);               // EFGH
+    __m128i s0 = _mm_alignr_epi8(t, s1, 8);         // ABEF
+    s1 = _mm_blend_epi16(s1, t, 0xf0);              // CDGH
+    for (; blocks; --blocks, p += 64) {
+        const __m128i save0 = s0, save1 = s1;
+        __m128i w[16];
+        for (int i = 0; i < 16; ++i) {
+            if (i < 4) w[i] = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p + 16 * i)), swap);
+            else
+                w[i] = _mm_sha256msg2_epu32(_mm_add_epi32(_mm_sha256msg1_epu32(w[i - 4], w[i - 3]), _mm_alignr_epi8(w[i - 1], w[i - 2], 4)),
+                                            w[i - 1]);
+            __m128i m = _mm_add_epi32(w[i], _mm_loadu_si128(reinterpret_cast<const __m128i *>(k + 4 * i)));
+            s1 = _mm_sha256rnds2_epu32(s1, s0, m);
+            m = _mm_shuffle_epi32(m, 0x0e);
+            s0 = _mm_sha256rnds2_epu32(s0, s1, m);
+        }
+        s0 = _mm_add_epi32(s0, save0);
+        s1 = _mm_add_epi32(s1, save1);
+    }
+    t = _mm_shuffle_epi32(s0, 0x1b);                // FEBA
+    s1 = _mm_shuffle_epi32(s1, 0xb1);               // DCHG
+    s0 = _mm_blend_epi16(t, s1, 0xf0);              // DCBA
+    s1 = _mm_alignr_epi8(s1, t, 8);                 // HGFE
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(state), s0);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(state + 4), s1);
+}
+#endif
 
 class Hash {
 public:
@@ -32,14 +88,15 @@ public:
             p += take;
             n -= take;
             if (have_ == sizeof buf_) {
-                block(buf_);
+                blocks(buf_, 1);
                 have_ = 0;
             }
         }
-        while (n >= sizeof buf_) {
-            block(p);
-            p += sizeof buf_;
-            n -= sizeof buf_;
+        if (n >= sizeof buf_) {
+            const size_t whole = n / sizeof buf_;
+            blocks(p, whole);
+            p += whole * sizeof buf_;
+            n -= whole * sizeof buf_;
         }
         if (n) {
             std::memcpy(buf_, p, n);
@@ -82,8 +139,24 @@ public:
         return s;
     }
 
+    // the plain C++ path (also what the SHA extensions are checked against)
+    static bool &portable_only() {
+        static bool only = false;
+        return only;
+    }
+
 private:
     static uint32_t rotr(uint32_t v, int by) { return (v >> by) | (v << (32 - by)); }
+
+    void blocks(const uint8_t *p, size_t n) {
+#ifdef SHA256_X86
+        if (!portable_only() && has_sha_ni()) {
+            blocks_sha_ni(h_, p, n, K);
+            return;
+        }
+#endif
+        for (; n; --n, p += 64) block(p);
+    }
 
     void block(const uint8_t *p) {
         uint32_t w[64];

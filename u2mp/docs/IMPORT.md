@@ -360,6 +360,13 @@ Test run (2026-11-07, `--only mp-hero`, 49 skins):
 
 ## Test run (the copies on this PC, `scratch/u2mp/import-test`)
 
+Threads (PR #54, 2026-11-28): the actor and level rows (151, the slow ones) convert on up to 8 threads (`--jobs N`;
+`--jobs 1` converts one row after the other as before); every record, log line and state save still happens in list
+order. A clean import with both map packs (GOTY + `BCES00757`, 12 threads): **81 s** (import-list 53.6 s) instead of
+112 s (87.7 s) with `--jobs 1`; all 1,835 output files identical, state.json the same apart from the times. The
+shared pieces have locks: archive reads, the `work/src` copies, the Havok table load, the actor template index and
+the level survey (`work/res`, made once).
+
 Groups A-E, 3,768 rows, with `--ps3-dlc` (so the map pack 1 Ruins replaces the PS4 one). First run about 13 minutes
 (bank MP3 re-encoding); the DLC main maps add 3-6 minutes each (facility-multi 327 s, ruins-multi 360 s,
 highrise-multi-2 233 s, museum-multi 241 s, museum-multi-eva 180 s). Result of 2026-11-07 (run + resume):

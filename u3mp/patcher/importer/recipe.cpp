@@ -18,7 +18,9 @@
 
 #include "inflate.h"   // launcher/native/inflate.h
 #include "log_history.h"   // launcher/native/log_history.h
+#include "ps3titles.h"   // launcher/native/ps3titles.h: the PS3 releases' installs in dev_hdd0/game
 #include "psarc.hpp"   // dctools
+#include "u3fix.hpp"   // dctools: the PS4 manifest resolver
 
 #ifdef _WIN32
 #include <windows.h>
@@ -34,7 +36,11 @@
 #include <fstream>
 #include <mutex>
 #include <set>
+#include <atomic>
+#include <exception>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace u3imp {
 
@@ -324,6 +330,7 @@ std::vector<fs::path> scan_dirs(const std::vector<fs::path> &roots, int max_dept
                 if (e.is_directory(e2)) dirs.push_back(dp / e.path().filename());
             }
             if (count_sep(S(dp)) - base >= size_t(max_depth)) return;
+            std::sort(dirs.begin(), dirs.end());   // NTFS lists names sorted, Linux in no order: the same first match on both
             for (const fs::path &d : dirs) {
                 if (SKIP.count(lower(S(d.filename())))) continue;
                 std::error_code e3;
@@ -336,12 +343,12 @@ std::vector<fs::path> scan_dirs(const std::vector<fs::path> &roots, int max_dept
     return out;
 }
 
-void Inputs::set_ps4(const fs::path &folder0) {
+void Inputs::set_ps4(const fs::path &folder0, const fs::path &update0) {
     const fs::path folder = absp(folder0);
     std::vector<std::string> missing;
     for (const char *n : {"eboot.bin", "sce_sys/param.sfo", "u3data/build/main/pak23_ps4.txt", "u3data/build/main/core.psarc", "u3data/build/main/dc1/ps4",
                           "u3data/build/main/pak23/ps4", "u3data/build/main/actor33/ps4", "u3data/build/main/sound1/streams", "u2data/build/main/sound1/streams"})
-        if (!present(folder / P(n))) missing.push_back(n);
+        if (!u3::ps4_exists(S(folder / P(n)))) missing.push_back(n);
     if (!missing.empty()) {
         std::string l;
         for (const auto &m : missing) l += (l.empty() ? "" : ", ") + m;
@@ -349,8 +356,9 @@ void Inputs::set_ps4(const fs::path &folder0) {
         return;
     }
     ps4 = folder;
+    if (!update0.empty()) ps4_update = absp(update0);
     try {
-        ps4_sfo = parse_sfo(folder / "sce_sys" / "param.sfo");
+        ps4_sfo = parse_sfo(u3::upath(S(folder / "sce_sys" / "param.sfo")));
     } catch (const std::exception &e) {
         problems.push_back(std::string("PS4 param.sfo unreadable: ") + e.what());
     }
@@ -368,10 +376,13 @@ void Inputs::add_ps3_u3(const std::vector<fs::path> &folders, bool scan) {
     else
         for (const fs::path &f : folders) cands.push_back(absp(f));
     static const std::vector<const char *> U3_WORDS = {"uncharted 3", "drake's deception", "drakes deception"};
+    std::vector<fs::path> dlc_seen;   // every Uncharted 3 folder with a dlc-map<n>.psarc, scan order
     for (const fs::path &d : cands) {
         if (lower(S(d.filename())) != "usrdir" && !has_any(d, {"build/main", "dlc-patch18.psarc", "net18.bin"})) continue;
         for (const Kind &k : KINDS) {
-            if (!has_any(d, k.markers) || ps3.count(k.name)) continue;
+            if (!has_any(d, k.markers)) continue;
+            const bool dlc = std::string(k.name) == "dlcmaps";
+            if (ps3.count(k.name) && !dlc) continue;
             const std::optional<fs::path> sfo = find_sfo(d);
             std::map<std::string, Value> info;
             if (sfo) {
@@ -388,22 +399,96 @@ void Inputs::add_ps3_u3(const std::vector<fs::path> &folders, bool scan) {
                 notes.push_back(S(d) + ": PARAM.SFO title '" + sget(info, "TITLE") + "' is not Uncharted 3, folder skipped");
                 continue;
             }
+            if (dlc) {
+                dlc_seen.push_back(d);
+                sfo_of[S(d)] = {{"TITLE_ID", sget(info, "TITLE_ID")}, {"TITLE", sget(info, "TITLE")}, {"APP_VER", sget(info, "APP_VER")}, {"sfo", sfo ? S(*sfo) : ""}};
+                continue;
+            }
             ps3[k.name] = d;
             ps3_sfo[k.name] = {{"TITLE_ID", sget(info, "TITLE_ID")}, {"TITLE", sget(info, "TITLE")}, {"APP_VER", sget(info, "APP_VER")}, {"sfo", sfo ? S(*sfo) : ""}};
         }
     }
-    if (!ps3.count("dlcmaps") && ps3.count("disc") && present(ps3["disc"] / "goty-dlc.psarc")) {
-        // Game of the Year disc: goty-dlc.psarc carries the DLC map packs' level paks, so the disc stands in for dlc-map1..4
-        ps3["dlcmaps"] = ps3["disc"];
-        ps3_sfo["dlcmaps"] = ps3_sfo["disc"];
-        notes.push_back("DLC map packs: not installed separately; using the Game of the Year disc (goty-dlc.psarc)");
-    }
+    choose_dlc(folders, dlc_seen);
     for (const char *k : {"disc", "update"})
         if (!ps3.count(k))
             for (const Kind &x : KINDS)
                 if (std::string(x.name) == k) problems.push_back(std::string("no PS3 Uncharted 3 ") + k + " found (" + x.desc + ")");
-    for (const char *k : {"data2", "dlcmaps"})
-        if (!ps3.count(k)) notes.push_back(std::string("no PS3 Uncharted 3 ") + k + " found; the steps that need it will be skipped");
+    if (!ps3.count("data2")) notes.push_back("no PS3 Uncharted 3 data2 found; the steps that need it will be skipped");
+}
+
+// The DLC map packs (dlc-map1..4.psarc with their language archives beside them, or a Game of the Year disc's
+// goty-dlc.psarc with all four). The game folder first: the disc (goty-dlc.psarc), then the install of the disc's own
+// title in RPCS3's dev_hdd0/game; then every Uncharted 3 release's install there (ps3titles::u3_ids order: DLC bought
+// for another region's release works the same); then the other folders the scan found. Each pack comes from the first
+// folder that has it, so none is imported twice. Packs found nowhere are left out: the import goes on without them.
+void Inputs::choose_dlc(const std::vector<fs::path> &roots, const std::vector<fs::path> &seen) {
+    dlc_dirs.clear();
+    dlc_packs = 0;
+    dlc_goty = false;
+    std::vector<fs::path> order;
+    auto add = [&](const fs::path &d) {
+        if (!is_dir(d)) return;
+        const fs::path a = absp(d);
+        if (std::find(order.begin(), order.end(), a) == order.end()) order.push_back(a);
+    };
+    auto disc = ps3.find("disc");
+    if (disc != ps3.end() && present(disc->second / "goty-dlc.psarc")) {
+        dlc_goty = true;
+        dlc_packs = 0xf;
+        dlc_dirs = {disc->second};
+        ps3["dlcmaps"] = disc->second;
+        ps3_sfo["dlcmaps"] = ps3_sfo["disc"];
+        notes.push_back("DLC map packs: all four from the Game of the Year disc (goty-dlc.psarc)");
+        return;
+    }
+    const std::string disc_id = disc == ps3.end() ? std::string() : ps3titles::key(ps3_sfo["disc"]["TITLE_ID"]);
+    std::vector<std::string> ids;
+    if (!disc_id.empty()) ids.push_back(disc_id);
+    for (const std::string &id : ps3titles::u3_ids())
+        if (id != disc_id) ids.push_back(id);
+    for (const auto &[id, folder] : ps3titles::find(roots, ids)) add(folder / "USRDIR");
+    for (const fs::path &d : seen) add(d);
+    std::string from;
+    for (int n = 1; n <= 4; n++) {
+        const std::string name = "dlc-map" + std::to_string(n) + ".psarc";
+        for (const fs::path &d : order) {
+            if (!present(d / name)) continue;
+            dlc_packs |= 1u << (n - 1);
+            if (std::find(dlc_dirs.begin(), dlc_dirs.end(), d) == dlc_dirs.end()) dlc_dirs.push_back(d);
+            from += (from.empty() ? "" : ", ") + fmt("pack %d from %s", n, S(d).c_str());
+            break;
+        }
+    }
+    if (dlc_dirs.empty()) {
+        notes.push_back("DLC map packs: none found (no dlc-map1..4.psarc in the game folder or in any Uncharted 3 release's install in "
+                        "RPCS3's dev_hdd0/game); the import goes on without them, and their maps stay off");
+        return;
+    }
+    ps3["dlcmaps"] = dlc_dirs.front();
+    auto sf = sfo_of.find(S(dlc_dirs.front()));
+    if (sf != sfo_of.end()) ps3_sfo["dlcmaps"] = sf->second;
+    else if (std::optional<fs::path> sfo = find_sfo(dlc_dirs.front())) {
+        std::map<std::string, Value> info;
+        try {
+            info = parse_sfo(*sfo);
+        } catch (const std::exception &) {
+        }
+        ps3_sfo["dlcmaps"] = {{"TITLE_ID", sget(info, "TITLE_ID")}, {"TITLE", sget(info, "TITLE")}, {"APP_VER", sget(info, "APP_VER")}, {"sfo", S(*sfo)}};
+    } else
+        ps3_sfo["dlcmaps"] = {{"TITLE_ID", ""}, {"TITLE", ""}, {"APP_VER", ""}, {"sfo", ""}};
+    notes.push_back("DLC map packs: " + from);
+    std::string missing;
+    for (int n = 1; n <= 4; n++)
+        if (!(dlc_packs >> (n - 1) & 1)) missing += (missing.empty() ? "" : ", ") + std::to_string(n);
+    if (!missing.empty()) notes.push_back("DLC map pack(s) " + missing + " not found: the import goes on without them, and their maps stay off");
+}
+
+// PS3_DLCMAPS: the DLC folders, '|' between them (one folder: the folder as before); the steps take each pack from the
+// first folder that has it (u3::dir_list)
+std::string Inputs::dlc_value() const {
+    std::string v;
+    for (const fs::path &d : dlc_dirs) v += (v.empty() ? "" : "|") + fwd(d);
+    return v;
 }
 
 void Inputs::set_ps3_u2(const std::vector<fs::path> &folders, bool scan) {
@@ -448,8 +533,7 @@ std::vector<std::string> Inputs::speech_langs() const {
 std::vector<std::string> Inputs::ps4_speech_langs() const {
     std::vector<std::string> out;
     if (!ps4) return out;
-    std::error_code ec;
-    for (const auto &e : fs::directory_iterator(*ps4 / "u3data" / "build" / "main" / "sound1" / "streams" / "speech", ec)) {
+    for (const auto &e : u3::ps4_dir(S(*ps4 / "u3data" / "build" / "main" / "sound1" / "streams" / "speech"))) {
         const std::string f = S(e.path().filename());
         if (ends(f, "_ps4.psarc")) out.push_back(f.substr(0, f.size() - 10));
     }
@@ -467,7 +551,7 @@ std::vector<std::pair<std::string, std::string>> Inputs::placeholders(const fs::
             {"PS3_DISC", k("disc")},
             {"PS3_UPDATE", k("update")},
             {"PS3_DATA2", k("data2")},
-            {"PS3_DLCMAPS", k("dlcmaps")},
+            {"PS3_DLCMAPS", dlc_value()},
             {"PS3_U2", u2 ? fwd(*u2) : ""},
             {"DCCONV", fwd(tools_dir() / "dcconv")},
             {"RECOVERED", fwd(out / "scratch")}};
@@ -518,10 +602,8 @@ std::set<std::string> accepted_net18_sha256() {
 }  // namespace
 
 std::vector<std::string> full_import_problems(Inputs &inp) {
+    // (the DLC map packs are not needed: without them, or with only some of them, the import leaves their maps out)
     std::vector<std::string> out;
-    if (!inp.ps3.count("dlcmaps"))
-        out.push_back("the Uncharted 3 DLC map packs are not installed (no dlc-map1..4.psarc found in the folders given). Install the DLC map packs in "
-                      "RPCS3 (they go to dev_hdd0/game/<the DLC title id>, e.g. BCES01176) and add RPCS3's dev_hdd0/game folder.");
     auto it = inp.ps3.find("data2");
     if (it == inp.ps3.end()) {
         out.push_back("the Uncharted 3 game data folder (dev_hdd0/game/BCES01670DATA2) was not found. Enter the community server DNS in \"Set up "
@@ -1121,6 +1203,27 @@ std::string basename_of(const std::string &a) {
 struct InputMissing : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+// a copy-list file only a DLC source the import does not have holds (left out, not an error)
+struct NotImported : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// A step's outputs (path -> sha256, in the order made): a JSON object built with an index, because Value::set searches
+// its fields one by one and a speech step records ~47 000 files
+struct OutList {
+    Value v = Value::object();
+    std::unordered_map<std::string, size_t> at;
+    void set(const std::string &rel, Value h) {
+        auto it = at.find(rel);
+        if (it != at.end()) {
+            v.fields[it->second].second = std::move(h);
+            return;
+        }
+        at.emplace(rel, v.fields.size());
+        v.fields.push_back({rel, std::move(h)});
+    }
+    bool empty() const { return v.fields.empty(); }
+};
 
 // ------------------------------------------------------------------------------------------------ copy lists
 // claimed: every file the list names (lower case), copied or not
@@ -1131,30 +1234,46 @@ Value step_copy_list(const Value &s, const Inputs &inp, const fs::path &out, con
         auto it = inp.ps3.find(k);
         return it == inp.ps3.end() ? std::nullopt : std::optional<fs::path>(it->second);
     };
-    std::vector<fs::path> arch_dirs;
-    for (const char *k : {"disc", "update", "data2", "dlcmaps"})
-        if (auto d = kind(k))
-            for (const fs::path &x : {*d, *d / "build" / "main", *d / "build" / "main" / "pak23", *d / "build" / "main" / "sound1" / "streams",
-                                      *d / "build" / "main" / "sound1" / "streams" / "speech"})
-                arch_dirs.push_back(x);
-    std::map<std::string, std::unique_ptr<u3::Psarc>> arch;
-    std::set<std::string> no_arch;   // archive names no PS3 input has (other languages: asked once per row)
-    auto archive = [&](const std::string &name) -> u3::Psarc & {
-        auto it = arch.find(name);
-        if (it != arch.end()) return *it->second;
-        if (!no_arch.count(name))
+    std::vector<fs::path> arch_dirs, roots;
+    for (const char *k : {"disc", "update", "data2"})
+        if (auto d = kind(k)) roots.push_back(*d);
+    for (const fs::path &d : inp.dlc_dirs)   // every DLC folder (each pack from the first one that has it)
+        if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
+    for (const fs::path &d : roots)
+        for (const fs::path &x : {d, d / "build" / "main", d / "build" / "main" / "pak23", d / "build" / "main" / "sound1" / "streams",
+                                  d / "build" / "main" / "sound1" / "streams" / "speech"})
+            arch_dirs.push_back(x);
+    // The files are copied by several threads (inflate, hash and write per file; the speech list has ~47 000): each
+    // thread takes the next 64 files of the list, so its reads stay together in an archive, and has its own archives
+    // open (a Psarc reads through its own stream). The outputs, the problems and the counts are taken in list order
+    // afterwards, so the result is the same as one thread's.
+    struct Open {
+        std::unique_ptr<u3::Psarc> p;
+        std::unordered_map<std::string, size_t> at;   // entry name (as listed, and without its leading '/') -> index
+    };
+    struct Worker {
+        std::map<std::string, Open> arch;
+        std::set<std::string> no_arch;   // archive names no PS3 input has (other languages: asked once per row)
+    };
+    auto archive = [&](Worker &w, const std::string &name) -> Open & {
+        auto it = w.arch.find(name);
+        if (it != w.arch.end()) return it->second;
+        if (!w.no_arch.count(name))
             for (const fs::path &d : arch_dirs) {
                 const fs::path p = d / P(name);
                 if (is_file(p)) {
                     note_read(p);
-                    return *(arch[name] = std::make_unique<u3::Psarc>(p));
+                    Open &o = w.arch[name];
+                    o.p = std::make_unique<u3::Psarc>(p);
+                    for (size_t i = 0; i < o.p->names.size(); i++) o.at.emplace(o.p->names[i], i);   // the first one wins
+                    return o;
                 }
             }
-        no_arch.insert(name);
+        w.no_arch.insert(name);
         throw std::out_of_range("archive " + name + " not found in any PS3 input");
     };
-    Value outputs = Value::object();
-    size_t n = 0;
+    OutList outputs;
+    size_t no_dlc = 0;
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<std::string> bad;
     // speech: the English files (the reference), then the same files for every other speech language: the languages the
@@ -1172,75 +1291,150 @@ Value step_copy_list(const Value &s, const Inputs &inp, const fs::path &out, con
         for (size_t k = 0; (k = t.find(a, k)) != std::string::npos; k += b.size()) t.replace(k, a.size(), b);
         return t;
     };
-    auto read_source = [&](const Row &r, const std::string &arc, const std::string &ent) -> Bytes {
+    auto read_source = [&](Worker &w, const Row &r, const std::string &arc, const std::string &ent) -> Bytes {
         if (arc == "loose") {
             std::optional<fs::path> base;
             if (r.at("source_kind") == "ps3-u3-disc-loose") base = kind("disc");
             else if (r.at("source_kind") == "ps4-retail") base = inp.ps4;
             else throw u3::Stop("KeyError: '" + r.at("source_kind") + "'");
             if (!base) throw u3::Stop("TypeError: no " + r.at("source_kind") + " folder");
-            const fs::path src = *base / P(ent);
+            const fs::path src = u3::upath(S(*base) + "/" + ent);
             if (!is_file(src)) throw std::out_of_range("[Errno 2] No such file or directory: '" + S(src) + "'");
             note_read(src);
             return read_bytes(src);
         }
-        u3::Psarc &ps = archive(arc);
-        auto f = std::find(ps.names.begin(), ps.names.end(), ent);
-        if (f == ps.names.end()) f = std::find(ps.names.begin(), ps.names.end(), "/" + ent);
-        if (f == ps.names.end()) throw std::out_of_range(arc + " has no entry " + ent);
-        return ps.read(size_t(f - ps.names.begin()) + 1);
+        auto from = [&](const std::string &a) -> Bytes {
+            Open &o = archive(w, a);
+            auto f = o.at.find(ent);
+            if (f == o.at.end()) f = o.at.find("/" + ent);
+            if (f == o.at.end()) throw std::out_of_range(a + " has no entry " + ent);
+            return o.p->read(f->second + 1);
+        };
+        if (arc != "goty-dlc.psarc") return from(arc);
+        // a Game of the Year disc's DLC file: without that disc the same file from a DLC map pack or the 1.19 update
+        // (byte for byte the same; the row's sha256 checks it); a file only the GOTY disc has is left out
+        try {
+            return from(arc);
+        } catch (const std::out_of_range &) {
+        }
+        for (const char *alt : {"dlc-map1.psarc", "dlc-map2.psarc", "dlc-map3.psarc", "dlc-map4.psarc", "dlc-patch18.psarc", "dlc-patch13.psarc"}) {
+            try {
+                return from(alt);
+            } catch (const std::out_of_range &) {
+            }
+        }
+        throw NotImported(ent);
     };
+    struct Task {
+        const Row *r;
+        std::string lv, dest, arc, ent, rel;
+        fs::path dp;
+        // the result
+        enum { NONE, SET, BAD, NOT_IMPORTED } what = NONE;
+        std::string h, why;
+        int lang = 0;   // 1 this language's own file, 2 the English stand-in
+        bool wrote = false;
+    };
+    std::vector<Task> tasks;
     for (const Row &r : rows)
         for (const std::string &lv : variants) {
-            std::string dest = r.at("dest"), arc = r.at("archive"), ent = r.at("entry");
+            Task t;
+            t.r = &r;
+            t.lv = lv;
+            t.dest = r.at("dest"), t.arc = r.at("archive"), t.ent = r.at("entry");
             if (!lv.empty()) {
-                dest = replace_all(dest, "/speech/english/", "/speech/" + lv + "/");
-                arc = replace_all(replace_all(arc, "english-mp.psarc", lv + "-mp.psarc"), "goty-speech-english", "goty-speech-" + lv);
-                ent = replace_all(ent, "/speech/english/", "/speech/" + lv + "/");
+                t.dest = replace_all(t.dest, "/speech/english/", "/speech/" + lv + "/");
+                t.arc = replace_all(replace_all(t.arc, "english-mp.psarc", lv + "-mp.psarc"), "goty-speech-english", "goty-speech-" + lv);
+                t.ent = replace_all(t.ent, "/speech/english/", "/speech/" + lv + "/");
             }
-            const fs::path dp = out / "work" / P(r.at("overlay")) / P(dest);
-            const std::string rel = rel_of(dp, out);
-            claimed.insert(lower(rel));
-            if (lv.empty() && present(dp) && sha256_cached(dp) == r.at("sha256")) {
-                outputs.set(rel, str(r.at("sha256")));
-                continue;
-            }
-            Bytes data;
-            try {
-                data = read_source(r, arc, ent);
-                if (!lv.empty()) lang_counts[lv].first++;
-            } catch (const std::out_of_range &e) {
-                if (lv.empty()) {
-                    bad.push_back(e.what());
-                    continue;
-                }
-                // the PS3 copy lacks this language (or this line in it): the English file, as the reference has it
-                try {
-                    data = read_source(r, r.at("archive"), r.at("entry"));
-                    lang_counts[lv].second++;
-                } catch (const std::out_of_range &) {
-                    continue;   // reported for English
-                }
-            }
-            const std::string h = sha256_hex(data);
-            if (lv.empty() && h != r.at("sha256")) {
-                bad.push_back(dest + ": content differs from the reference (" + h.substr(0, 12) + ")");
-                continue;
-            }
-            if (!lv.empty() && present(dp) && sha256_cached(dp) == h) {
-                outputs.set(rel, str(h));
-                continue;
-            }
-            fs::create_directories(dp.parent_path());
-            write_bytes(P(S(dp) + ".tmp"), data);
-            fs::rename(P(S(dp) + ".tmp"), dp);
-            outputs.set(rel, str(h));
-            if (++n % 1000 == 0)
-                lg(fmt("        %zu files, %.0f s", n, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+            t.dp = out / "work" / P(r.at("overlay")) / P(t.dest);
+            t.rel = rel_of(t.dp, out);
+            claimed.insert(lower(t.rel));
+            tasks.push_back(std::move(t));
         }
+    auto run = [&](Worker &w, Task &t) {
+        const Row &r = *t.r;
+        if (t.lv.empty() && present(t.dp) && sha256_cached(t.dp) == r.at("sha256")) {
+            t.what = Task::SET;
+            t.h = r.at("sha256");
+            return;
+        }
+        Bytes data;
+        try {
+            data = read_source(w, r, t.arc, t.ent);
+            if (!t.lv.empty()) t.lang = 1;
+        } catch (const NotImported &) {
+            t.what = Task::NOT_IMPORTED;   // only the Game of the Year disc has it, and the import has no such disc
+            return;
+        } catch (const std::out_of_range &e) {
+            if (t.lv.empty()) {
+                t.what = Task::BAD;
+                t.why = e.what();
+                return;
+            }
+            // the PS3 copy lacks this language (or this line in it): the English file, as the reference has it
+            try {
+                data = read_source(w, r, r.at("archive"), r.at("entry"));
+                t.lang = 2;
+            } catch (const std::out_of_range &) {
+                return;   // reported for English
+            }
+        }
+        const std::string h = sha256_hex(data);
+        if (t.lv.empty() && h != r.at("sha256")) {
+            t.what = Task::BAD;
+            t.why = t.dest + ": content differs from the reference (" + h.substr(0, 12) + ")";
+            return;
+        }
+        t.what = Task::SET;
+        t.h = h;
+        if (!t.lv.empty() && present(t.dp) && sha256_cached(t.dp) == h) return;
+        std::error_code ec;
+        fs::create_directories(t.dp.parent_path(), ec);   // another thread may be making the same folder
+        write_bytes(P(S(t.dp) + ".tmp"), data);
+        fs::rename(P(S(t.dp) + ".tmp"), t.dp);
+        sha256_remember(t.dp, h);   // the later steps' checks of this file need not read it again
+        t.wrote = true;
+    };
+    const size_t CHUNK = 64;
+    const unsigned threads = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    std::atomic<size_t> next{0}, written{0};
+    std::mutex log_m;
+    std::exception_ptr failure;
+    std::vector<std::thread> pool;
+    for (unsigned k = 0; k < threads; k++)
+        pool.emplace_back([&] {
+            Worker w;
+            for (size_t c; (c = next.fetch_add(CHUNK)) < tasks.size();) {
+                for (size_t i = c; i < std::min(tasks.size(), c + CHUNK); i++) {
+                    try {
+                        run(w, tasks[i]);
+                    } catch (...) {
+                        std::lock_guard<std::mutex> l(log_m);
+                        if (!failure) failure = std::current_exception();
+                        next = tasks.size();   // the others stop at their next chunk
+                        return;
+                    }
+                    if (tasks[i].wrote && ++written % 1000 == 0) {
+                        std::lock_guard<std::mutex> l(log_m);
+                        lg(fmt("        %zu files, %.0f s", size_t(written), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+                    }
+                }
+            }
+        });
+    for (auto &t : pool) t.join();
+    if (failure) std::rethrow_exception(failure);
+    for (const Task &t : tasks) {
+        if (t.lang == 1) lang_counts[t.lv].first++;
+        else if (t.lang == 2) lang_counts[t.lv].second++;
+        if (t.what == Task::SET) outputs.set(t.rel, str(t.h));
+        else if (t.what == Task::BAD) bad.push_back(t.why);
+        else if (t.what == Task::NOT_IMPORTED) no_dlc++;
+    }
     for (const auto &[l, c] : lang_counts)
         lg(fmt("        speech %s: %zu files from the PS3 %s archives, %zu English (the PS3 copy lacks them)", l.c_str(), c.first,
                l.c_str(), c.second));
+    if (no_dlc) lg(fmt("        %zu DLC file(s) only the Game of the Year disc has: left out", no_dlc));
     if (!bad.empty()) {
         lg(fmt("        %zu file(s) could not be copied:", bad.size()));
         for (size_t i = 0; i < bad.size() && i < 20; i++) lg("          " + bad[i]);
@@ -1248,7 +1442,7 @@ Value step_copy_list(const Value &s, const Inputs &inp, const fs::path &out, con
         const double t = tol ? (tol->kind == Value::Float ? tol->f : double(tol->i)) : 0.0;
         if (double(bad.size()) > double(rows.size()) * t) throw u3::Stop(fmt("%zu of %zu files missing or different", bad.size(), rows.size()));
     }
-    return outputs;
+    return std::move(outputs.v);
 }
 
 // ------------------------------------------------------------------------------------------------ script steps
@@ -1340,7 +1534,7 @@ Value step_script(const Value &s, const Inputs &inp, const fs::path &out, const 
             }
         }
     }
-    Value outputs = Value::object();
+    OutList outputs;
     for (const auto &pat : writes)
         for (const fs::path &p : glob(out, pat))
             if (is_file(p)) {
@@ -1348,19 +1542,19 @@ Value step_script(const Value &s, const Inputs &inp, const fs::path &out, const 
                 auto b = before.find(S(p));
                 if (b == before.end() || b->second != h) outputs.set(rel_of(p, out), str(h));
             }
-    if (val_b(s, "must_write", false) && outputs.fields.empty()) {
+    if (val_b(s, "must_write", false) && outputs.empty()) {
         std::string l;
         for (const auto &w : writes) l += (l.empty() ? "" : ", ") + ("'" + w + "'");
         throw u3::Stop("the step changed no file under [" + l + "]");
     }
-    if (outputs.fields.empty()) {
+    if (outputs.empty()) {
         // exit 0 without a change: remember the current hashes of the files the step owns
         for (const auto &pat : writes)
             for (const fs::path &p : glob(out, pat))
                 if (is_file(p) && before.count(S(p))) outputs.set(rel_of(p, out), str(before[S(p)]));
         lg("        no change (already applied)");
     }
-    return outputs;
+    return std::move(outputs.v);
 }
 
 }  // namespace
@@ -1370,7 +1564,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
     const std::vector<Value> steps = load_steps(print);
     if (a.ps4.empty() || a.ps3_u3.empty() || a.out.empty()) throw u3::Stop("--ps4, --ps3-u3 and --out are required");
     Inputs inp;
-    inp.set_ps4(P(a.ps4));
+    inp.set_ps4(P(a.ps4), a.ps4_update.empty() ? fs::path() : P(a.ps4_update));
     std::vector<fs::path> u3f, u2f;
     for (const auto &f : a.ps3_u3) u3f.push_back(P(f));
     for (const auto &f : a.ps3_u2) u2f.push_back(P(f));
@@ -1392,6 +1586,15 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
     }
     const fs::path out = absp(P(a.out));
     fs::create_directories(out / "_recipe");
+    // the file hashes of earlier runs (only what is still unchanged counts), saved again however the run ends
+    hash_cache_load(out / "_recipe" / "hashes.tsv", out);
+    struct SaveHashes {
+        fs::path out;
+        bool on;
+        ~SaveHashes() {
+            if (on) hash_cache_save(out / "_recipe" / "hashes.tsv", out);
+        }
+    } save_hashes{out, !a.dry_run};
     // a full run starts the log afresh, the earlier ones kept LOG_DAYS days as log.<date>.txt; a selection (--only, --from) or a
     // dry run adds
     const bool full_run = a.only.empty() && a.from.empty() && !a.dry_run;
@@ -1542,6 +1745,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
             bool ok = false;
             if (n == "ps4") ok = inp.ps4.has_value();
             else if (n == "ps3_u2") ok = inp.u2.has_value();
+            else if (n == "ps3_dlcmaps") ok = true;   // optional: the step leaves out the levels of the packs not found
             else if (starts(n, "ps3_")) ok = inp.ps3.count(n.substr(4)) != 0;
             else if (starts(n, "tool:")) ok = present(tools_dir() / P(n.substr(5)));
             if (!ok) l += (l.empty() ? "" : ", ") + n;
@@ -1729,8 +1933,10 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
             std::set<std::string> others;   // lower case, filled on first need
             bool others_read = false;
             size_t dropped = 0;
+            std::unordered_set<std::string> made;   // this run's outputs (a set: ~47 000 speech files on both sides)
+            for (const auto &[rel, hv] : outputs.fields) made.insert(rel);
             for (const auto &[rel, hv] : before.fields) {
-                if (outputs.get(rel)) continue;
+                if (made.count(rel)) continue;
                 const bool still = kind == "copy-list" ? claimed.count(lower(rel)) != 0
                                                        : std::any_of(pats.begin(), pats.end(), [&](const std::string &pt) { return fnmatch(rel, pt); });
                 if (still) continue;

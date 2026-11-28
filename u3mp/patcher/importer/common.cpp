@@ -11,6 +11,7 @@
 #include "sha256.h"   // launcher/native/sha256.h (Windows keeps bcrypt)
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace u3imp {
 
@@ -216,13 +218,21 @@ void write_bytes(const fs::path &p, const Bytes &b) {
 void write_text(const fs::path &p, const std::string &t) { write_bytes(p, Bytes(t.begin(), t.end())); }
 
 #ifdef _WIN32
+// One SHA-256 provider for the whole process (opening one costs far more than hashing a small file; CNG lets every
+// thread create its own hash from the same provider). `alg` stays unused.
+static BCRYPT_ALG_HANDLE sha256_provider() {
+    static const BCRYPT_ALG_HANDLE h = [] {
+        BCRYPT_ALG_HANDLE a = nullptr;
+        BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+        return a;
+    }();
+    return h;
+}
 Sha256::Sha256() {
-    BCryptOpenAlgorithmProvider(reinterpret_cast<BCRYPT_ALG_HANDLE *>(&alg), BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    BCryptCreateHash(static_cast<BCRYPT_ALG_HANDLE>(alg), reinterpret_cast<BCRYPT_HASH_HANDLE *>(&hash), nullptr, 0, nullptr, 0, 0);
+    BCryptCreateHash(sha256_provider(), reinterpret_cast<BCRYPT_HASH_HANDLE *>(&hash), nullptr, 0, nullptr, 0, 0);
 }
 Sha256::~Sha256() {
     if (hash) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash));
-    if (alg) BCryptCloseAlgorithmProvider(static_cast<BCRYPT_ALG_HANDLE>(alg), 0);
 }
 void Sha256::update(const void *data, size_t n) {
     const auto *p = static_cast<const unsigned char *>(data);
@@ -272,30 +282,103 @@ std::string sha256_file(const fs::path &p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) throw u3::Stop("[Errno 2] No such file or directory: '" + S(p) + "'");
     Sha256 h;
-    std::vector<char> buf(8 << 20);
+    // one read buffer per thread, made once: a fresh zero-filled buffer per file cost more than hashing the small files
+    // (46 864 speech files, hashed before and after a step)
+    thread_local std::vector<char> buf(1 << 20);
     while (f) {
         f.read(buf.data(), std::streamsize(buf.size()));
         if (f.gcount() > 0) h.update(buf.data(), size_t(f.gcount()));
     }
     return h.hex();
 }
-std::string sha256_cached(const fs::path &p) {
-    static std::mutex m;
-    static std::map<std::string, std::pair<std::pair<uint64_t, int64_t>, std::string>> cache;
+namespace {
+struct HashCache {
+    std::mutex m;
+    std::unordered_map<std::string, std::pair<std::pair<uint64_t, int64_t>, std::string>> map;
+};
+HashCache &hash_cache() {
+    static HashCache c;
+    return c;
+}
+// the cache key of a path: one separator, so a path the recipe built ("work/overlay-r3/...") and the same file found by
+// a pattern ("work\overlay-r3\...") share their entry
+std::string hash_key(const fs::path &p) {
+    std::string k = S(p);
+    std::replace(k.begin(), k.end(), '\\', '/');
+    return k;
+}
+bool file_stamp(const fs::path &p, uint64_t &size, int64_t &mt) {
     std::error_code ec;
-    const uint64_t size = fs::file_size(p, ec);
-    if (ec) return sha256_file(p);   // reports the missing file
-    const int64_t mt = int64_t(fs::last_write_time(p, ec).time_since_epoch().count());
-    const std::string key = S(p);
+    size = fs::file_size(p, ec);
+    if (ec) return false;
+    mt = int64_t(fs::last_write_time(p, ec).time_since_epoch().count());
+    return !ec;
+}
+}  // namespace
+std::string sha256_cached(const fs::path &p) {
+    uint64_t size = 0;
+    int64_t mt = 0;
+    if (!file_stamp(p, size, mt)) return sha256_file(p);   // reports the missing file
+    const std::string key = hash_key(p);
+    HashCache &c = hash_cache();
     {
-        std::lock_guard<std::mutex> l(m);
-        auto it = cache.find(key);
-        if (it != cache.end() && it->second.first == std::make_pair(size, mt)) return it->second.second;
+        std::lock_guard<std::mutex> l(c.m);
+        auto it = c.map.find(key);
+        if (it != c.map.end() && it->second.first == std::make_pair(size, mt)) return it->second.second;
     }
     const std::string h = sha256_file(p);
-    std::lock_guard<std::mutex> l(m);
-    cache[key] = {{size, mt}, h};
+    std::lock_guard<std::mutex> l(c.m);
+    c.map[key] = {{size, mt}, h};
     return h;
+}
+void sha256_remember(const fs::path &p, const std::string &hex) {
+    uint64_t size = 0;
+    int64_t mt = 0;
+    if (!file_stamp(p, size, mt)) return;
+    HashCache &c = hash_cache();
+    std::lock_guard<std::mutex> l(c.m);
+    c.map[hash_key(p)] = {{size, mt}, hex};
+}
+// The hash cache between runs (_recipe/hashes.tsv): one line per file below `root`, "size<TAB>time<TAB>sha256<TAB>path"
+// with the path relative to root ('/' between names), so it holds when the whole folder is moved (an update's swap). An
+// entry counts only while the file's size and modification time are the same; lines that do not parse are skipped.
+void hash_cache_load(const fs::path &file, const fs::path &root) {
+    std::ifstream f(file, std::ios::binary);
+    if (!f) return;
+    const std::string base = hash_key(root);
+    HashCache &c = hash_cache();
+    std::lock_guard<std::mutex> l(c.m);
+    for (std::string line; std::getline(f, line);) {
+        const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1),
+                     d = b == std::string::npos ? b : line.find('\t', b + 1);
+        if (d == std::string::npos || d - b - 1 != 64) continue;
+        try {
+            const uint64_t size = std::stoull(line.substr(0, a));
+            const int64_t mt = std::stoll(line.substr(a + 1, b - a - 1));
+            c.map[base + "/" + line.substr(d + 1)] = {{size, mt}, line.substr(b + 1, 64)};
+        } catch (const std::exception &) {
+        }
+    }
+}
+void hash_cache_save(const fs::path &file, const fs::path &root) {
+    const std::string base = hash_key(root) + "/";
+    std::string text;
+    {
+        HashCache &c = hash_cache();
+        std::lock_guard<std::mutex> l(c.m);
+        std::vector<std::pair<std::string, std::string>> v;   // (relative path, line)
+        for (const auto &[k, e] : c.map)
+            if (k.compare(0, base.size(), base) == 0)
+                v.push_back({k.substr(base.size()), std::to_string(e.first.first) + "\t" + std::to_string(e.first.second) + "\t" + e.second + "\t"});
+        std::sort(v.begin(), v.end());
+        for (const auto &[rel, head] : v) text += head + rel + "\n";
+    }
+    try {
+        write_text(P(S(file) + ".tmp"), text);
+        std::error_code ec;
+        fs::rename(P(S(file) + ".tmp"), file, ec);
+    } catch (const std::exception &) {   // only a speed-up: a run without it is the same
+    }
 }
 uint64_t tree_size(const fs::path &folder) {
     uint64_t n = 0;
@@ -307,16 +390,44 @@ uint64_t tree_size(const fs::path &folder) {
     }
     return n;
 }
-void rmtree(const fs::path &p) {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
 #ifdef _WIN32
-        SetFileAttributesW(it->path().c_str(), FILE_ATTRIBUTE_NORMAL);
+// One entry and everything below it. A link (a junction, a symbolic link) is removed itself and never entered:
+// std::filesystem takes a junction for an ordinary folder, so remove_all would delete the files it points to (the
+// hard-link view of earlier versions links the player's own PS4 game folders that way).
+static void rmtree_entry(const std::wstring &p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) return;
+    const bool link = a & FILE_ATTRIBUTE_REPARSE_POINT, dir = a & FILE_ATTRIBUTE_DIRECTORY;
+    if (dir && !link) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((p + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                const std::wstring n = fd.cFileName;
+                if (n != L"." && n != L"..") rmtree_entry(p + L"\\" + n);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    if (!link && (a & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(p.c_str(), a & ~DWORD(FILE_ATTRIBUTE_READONLY));
+    if (dir) RemoveDirectoryW(p.c_str());
+    else DeleteFileW(p.c_str());
+}
+#endif
+void rmtree(const fs::path &p) {
+#ifdef _WIN32
+    std::wstring w = p.native();
+    for (wchar_t &c : w)
+        if (c == L'/') c = L'\\';
+    while (w.size() > 3 && w.back() == L'\\') w.pop_back();
+    rmtree_entry(w);
 #else
+    std::error_code ec;   // here remove_all removes a symbolic link itself, never what it points to
+    for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
         if (std::error_code e2; it->is_directory(e2) && !it->is_symlink(e2))   // a read-only folder keeps its files here
             fs::permissions(it->path(), fs::perms::owner_all, fs::perm_options::add, e2);
-#endif
     fs::remove_all(p, ec);
+#endif
 }
 bool rmtree_retry(const fs::path &p, double seconds) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(int64_t(seconds * 1000));

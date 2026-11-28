@@ -466,11 +466,26 @@ std::string slow_drive(const std::wstring &path) {
         q.QueryType = PropertyStandardQuery;
         char buf[1024];
         DWORD got = 0;
-        if (DeviceIoControl(dev, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, buf, sizeof buf, &got, nullptr) && got >= 32) {
-            uint32_t bus;
-            std::memcpy(&bus, buf + 28, 4);
-            const char *name = bus == 7 ? "USB" : bus == 12 ? "SD card" : bus == 13 ? "MMC card" : bus == 4 ? "FireWire" : nullptr;
+        if (DeviceIoControl(dev, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, buf, sizeof buf, &got, nullptr) &&
+            got >= sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+            const auto *sd = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR *>(buf);
+            const char *name = sd->BusType == BusTypeUsb    ? "USB"
+                               : sd->BusType == BusTypeSd   ? "SD card"
+                               : sd->BusType == BusTypeMmc  ? "MMC card"
+                               : sd->BusType == BusType1394 ? "FireWire"
+                                                            : nullptr;
             if (name) reasons.insert(reasons.begin(), name);
+            if (sd->RemovableMedia) reasons.push_back("removable");
+            auto text = [&](ULONG off) {
+                if (!off || off >= got) return std::string();
+                const char *p = buf + off;
+                size_t n = 0;
+                while (off + n < got && p[n]) n++;
+                return std::string(p, n);
+            };
+            const std::string vendor = text(sd->VendorIdOffset), product = text(sd->ProductIdOffset);
+            if (vendor.find("JMicron") != std::string::npos)
+                reasons.insert(reasons.begin(), product.empty() ? std::string("JMicron USB adapter") : "JMicron " + product);
         }
         CloseHandle(dev);
     }

@@ -18,11 +18,14 @@
 // them for its own match / party session, so a PS3 player who joins a PC player's room gets a cookie it can use).
 // 9 the net game table (per PC net game index: the PS3 index of the same net game in the player's net18.bin, u16, 0xffff
 // none; u16 0; the u32 bits of that PS3 record's LoadLevel float, which the helper sends a PS3 player).
+// 10 the level packs (per PS3 net game of net18.bin: the map packs its level needs, one byte), 13 the map packs this
+// import has (u32 pack bits); the helper's content gates (cg) read both.
 // (Kind 2, the content pack numbers, is not written here.) A source that is missing or not as expected leaves its record
 // out; the step then exits 3, so the recipe runs it again at the next import.
 #include "importer.hpp"
 #include "psarc.hpp"   // dctools: Psarc, Ps3Index, Dc
 #include "recipe.hpp"  // tools_dir, local_net18_remap_text
+#include "u3fix.hpp"   // dctools: first_with (the DLC folders)
 
 #include <array>
 #include <cstdio>
@@ -32,8 +35,11 @@ namespace u3imp {
 
 namespace {
 
-enum : uint32_t { TAUNTS = 1, CIVILIANS = 3, MULTI_ALL = 4, E01_PS3 = 5, STAT_CLASSES = 6, FLAG2 = 7, ROOM_COOKIES = 8, NET_GAMES = 9 };
-const size_t RECORDS = 8;   // the kinds this step writes
+enum : uint32_t {
+    TAUNTS = 1, CIVILIANS = 3, MULTI_ALL = 4, E01_PS3 = 5, STAT_CLASSES = 6, FLAG2 = 7, ROOM_COOKIES = 8, NET_GAMES = 9, LEVEL_PACKS = 10,
+    MAP_PACKS = 13
+};
+const size_t RECORDS = 10;   // the kinds this step writes
 
 struct Record {
     explicit Record(uint32_t k) : kind(k) {}
@@ -300,6 +306,63 @@ std::optional<Record> net_game_table(const std::string &data2, const std::string
     return r;
 }
 
+// ------------------------------------------------------------------------------------------------ level packs (10)
+// Per PS3 net game of the player's net18.bin (its order): the map packs its level needs. The net game record's level id
+// (+4) is looked up in the level table (symbol 0x0dec97a4: {u32 count, pointer to the records}; records of 0x58 bytes,
+// +0 level id, +0x14 the pack mask); one byte per net game, the mask's low 8 bits (0 = a base map, or no level found).
+// The helper's content gates read it (u3x_fixes.cpp cg: R1, the vote, the Custom Game start, the late join).
+const uint32_t LEVELS_SID = 0x0dec97a4u, LEVEL_RECORD = 0x58, LEVEL_MASK = 0x14, NG_LEVEL = 4;
+
+std::optional<Record> level_packs(const std::string &data2) {
+    if (data2.empty()) return std::nullopt;
+    const fs::path n18 = P(data2) / "net18.bin";
+    std::error_code ec;
+    if (!fs::is_regular_file(n18, ec)) return std::nullopt;
+    const Bytes b = read_bytes(n18);
+    if (!net18_accepted(P(data2), hex_of(b))) return std::nullopt;
+    const u3::Dc dc(b, "net18.bin");
+    if (!dc.be) return std::nullopt;
+    const auto ng = dc.bysid.find(NET_GAMES_SID), lv = dc.bysid.find(LEVELS_SID);
+    if (ng == dc.bysid.end() || lv == dc.bysid.end()) return std::nullopt;
+    const uint64_t nt = ng->second.second, nn = dc.u32(nt), nrec = dc.ptr(nt + uint64_t(dc.ps));
+    const uint64_t lt = lv->second.second, ln = dc.u32(lt), lrec = dc.ptr(lt + uint64_t(dc.ps));
+    if (!nn || nn > 512 || nrec + nn * PS3_RECORD > dc.d.size() || ln > 4096 || lrec + ln * LEVEL_RECORD > dc.d.size()) return std::nullopt;
+    Record r{LEVEL_PACKS};
+    size_t with = 0;
+    for (uint64_t i = 0; i < nn; i++) {
+        const uint32_t level = dc.u32(nrec + i * PS3_RECORD + NG_LEVEL);
+        uint8_t mask = 0;
+        for (uint64_t k = 0; k < ln; k++)
+            if (dc.u32(lrec + k * LEVEL_RECORD) == level) {
+                mask = uint8_t(dc.u32(lrec + k * LEVEL_RECORD + LEVEL_MASK));
+                break;
+            }
+        r.data.push_back(mask);
+        with += mask != 0;
+    }
+    r.count = uint32_t(nn);
+    log(fmt("ps3-values: level packs: %llu PS3 net games, %zu of them on map pack levels", (unsigned long long)nn, with));
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------ map packs (13)
+// The map packs this import has, as the helper's pack bits (bit n-1 = map pack n; bit 4 = the content only the Game of
+// the Year disc's goty-dlc.psarc has; bits 5..7 are not archives and stay set): from the recipe's PS3_DLCMAPS (the DLC
+// folders, '|' between them) and PS3_DISC (a goty-dlc.psarc there has all of them). One u32.
+std::optional<Record> map_packs() {
+    const char *dl = std::getenv("RECIPE_PS3_DLCMAPS"), *disc = std::getenv("RECIPE_PS3_DISC");
+    std::error_code ec;
+    uint32_t mask = 0xe0;
+    if (disc && *disc && fs::is_regular_file(P(std::string(disc)) / "goty-dlc.psarc", ec)) mask = 0xff;
+    else
+        for (int n = 1; n <= 4; n++)
+            if (dl && !u3::first_with(dl, "dlc-map" + std::to_string(n) + ".psarc").empty()) mask |= 1u << (n - 1);
+    Record r{MAP_PACKS};
+    add_u32(r, mask);
+    log(fmt("ps3-values: map packs: mask 0x%02x", mask));
+    return r;
+}
+
 Bytes file_bytes(std::vector<Record> recs) {
     std::sort(recs.begin(), recs.end(), [](const Record &a, const Record &b) { return a.kind < b.kind; });
     Bytes o = {'U', '3', 'P', 'V'};
@@ -357,6 +420,8 @@ int ps3values_main(const std::vector<std::string> &v) {
     }
     guarded("multi-all actors (dlc-patch18 pak23.txt)", [&] { return multi_all(update); });
     guarded("net game table (DATA2 net18.bin and the import's net.bin)", [&] { return net_game_table(data2, pc_net); });
+    guarded("level packs (DATA2 net18.bin)", [&] { return level_packs(data2); });
+    guarded("map packs (the recipe's DLC folders)", [] { return map_packs(); });
     const size_t before = recs.size();
     try {
         from_eboot(elf, recs);

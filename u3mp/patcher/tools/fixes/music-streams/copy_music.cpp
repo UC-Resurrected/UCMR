@@ -15,13 +15,13 @@ namespace u3 {
 
 int music_streams(const std::vector<std::string> &argv) {
     const Args a(argv, {"--apply"}, {"--project", "--ps4", "--ps3-disc"});
-    const fs::path ps4 = upath(a.need("--ps4")) / "u3data" / "build" / "main" / "sound1" / "streams" / "music";
+    const fs::path ps4 = upath(a.need("--ps4") + "/u3data/build/main/sound1/streams/music");
     const fs::path arc = upath(a.need("--ps3-disc")) / "build" / "main" / "sound1" / "streams" / "music.psarc";
     const fs::path out = upath(a.need("--project")) / "work" / "overlay-r3" / "u3data" / "build" / "main" / "sound1" / "streams" / "music";
     if (!fs::is_directory(ps4)) throw Stop("PS4 music folder not found: " + utf8(ps4));
     if (!fs::is_regular_file(arc)) throw Stop("PS3 music.psarc not found: " + utf8(arc));
     std::set<std::string> have;
-    for (const auto &e : fs::directory_iterator(ps4)) have.insert(utf8(e.path().filename()));
+    for (const auto &e : u3::ps4_dir(utf8(ps4))) have.insert(utf8(e.path().filename()));
     Psarc p(arc);
     int copied = 0, present = 0, retail = 0;
     uint64_t bytes = 0;

@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <regex>
@@ -110,7 +111,7 @@ fs::path res_dir() {
     checked = true;
     std::vector<std::string> sig;
     std::error_code ec;
-    for (const auto &e : fs::directory_iterator(paks, ec)) {
+    for (const auto &e : u3::ps4_dir(utf8(paks))) {
 #ifdef _WIN32
         struct _stat64 st;
         if (_wstat64(e.path().wstring().c_str(), &st)) continue;
@@ -159,8 +160,12 @@ void walk_sig(const fs::path &top, const fs::path &dp, std::vector<std::string> 
     for (const fs::path &d : dirs) walk_sig(top, d, sig);
 }
 void drop_stale_ps3_caches() {
-    std::vector<std::string> sig;
-    for (const std::string &f : {g_update, g_dlcmaps, g_disc, g_data2}) {
+    std::vector<std::string> sig, dirs = {g_update};
+    for (const std::string &d : dir_list(g_dlcmaps)) dirs.push_back(d);   // one or more DLC folders ('|' between them)
+    if (dir_list(g_dlcmaps).empty()) dirs.push_back(g_dlcmaps);
+    dirs.push_back(g_disc);
+    dirs.push_back(g_data2);
+    for (const std::string &f : dirs) {
         sig.push_back(f);
         if (!f.empty() && fs::is_directory(upath(f))) walk_sig(upath(f), upath(f), sig);
     }
@@ -183,7 +188,10 @@ std::map<std::pair<std::string, std::string>, std::vector<std::string>> ps3_inde
     const fs::path f = g_tmp / "ps3idx.tsv";
     if (!fs::exists(f)) {
         std::vector<std::pair<std::string, std::string>> arcs = {{"dlc-patch18", g_update + "/dlc-patch18.psarc"}, {"dlc-patch13", g_update + "/dlc-patch13.psarc"}};
-        for (int k = 1; k <= 4; k++) arcs.push_back({"dlc-map" + std::to_string(k), g_dlcmaps + "/dlc-map" + std::to_string(k) + ".psarc"});
+        for (int k = 1; k <= 4; k++) {   // each pack from the first DLC folder that has it (missing packs: not listed)
+            const std::string a = first_with(g_dlcmaps, "dlc-map" + std::to_string(k) + ".psarc");
+            if (!a.empty()) arcs.push_back({"dlc-map" + std::to_string(k), a});
+        }
         arcs.push_back({"goty-patch", g_disc + "/goty-patch.psarc"});
         arcs.push_back({"goty-dlc", g_disc + "/goty-dlc.psarc"});
         arcs.push_back({"pak23", g_disc + "/build/main/pak23.psarc"});
@@ -511,6 +519,35 @@ int levels(const std::vector<std::string> &argv) {
     set_read_cache_mb(cache_mb);
     if (cache_mb) std::printf("read cache: %zu MB\n", cache_mb);
     const auto idx = ps3_index();
+    // the levels of a DLC map pack the import did not find (dlc-map<n>; goty-dlc without a Game of the Year disc) are
+    // left out: the import goes on without them and the game keeps their maps off
+    size_t no_dlc = 0;
+    std::string left_out;   // scratch/dlc-left-out-<family>.txt: the level names (world-levels reads them)
+    todo.erase(std::remove_if(todo.begin(), todo.end(),
+                              [&](const Row &r) {
+                                  auto ai = r.find("archive"), si = r.find("src");
+                                  if (ai == r.end() || si == r.end()) return false;
+                                  const std::string &arch = ai->second, &src = si->second;
+                                  const bool map = arch.rfind("dlc-map", 0) == 0;
+                                  if (!map && arch != "goty-dlc") return false;
+                                  if (idx.count({src, arch}) || (map && idx.count({src, "goty-dlc"}))) return false;
+                                  std::printf("skipped %s/%s: its DLC map pack (%s) was not found\n", r.at("overlay").c_str(), r.at("name").c_str(),
+                                              arch.c_str());
+                                  left_out += r.at("name") + "\n";
+                                  no_dlc++;
+                                  return true;
+                              }),
+               todo.end());
+    {
+        const fs::path lf = upath(g_project) / "scratch" / ("dlc-left-out-" + family + ".txt");
+        std::error_code ec;
+        if (no_dlc) {
+            fs::create_directories(lf.parent_path(), ec);
+            write_text(lf, left_out);
+            std::printf("%s: %zu level(s) of DLC map packs not found left out\n", family.c_str(), no_dlc);
+        } else
+            fs::remove(lf, ec);
+    }
     for (const Row &r : todo) {   // PS3 sources first (one reader at a time); with the RAM cache the prefetch pass extracts them
         const std::string &m = r.at("method");
         if ((m == "stage" || m == "ingame" || m == "vischeat" || m == "hud" || m == "sky") && (!cache_mb || m == "sky"))
@@ -572,32 +609,74 @@ int levels(const std::vector<std::string> &argv) {
         prefetch_read(g_tmp / "res" / "ps4tex.tsv");
         prefetch_rows(0);
     }
+    // where the time goes (one line at the end): the workers' busy time, the time until the last row was built, the
+    // waits for the next batch's reads, the writes
+    double busy = 0, batch_secs = 0, pf_wait = 0, write_secs = 0;
+    auto secs_since = [](std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
+    };
+    // One pool of workers for all batches: a worker takes the next row as soon as its batch's reads are in the cache,
+    // so the last long rows of a batch no longer hold the others up. Batch b is written (row order, as before) once
+    // all its rows are built; then its cache generation goes and batch b + 2 is read. Batches b and b + 1 are in memory
+    // at most, as before.
+    std::vector<Bytes> out(todo.size());
+    std::vector<std::string> hashes(todo.size());
+    std::vector<size_t> left(nbatches);   // rows of a batch not built yet
+    std::vector<uint64_t> gen(nbatches);  // a batch's read cache generation
+    for (size_t b = 0; b < nbatches; b++) left[b] = std::min(todo.size(), (b + 1) * batch) - b * batch;
+    std::mutex m;
+    std::condition_variable cv;
+    size_t ready = cache_mb ? std::min(todo.size(), batch) : todo.size();   // rows [0, ready) may be built
+    size_t next = 0;
+    std::thread pf;   // the reads of the batch after the one being built
+    const auto read_batch = [&](size_t b) {
+        if (!cache_mb || b >= nbatches) return;
+        pf = std::thread([&, b] {
+            const uint64_t g = prefetch_rows(b);
+            std::lock_guard<std::mutex> l(m);
+            gen[b] = g;
+            ready = std::min(todo.size(), (b + 1) * batch);
+            cv.notify_all();
+        });
+    };
+    read_batch(1);
+    const auto tb = std::chrono::steady_clock::now();
+    std::vector<std::thread> pool;
+    for (int w = 0; w < std::max(1, jobs); w++)
+        pool.emplace_back([&] {
+            std::unique_lock<std::mutex> l(m);
+            for (;;) {
+                cv.wait(l, [&] { return next < ready || next >= todo.size(); });
+                if (next >= todo.size()) break;
+                const size_t i = next++;
+                l.unlock();
+                const auto tr = std::chrono::steady_clock::now();
+                try {
+                    out[i] = build(todo[i], idx);
+                    hashes[i] = sha256_hex(out[i]);
+                } catch (const std::exception &e) {
+                    error[i] = e.what();
+                }
+                const double t = secs_since(tr);
+                l.lock();
+                busy += t;
+                if (--left[i / batch] == 0) cv.notify_all();
+            }
+        });
     for (size_t b = 0; b < nbatches; b++) {
         const size_t start = b * batch, end = std::min(todo.size(), start + batch);
-        uint64_t next_gen = 0;
-        std::thread pf;
-        if (cache_mb && b + 1 < nbatches)   // read the next batch while this one converts
-            pf = std::thread([&] { next_gen = prefetch_rows(b + 1); });
-        std::vector<Bytes> out(end - start);
-        std::vector<std::string> hashes(end - start);
-        std::atomic<size_t> next{start};
-        std::vector<std::thread> pool;
-        for (int w = 0; w < std::max(1, jobs); w++)
-            pool.emplace_back([&] {
-                for (size_t i; (i = next++) < end;) {
-                    try {
-                        out[i - start] = build(todo[i], idx);
-                        hashes[i - start] = sha256_hex(out[i - start]);
-                    } catch (const std::exception &e) {
-                        error[i] = e.what();
-                    }
-                }
-            });
-        for (auto &t : pool) t.join();
+        {
+            std::unique_lock<std::mutex> l(m);
+            cv.wait(l, [&] { return left[b] == 0; });
+        }
+        if (b + 1 == nbatches) batch_secs = secs_since(tb);
+        const auto tw = std::chrono::steady_clock::now();
         if (pf.joinable()) pf.join();   // no reads in flight while this batch is written
+        pf_wait += secs_since(tw);
+        const auto tx = std::chrono::steady_clock::now();
         for (size_t i = start; i < end; i++) {   // writes only, in row order
             const Row &r = todo[i];
-            const Bytes &data = out[i - start];
+            const Bytes &data = out[i];
             json::Value e = json::Value::object();
             e.set("overlay", json::Value::text(r.at("overlay")));
             e.set("name", json::Value::text(r.at("name")));
@@ -609,7 +688,7 @@ int levels(const std::vector<std::string> &argv) {
                 report.items.push_back(e);
                 continue;
             }
-            const std::string &h = hashes[i - start];
+            const std::string &h = hashes[i];
             const bool same = plan_sha(r, h);
             if (!same && r.at("status") == "identical") {
                 std::printf("MISMATCH %s/%s: built %s, plan %s (not installed)\n", r.at("overlay").c_str(), r.at("name").c_str(), h.substr(0, 12).c_str(), r.at("sha256").substr(0, 12).c_str());
@@ -635,26 +714,39 @@ int levels(const std::vector<std::string> &argv) {
                 fs::create_directories(dst.parent_path());
                 write_file_replace(dst, data);
                 std::printf("installed %s/%s: %s\n", r.at("overlay").c_str(), r.at("name").c_str(), tag.c_str());
-                if (auto ac = g_actors.find({r.at("overlay"), r.at("name")}); ac != g_actors.end()) {   // its wall-emblem actors
+                const std::vector<std::pair<std::string, Bytes>> *acts = nullptr;   // its wall-emblem actors
+                {
+                    std::lock_guard<std::mutex> l(g_actor_mu);   // the workers add the next batch's
+                    if (auto ac = g_actors.find({r.at("overlay"), r.at("name")}); ac != g_actors.end()) acts = &ac->second;
+                }
+                if (acts) {
                     const fs::path ad = work / "overlay-r3" / "u3data" / "build" / "main" / "actor33" / "ps4";
                     fs::create_directories(ad);
                     int n = 0;
-                    for (const auto &[art, pak] : ac->second) {
+                    for (const auto &[art, pak] : *acts) {
                         const fs::path f = ad / upath(art + ".pak");
                         if (!fs::exists(f) || read_file(f) != pak) write_file_replace(f, pak), n++;
                     }
-                    std::printf("  %zu wall-emblem actors (%d written)\n", ac->second.size(), n);
+                    std::printf("  %zu wall-emblem actors (%d written)\n", acts->size(), n);
                 }
             } else {
                 std::printf("ok %s/%s: %s (dry run)\n", r.at("overlay").c_str(), r.at("name").c_str(), tag.c_str());
             }
         }
-        std::vector<Bytes>().swap(out);
+        for (size_t i = start; i < end; i++) Bytes().swap(out[i]);
         if (cache_mb) {
-            if (b + 1 < nbatches) read_cache_discard_before(next_gen);
-            else clear_read_cache();
+            if (b + 1 < nbatches) {
+                read_cache_discard_before(gen[b + 1]);
+                read_batch(b + 2);
+            } else
+                clear_read_cache();
         }
+        write_secs += secs_since(tx);
     }
+    for (auto &t : pool) t.join();
+    if (nbatches)
+        std::printf("%s: %zu batches: workers busy %.0f%% of %.0f s, reads waited for %.0f s, writes %.0f s\n", family.c_str(), nbatches,
+                    batch_secs > 0 ? 100.0 * busy / (batch_secs * std::max(1, jobs)) : 0.0, batch_secs, pf_wait, write_secs);
     write_text(g_tmp / ("report-" + family + ".json"), json_dump_indent1(report));
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("%s: %zu built, %d failed/mismatched, %.0f s\n", family.c_str(), todo.size() - size_t(bad), bad, secs);

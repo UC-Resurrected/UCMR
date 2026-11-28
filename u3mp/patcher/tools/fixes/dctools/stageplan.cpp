@@ -245,7 +245,7 @@ std::string survey_line(const Pak &q, const std::string &fn) {
 
 void make_res(const fs::path &out, const fs::path &pak_dir) {
     std::vector<std::string> names;
-    for (const auto &e : fs::directory_iterator(pak_dir)) {
+    for (const auto &e : u3::ps4_dir(utf8(pak_dir))) {
         const std::string fn = utf8(e.path().filename());
         if (ends_with(fn, ".pak") && !ends_with(fn, g_u2 ? "-ingame10.pak" : "-ingame12.pak")) names.push_back(fn);   // level data paks: no materials
     }
@@ -1772,9 +1772,8 @@ const Dicts &texture_dicts(const fs::path &dir) {
     const std::string k = utf8(dir);
     if (auto it = all.find(k); it != all.end()) return it->second;
     Dicts &out = all[k];
-    std::error_code ec;
     std::vector<fs::path> files;
-    for (const auto &e : fs::directory_iterator(dir, ec))
+    for (const auto &e : u3::ps4_dir(utf8(dir)))
         if (e.path().extension() == ".pak") files.push_back(e.path());
     std::sort(files.begin(), files.end());
     for (const fs::path &f : files) {

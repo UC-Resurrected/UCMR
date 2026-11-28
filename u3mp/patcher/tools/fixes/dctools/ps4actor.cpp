@@ -234,7 +234,7 @@ std::shared_ptr<std::map<std::string, std::string>> retail_names(const fs::path 
     if (v) return v;
     v = std::make_shared<std::map<std::string, std::string>>();
     std::vector<std::string> names;
-    for (const auto &e : fs::directory_iterator(dir)) {
+    for (const auto &e : u3::ps4_dir(utf8(dir))) {
         const std::string fn = utf8(e.path().filename());
         if (ends_with(fn, ".pak") && (fn.rfind("mp-", 0) == 0 || fn.rfind("hero", 0) == 0)) names.push_back(fn);
     }
@@ -2178,7 +2178,7 @@ bool texdict_streams(const fs::path &csv, const std::string &full) {
         std::lock_guard<std::mutex> g(lock);
         auto [it, fresh] = cache.try_emplace(utf8(csv));
         paths = &it->second;
-        if (fresh && fs::exists(csv)) {
+        if (fresh && u3::ps4_exists(utf8(csv))) {
             const Bytes d = read_file(csv);
             size_t a = 0;
             while (a < d.size()) {   // dictionary, path, source, ...
@@ -2216,7 +2216,7 @@ std::shared_ptr<const std::vector<RetailActor>> retail_actors(const fs::path &di
     auto &v = cache[utf8(dir)];
     if (v) return v;
     std::vector<std::string> names;
-    for (const auto &e : fs::directory_iterator(dir))
+    for (const auto &e : u3::ps4_dir(utf8(dir)))
         if (ends_with(utf8(e.path().filename()), ".pak")) names.push_back(utf8(e.path().filename()));
     std::sort(names.begin(), names.end());
     auto out = std::make_shared<std::vector<RetailActor>>();
@@ -2235,7 +2235,7 @@ std::shared_ptr<const std::vector<RetailActor>> retail_actors(const fs::path &di
 
 fs::path transparency_template(const fs::path &ps3, const fs::path &tmpl, const fs::path &retail_dir, bool own_skel,
                                const std::optional<fs::path> &skel_tmpl) {
-    if (retail_dir.empty() || !fs::is_directory(retail_dir)) return tmpl;
+    if (retail_dir.empty() || !u3::ps4_exists(utf8(retail_dir))) return tmpl;
     const Pak src(ps3), T(tmpl);
     const std::vector<TMat> tm = tmpl_materials(T);
     std::set<std::string> keys;

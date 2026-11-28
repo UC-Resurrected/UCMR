@@ -3310,7 +3310,10 @@ uint32_t mm_pack_mask() {
     uint32_t mask = dlc_packs() & 0xffu;
     for (const Member &m : members)
         if (m.used && m.net_id != my_id) mask &= m.packs;   // 0xff: the member sent none
-    return mask;
+    // PS3 0x4d6a08: the packs go into the key only when the party has a map pack in common. dlc_packs() always has
+    // bit 0 (the base maps), so without a common pack (bits 1, 2) the party searches the plain key as with Default;
+    // this also covers a career saved as DLC on a PC whose map packs are gone now (the row is hidden there).
+    return (mask & 0x6u) ? mask : 0;
 }
 
 bool match_migration_ok() {

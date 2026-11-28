@@ -104,7 +104,7 @@ int world_levels(const std::vector<std::string> &argv) {
             if (fs::is_regular_file(p, ec)) return p;
         }
         if (a.val.count("--ps4")) {
-            const fs::path p = upath(a.get("--ps4", "")) / "u3data" / "build" / "main" / "pak23" / "ps4" / upath(file);
+            const fs::path p = upath(a.get("--ps4", "") + "/u3data/build/main/pak23/ps4/" + file);
             if (fs::is_regular_file(p, ec)) return p;
         }
         return {};
@@ -117,11 +117,31 @@ int world_levels(const std::vector<std::string> &argv) {
     for (const auto &ln : lines)
         if (const std::string n = level_name(ln); !n.empty()) registered.insert(n);
 
+    // the levels the level steps left out because their DLC map pack was not found (scratch/dlc-left-out-*.txt)
+    std::set<std::string> no_dlc;
+    for (const auto &e : fs::directory_iterator(upath(project + "/scratch"), ec)) {
+        const std::string n = utf8(e.path().filename());
+        if (n.rfind("dlc-left-out-", 0) != 0) continue;
+        const Bytes t = read_file(e.path());
+        std::string cur;
+        for (uint8_t ch : t) {
+            if (ch == '\n' || ch == '\r') {
+                if (!cur.empty()) no_dlc.insert(cur);
+                cur.clear();
+            } else
+                cur += char(ch);
+        }
+        if (!cur.empty()) no_dlc.insert(cur);
+    }
     const std::vector<std::string> worlds = map_worlds(Dc(net));
     std::vector<std::string> added;
     int missing = 0;
     for (const std::string &w : worlds) {
         const fs::path pak = find_pak(w + "-ingame12.pak");
+        if (pak.empty() && (no_dlc.count(w + "-ingame12") || no_dlc.count(w))) {
+            std::printf("left out %s: its DLC map pack was not found (the map stays off)\n", w.c_str());
+            continue;
+        }
         if (pak.empty()) {
             std::printf("ERROR %s: a net.bin map needs it, but %s-ingame12.pak is in no overlay (plan.tsv row missing)\n", w.c_str(), w.c_str());
             missing++;

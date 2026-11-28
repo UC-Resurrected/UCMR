@@ -49,8 +49,22 @@ std::map<std::string, std::string> ps3_archives() {
                                             {"goty-dlc", a_disc + "/goty-dlc.psarc"}, {"dlc-patch13", a_update + "/dlc-patch13.psarc"},
                                             {"dlc-patch18", a_update + "/dlc-patch18.psarc"}, {"data2-parts", a_data2 + "/build/main/actor-parts-7.psarc"}};
     for (auto it = m.begin(); it != m.end();) it = fs::exists(upath(it->second)) ? std::next(it) : m.erase(it);
+    // without a Game of the Year disc the DLC map packs stand in for goty-dlc.psarc (the recipe's PS3_DLCMAPS, one or
+    // more folders: each pack from the first that has it)
+    if (!m.count("goty-dlc"))
+        if (const char *dl = std::getenv("RECIPE_PS3_DLCMAPS"))
+            for (int n = 1; n <= 4; n++) {
+                const std::string p = first_with(dl, "dlc-map" + std::to_string(n) + ".psarc");
+                if (!p.empty()) m["dlc-map" + std::to_string(n)] = p;
+            }
     return m;
 }
+
+// an actor only a DLC source the import does not have holds (no Game of the Year disc, its map pack not found): left
+// out, not a failure
+struct NotImported : Stop {
+    using Stop::Stop;
+};
 
 struct OpenArchive {
     std::unique_ptr<Psarc> a;
@@ -66,22 +80,37 @@ fs::path extract(const std::string &src, const std::string &name) {
     std::lock_guard<std::mutex> lock(a_extract_lock);
     if (fs::exists(f)) return f;
     if (src == "labsrc") throw Stop("no Lab maps on PC: Lab sources are not extracted");
+    auto open = [&](const std::string &p) -> OpenArchive & {
+        OpenArchive &o = a_open[p];
+        if (!o.a) {
+            o.a = std::make_unique<Psarc>(upath(p));
+            for (size_t i = 0; i < o.a->names.size(); i++) {
+                const std::string &n = o.a->names[i];
+                o.by_name[n.substr(n.find_last_of('/') == std::string::npos ? 0 : n.find_last_of('/') + 1)] = i;
+            }
+        }
+        return o;
+    };
     std::string p;
+    OpenArchive *op = nullptr;
     if (src.rfind("pak23:", 0) == 0) p = a_disc + "/build/main/pak23.psarc";
     else {
         static const auto arcs = ps3_archives();
         auto it = arcs.find(src);
-        if (it == arcs.end()) throw Stop("KeyError: '" + src + "'");
-        p = it->second;
-    }
-    OpenArchive &o = a_open[p];
-    if (!o.a) {
-        o.a = std::make_unique<Psarc>(upath(p));
-        for (size_t i = 0; i < o.a->names.size(); i++) {
-            const std::string &n = o.a->names[i];
-            o.by_name[n.substr(n.find_last_of('/') == std::string::npos ? 0 : n.find_last_of('/') + 1)] = i;
+        if (it == arcs.end() && src == "goty-dlc") {   // no GOTY disc: the same actor from a DLC map pack
+            for (int n = 1; n <= 4 && !op; n++) {
+                auto mp = arcs.find("dlc-map" + std::to_string(n));
+                if (mp == arcs.end()) continue;
+                OpenArchive &o = open(mp->second);
+                if (o.by_name.count(name)) op = &o;
+            }
+            if (!op) throw NotImported("only the Game of the Year disc or a DLC map pack the import did not find has " + name);
+        } else {
+            if (it == arcs.end()) throw Stop("KeyError: '" + src + "'");
+            p = it->second;
         }
     }
+    OpenArchive &o = op ? *op : open(p);
     auto e = o.by_name.find(name);
     if (e == o.by_name.end()) throw Stop("KeyError: '" + name + "'");
     fs::create_directories(d);
@@ -106,7 +135,7 @@ fs::path stm_dir() {   // the PS3 disc's animstream4.psarc, extracted
 }
 
 fs::path template_pak(const std::string &t, bool solo) {
-    const fs::path tp = upath(ret()) / upath(t + ".pak");
+    const fs::path tp = upath(ret() + "/" + t + ".pak");
     if (!solo) {
         prefetch_read(tp);
         return tp;
@@ -448,6 +477,7 @@ int actors(const std::vector<std::string> &argv) {
         todo.push_back({r, dst});
     }
     std::vector<std::string> err(todo.size());
+    std::vector<char> not_imported(todo.size(), 0);   // its DLC source is not part of this import: left out
     std::vector<Bytes> early(todo.size());
     std::vector<std::string> early_hash(todo.size());
     // wpnmods / convert_net (their own processes, shared temp files) and the animstream extract first, here
@@ -461,6 +491,9 @@ int actors(const std::vector<std::string> &argv) {
         try {
             early[i] = build(todo[i].r);
             early_hash[i] = sha256_hex(early[i]);
+        } catch (const NotImported &e) {
+            not_imported[i] = 1;
+            err[i] = std::string(e.what()).substr(0, 200);
         } catch (const std::exception &e) {
             err[i] = std::string(e.what()).substr(0, 200);
         }
@@ -487,6 +520,9 @@ int actors(const std::vector<std::string> &argv) {
                     try {
                         bout[i - start] = build(todo[i].r);
                         bhash[i - start] = sha256_hex(bout[i - start]);
+                    } catch (const NotImported &e) {
+                        not_imported[i] = 1;
+                        err[i] = std::string(e.what()).substr(0, 200);
                     } catch (const std::exception &e) {
                         err[i] = std::string(e.what()).substr(0, 200);
                     }
@@ -498,6 +534,11 @@ int actors(const std::vector<std::string> &argv) {
             const bool pre = r.at("method") == "wpnmods" || r.at("method") == "convert_net";
             const Bytes &b = pre ? early[i] : bout[i - start];
             const std::string &h = pre ? early_hash[i] : bhash[i - start];
+            if (not_imported[i]) {
+                skipped++;
+                std::printf("skip (DLC not found) %s %s: %s\n", r.at("overlay").c_str(), r.at("name").c_str(), err[i].c_str());
+                continue;
+            }
             if (!err[i].empty() || b.empty()) {
                 fail++;
                 std::printf("FAIL %s %s %s\n", r.at("overlay").c_str(), r.at("name").c_str(), err[i].c_str());

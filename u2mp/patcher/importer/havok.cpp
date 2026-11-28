@@ -17,6 +17,7 @@
 #include "hkconvert.hpp"
 
 #include <deque>
+#include <mutex>
 
 namespace u2imp {
 
@@ -884,6 +885,8 @@ void havok_tables(const std::string &ps3_elf, const std::string &ps4_game, const
 }
 
 Bytes havok_convert(const Bytes &pf3) {
+    static std::mutex load_m;   // the tables are loaded once, by the first of the conversion threads that needs them
+    std::unique_lock<std::mutex> lock(load_m);
     if (!g_loaded) {
         if (g_failed) throw TablesMissing(*g_failed);
         if (!g_ctx) throw TablesMissing("no Havok tables configured");
@@ -907,6 +910,7 @@ Bytes havok_convert(const Bytes &pf3) {
         u3::hk::load_tables_u2(text);
         g_loaded = true;
     }
+    lock.unlock();
     return u3::hk::convert_packfile(pf3);
 }
 

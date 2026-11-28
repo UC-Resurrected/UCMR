@@ -28,18 +28,18 @@
 #include "mpimage.hpp"
 #include "ps3keep.hpp"
 #include "recipe.hpp"
+#include "u3fix.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winioctl.h>
 #else
-#include "port.h"   // launcher/native/port.h: links, replace, program names
+#include "port.h"   // launcher/native/port.h: replace, program names
 #include <csignal>
-#include <sys/stat.h>
 #endif
 
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <regex>
 #include <thread>
 
@@ -153,10 +153,7 @@ std::vector<std::string> data2_problems(const std::vector<std::string> &folders)
     std::vector<fs::path> f;
     for (const auto &x : folders) f.push_back(P(x));
     inp.add_ps3_u3(f);
-    std::vector<std::string> out;
-    for (const auto &p : full_import_problems(inp))
-        if (p.find("DLC map packs") == std::string::npos) out.push_back(p);
-    return out;
+    return full_import_problems(inp);
 }
 
 // the USRDIR of a usable game-data folder among these folders (the one the recipe would read), else empty
@@ -166,9 +163,7 @@ fs::path usable_data2(const std::vector<std::string> &folders) {
     for (const auto &x : folders) f.push_back(P(x));
     inp.add_ps3_u3(f);
     const auto it = inp.ps3.find("data2");
-    if (it == inp.ps3.end()) return {};
-    for (const auto &p : full_import_problems(inp))
-        if (p.find("DLC map packs") == std::string::npos) return {};
+    if (it == inp.ps3.end() || !full_import_problems(inp).empty()) return {};
     return it->second;
 }
 
@@ -475,133 +470,45 @@ void discard_next(const fs::path &data) {
     else log("update not applied: " + S(nxt.filename()) + " could not be deleted yet (files in use); it is reused or removed later");
 }
 
-// ------------------------------------------------------------------------------------------------ the PS4 view
-// a junction at `link` to the folder `target` (the reparse data a mount point needs); Linux: a symlink
-#ifndef _WIN32
-bool make_junction(const fs::path &target, const fs::path &link) { return port::dir_link(fs::absolute(target), link); }
-#else
-bool make_junction(const fs::path &target, const fs::path &link) {
-    std::wstring t = fs::absolute(target).wstring();
-    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
-    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        RemoveDirectoryW(link.c_str());
-        return false;
+// ------------------------------------------------------------------------------------------------ the PS4 update list
+// The PS4 game as the recipe reads it. With update 1.02 in a folder of its own (--ps4-update) the recipe must read the
+// updated files: every path a step uses under the game folder resolves with the update laid over it (u3::upath and
+// u3::ps4_dir, dctools/fixlib.cpp), from the list of the update's files and folders made here (<data>/ps4-manifest.tsv,
+// names only, made again at each run). Nothing is linked or copied: the folders can be on any drive or file system,
+// and only the update (a few thousand names) is listed. Without an update folder there is no list: the steps read the
+// game folder as it is.
+fs::path ps4_manifest(const Args &a, const fs::path &data) {
+    const fs::path manifest = data / "ps4-manifest.tsv";
+    std::error_code ec;
+    if (present(data / "ps4-view")) {   // the hard-link view of earlier versions (rmtree removes its junctions, never what they link)
+        rmtree(data / "ps4-view");
+        log("PS4 game: the hard-link view of an earlier version was removed");
     }
-    const std::wstring sub = L"\\??\\" + t;
-    const USHORT sub_b = USHORT(sub.size() * 2), print_b = USHORT(t.size() * 2);
-    std::vector<uint8_t> buf(8 + 8 + sub_b + 2 + print_b + 2, 0);
-    auto w16 = [&](size_t o, uint16_t v) { std::memcpy(&buf[o], &v, 2); };
-    const uint32_t tag = IO_REPARSE_TAG_MOUNT_POINT;
-    std::memcpy(&buf[0], &tag, 4);
-    w16(4, uint16_t(buf.size() - 8));
-    w16(8, 0);
-    w16(10, sub_b);
-    w16(12, USHORT(sub_b + 2));
-    w16(14, print_b);
-    std::memcpy(&buf[16], sub.data(), sub_b);
-    std::memcpy(&buf[16 + sub_b + 2], t.data(), print_b);
-    DWORD got = 0;
-    const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), DWORD(buf.size()), nullptr, 0, &got, nullptr);
-    CloseHandle(h);
-    if (!ok) RemoveDirectoryW(link.c_str());
-    return ok != 0;
-}
-#endif
-
-void link_file(const fs::path &src, const fs::path &dst, uint64_t &copied, uint64_t budget) {
-    // dst as a hard link to src (same drive), else a copy
-#ifdef _WIN32
-    if (CreateHardLinkW(dst.c_str(), src.c_str(), nullptr)) return;
-#else
-    if (port::hard_link(src, dst)) return;
-#endif
-    std::error_code ec;
-    copied += fs::file_size(src, ec);
-    if (copied > budget)
-        throw u3::Stop(fmt("the game folder and its update are on another drive than the multiplayer data, and the files to combine exceed %llu MB",
-                           (unsigned long long)(budget >> 20)));
-#ifdef _WIN32
-    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) throw u3::Stop("cannot copy " + S(src));
-#else
-    if (!copy_file_time(src, dst)) throw u3::Stop("cannot copy " + S(src));
-#endif
-}
-
-void merge(const std::optional<fs::path> &base, const std::optional<fs::path> &update, const fs::path &view, uint64_t &copied, uint64_t budget) {
-    // view = base with update laid over it: folders only one side has are junctions to it, files hard links (or copies),
-    // folders both sides have are merged one level further down
-#ifdef _WIN32
-    if (!CreateDirectoryW(view.c_str(), nullptr)) throw u3::Stop("cannot create " + S(view));
-#else
-    if (std::error_code made; !fs::create_directory(view, made)) throw u3::Stop("cannot create " + S(view));
-#endif
-    std::map<std::string, fs::path> names, over;
-    std::error_code ec;
-    if (base && is_dir(*base))
-        for (const auto &e : fs::directory_iterator(*base, ec)) names[S(e.path().filename())] = e.path();
-    if (update && is_dir(*update))
-        for (const auto &e : fs::directory_iterator(*update, ec)) over[S(e.path().filename())] = e.path();
-    std::set<std::string> all;
-    for (const auto &[n, p] : names) all.insert(n);
-    for (const auto &[n, p] : over) all.insert(n);
-    for (const std::string &n : all) {
-        const auto b = names.find(n), u = over.find(n);
-        const fs::path v = view / P(n);
-        if (u != over.end() && b != names.end() && is_dir(u->second) && is_dir(b->second)) merge(b->second, u->second, v, copied, budget);
-        else {
-            const fs::path src = u != over.end() ? u->second : b->second;
-            if (is_dir(src)) {
-                if (!make_junction(src, v)) throw u3::Stop("cannot create a junction to " + S(src));
-            } else
-                link_file(src, v, copied, budget);
+    fs::remove(data / "ps4-view.txt", ec);
+    fs::remove(manifest, ec);
+    if (a.ps4_update.empty()) return {};
+    const fs::path update = P(a.ps4_update);
+    std::string text = "U3PS4V3\nupdate\t" + S(update) + "\n";
+    size_t files = 0;
+    std::function<void(const fs::path &, const std::string &)> walk = [&](const fs::path &dir, const std::string &rel) {
+        std::error_code e;
+        for (fs::directory_iterator it(dir, e), end; !e && it != end; it.increment(e)) {
+            const std::string r = rel.empty() ? S(it->path().filename()) : rel + "/" + S(it->path().filename());
+            std::error_code e2;
+            if (it->is_directory(e2)) {
+                text += "D\t" + r + "\n";
+                walk(it->path(), r);
+            } else if (it->is_regular_file(e2)) {
+                text += "F\t" + r + "\n";
+                files++;
+            }
         }
-    }
-}
-
-void remove_view(const fs::path &view) { rmtree(view); }   // rmtree never follows junctions
-
-std::string ps4_view(const Args &a, const fs::path &data) {
-    // The PS4 game as the game sees it: with update 1.02 in its own folder (--ps4-update) the recipe must read the
-    // updated files, so it gets a merged view of the two folders (<data>/ps4-view, rebuilt when either folder changes)
-    const fs::path view = data / "ps4-view", sf = data / "ps4-view.txt";
-    if (a.ps4_update.empty()) {   // no update folder (any more): a view made for an earlier one goes
-        std::error_code ec;
-        if (present(view)) remove_view(view);
-        fs::remove(sf, ec);
-        return a.ps4;
-    }
-    const fs::path base = P(a.ps4), update = P(a.ps4_update);
-#ifdef _WIN32
-    auto mt = [](const fs::path &p) {
-        WIN32_FILE_ATTRIBUTE_DATA d{};
-        GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d);
-        const int64_t t = int64_t(uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32 | d.ftLastWriteTime.dwLowDateTime);
-        return (long long)((t - 116444736000000000LL) / 10000000);
     };
-#else
-    auto mt = [](const fs::path &p) {   // seconds since 1970 (as on Windows: before 1970 when it is missing)
-        struct stat st;
-        return ::stat(p.c_str(), &st) == 0 ? (long long)st.st_mtime : -11644473600LL;
-    };
-#endif
-    const std::string stamp = S(base) + "|" + S(update) + "|" + std::to_string(mt(base)) + "|" + std::to_string(mt(update)) + "|v1";
-    if (is_dir(view) && present(sf) && read_text(sf) == stamp) return S(view);
-    if (present(view)) remove_view(view);
-    std::error_code ec;
-    fs::remove(sf, ec);
-    try {
-        uint64_t copied = 0;
-        merge(base, update, view, copied, uint64_t(2) << 30);
-    } catch (const std::exception &e) {
-        log(std::string("note: the PS4 update could not be combined with the game folder (") + e.what() +
-            "); the recipe reads the game folder alone, so steps that need update 1.02 files may fail");
-        if (present(view)) remove_view(view);
-        return a.ps4;
-    }
-    write_text(sf, stamp);
-    log("PS4 game for the recipe: " + S(base) + " with update " + S(update) + " laid over it (" + S(view) + ")");
-    return S(view);
+    walk(update, "");
+    write_text(manifest, text);
+    log(fmt("PS4 game for the recipe: %s with update %s laid over it (%zu files of the update, listed in %s)", S(P(a.ps4)).c_str(),
+            S(update).c_str(), files, S(manifest).c_str()));
+    return manifest;
 }
 
 // ------------------------------------------------------------------------------------------------ the recipe run
@@ -631,8 +538,11 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
     const fs::path out = out_opt ? *out_opt : data / "recipe";
     fs::create_directories(out);
     RecipeArgs ra;
-    ra.ps4 = ps4_view(a, data);
+    const fs::path manifest = ps4_manifest(a, data);
+    ra.ps4 = a.ps4;   // the game folder; with an update, the steps resolve its paths through the list
+    ra.ps4_update = a.ps4_update;
     ra.out = S(out);
+    u3::ps4_view_set(P(a.ps4), manifest);   // the steps that run in this process (an empty list: none)
     ra.continue_on_error = true;
     ra.speech_langs = a.speech_langs;
     ra.ps3_u3 = a.ps3_u3;
@@ -648,6 +558,10 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
 #endif
     if (const char *p = std::getenv("PATH")) path += p;
     ra.env.push_back({"PATH", path});
+    if (!manifest.empty()) {   // the steps run as their own programs (u3fix.exe ...): the same list
+        ra.env.push_back({"U3_PS4_ROOT", S(P(a.ps4))});
+        ra.env.push_back({"U3_PS4_MANIFEST", S(manifest)});
+    }
     if (!ps4_elf.empty()) ra.env.push_back({"RECIPE_PS4_ELF", S(ps4_elf)});
     if (!ps3_elf.empty()) {
         ra.env.push_back({"RECIPE_PS3_ELF", ps3_elf});

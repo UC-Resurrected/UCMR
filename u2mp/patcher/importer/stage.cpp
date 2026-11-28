@@ -410,6 +410,8 @@ BlobP water(const Pak &p, const std::function<std::string(const std::string &)> 
 
 // the retail PS4 material survey the planner reads, made once per PS4 game (work/res; a few minutes)
 fs::path stage_res(const Context &c) {
+    static std::mutex m;   // the level conversions run on several threads: the first one makes it, the others wait
+    std::lock_guard<std::mutex> lock(m);
     const fs::path d = c.work / "res";
     const fs::path stamp = d / "ok.json";
     size_t n = 0;

@@ -79,11 +79,10 @@ int mkregistry(const std::string &ps4, const std::string &ps3txt, const std::str
     if (!want.empty())
         for (const std::string &r : roots) {
             const fs::path dcdir = upath(r + "/dc1/ps4");
-            if (!fs::is_directory(dcdir)) continue;
-            for (const auto &e : fs::recursive_directory_iterator(dcdir)) {
-                const std::string n = utf8(e.path().filename());
-                if (!e.is_regular_file() || n.size() < 4 || n.compare(n.size() - 4, 4, ".bin") != 0) continue;
-                const Bytes b = read_file(e.path());
+            for (const fs::path &p : u3::ps4_files(utf8(dcdir))) {
+                const std::string n = utf8(p.filename());
+                if (n.size() < 4 || n.compare(n.size() - 4, 4, ".bin") != 0) continue;
+                const Bytes b = read_file(p);
                 for (size_t k = 0; k + 4 <= b.size(); k++) {
                     const uint32_t v = rd32le(&b[k]);
                     if (want.count(v)) found.insert(v);

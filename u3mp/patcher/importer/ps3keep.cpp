@@ -109,16 +109,30 @@ std::set<std::string> needed(const std::vector<fs::path> &roots, Inputs &inp) {
         if (strip(line).empty() || line[0] == '#') continue;
         const size_t tab = line.find('\t');
         const std::string kind = line.substr(0, tab), rel = line.substr(tab + 1);
+        if (kind == "dlcmaps" && !inp.dlc_dirs.empty()) {   // the first DLC folder that has it (packs may come from several)
+            for (const fs::path &d : inp.dlc_dirs)
+                if (fs::exists(d / P(rel), ec)) {
+                    out.insert(norm(S(d) + "\\" + rel));
+                    break;
+                }
+            continue;
+        }
         auto it = inp.ps3.find(kind);
         if (it != inp.ps3.end()) out.insert(norm(S(it->second) + "\\" + rel));
     }
     for (const auto &[k, d] : inp.ps3)   // every folder's PARAM.SFO (names the inputs in the log)
         if (auto sfo = find_sfo(d)) out.insert(abspath(*sfo));
-    // no Game of the Year disc (its goty-dlc.psarc stands in for the DLC map packs): keep the packs installed on their own
-    auto dl = inp.ps3.find("dlcmaps"), di = inp.ps3.find("disc");
-    if (dl != inp.ps3.end() && (di == inp.ps3.end() || dl->second != di->second) &&
-        !fs::exists((di == inp.ps3.end() ? fs::path() : di->second) / "goty-dlc.psarc", ec))
-        for (int n = 1; n <= 4; n++) out.insert(S(dl->second / P("dlc-map" + std::to_string(n) + ".psarc")));
+    // no Game of the Year disc (its goty-dlc.psarc stands in for the DLC map packs): keep the packs installed on their
+    // own, each from the folder the import takes it from
+    if (!inp.dlc_goty)
+        for (int n = 1; n <= 4; n++) {
+            const std::string name = "dlc-map" + std::to_string(n) + ".psarc";
+            for (const fs::path &d : inp.dlc_dirs)
+                if (fs::exists(d / P(name), ec)) {
+                    out.insert(S(d / P(name)));
+                    break;
+                }
+        }
     return out;
 }
 
