@@ -477,8 +477,10 @@ Value read_config(const fs::path &config_file, const fs::path &prefix_file, cons
     // migration to 8: switch multithreaded rendering on for Drake's Deception. This runs a single time, so turning
     // it off afterwards sticks
     if (version_of(config) < 8) games.get("u3")->set("multithreaded", Value::boolean(true));
+    // migration to 9: the same for Drake's Fortune, now that its weapons no longer flicker with it (GitHub #23); once
+    if (version_of(config) < 9) games.get("u1")->set("multithreaded", Value::boolean(true));
     for (auto &d : game_setting_defaults()) config.remove(d.first);
-    config.set("version", Value::integer(8));
+    config.set("version", Value::integer(9));
     // on Wine, store the game folder's Linux path as well, since a different prefix can map that folder to a
     // different drive letter
     const Value *folder = config.get("game_dir");

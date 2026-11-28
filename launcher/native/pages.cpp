@@ -945,8 +945,7 @@ bool act_setup(const State &state, const std::string &id, const std::string &kin
     changes.game.set("resolution", Value::text(preset->resolution));
     changes.game.set("upscale", Value::text(upscale));
     if (name == "igpu") {
-        const Value *game = state.config.get("game");
-        changes.game.set("multithreaded", Value::boolean(!(game && game->s == "u1")));
+        changes.game.set("multithreaded", Value::boolean(true));
         changes.game.set("aa", Value::text("off"));
     }
     changes.game.set("preset", Value::text(name));   // last: the settings-file changes mark the preset Custom

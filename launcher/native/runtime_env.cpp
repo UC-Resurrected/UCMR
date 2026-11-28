@@ -574,14 +574,18 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
     const std::string *mt_value = in.original.find("UNCHARTED_MULTITHREADED_" + KEY);
     std::string multithreaded = mt_value ? *mt_value : "";
     bool have_mt = mt_value != nullptr;
-    // Uncharted 1 is forced to single-threaded rendering. With the threaded path some frames rendered its guns (and
-    // sometimes other objects) using the state of a different draw, giving flat grey weapons (GitHub #23,
-    // 18 Oct 2026), and the game runs no faster with it anyway. This stays until the bug is found. For testing,
-    // UNCHARTED_U1_MULTITHREADED_TEST=1 lets the launcher's setting through unchanged.
-    if (u1 && have_mt && multithreaded == "1" && orig(in, "UNCHARTED_U1_MULTITHREADED_TEST") != "1") {
-        prints.push_back("Multithreaded rendering disabled for Drake's Fortune: it makes the weapons flicker");
+    // Uncharted 1 follows the launcher's setting like the other two. It was forced to single-threaded rendering from
+    // 18 Oct 2026 because some frames drew its guns flat grey with the threaded path (GitHub #23); that no longer
+    // happens, and where one processor core is the limit the threaded path is much faster. UNCHARTED_U1_SINGLE_THREAD=1
+    // still forces single-threaded rendering for it, should the grey weapons come back.
+    if (u1 && have_mt && multithreaded == "1" && orig(in, "UNCHARTED_U1_SINGLE_THREAD") == "1") {
+        prints.push_back("Multithreaded rendering off for Drake's Fortune (UNCHARTED_U1_SINGLE_THREAD=1)");
         multithreaded = "0";
     }
+    // With threaded rendering a nested command buffer on a compute queue no longer waits for the draw pipe to empty
+    // first (each packet in it is checked on its own instead); Uncharted 2 waited there thousands of times a second.
+    // GOW3_SKIP_IB_DRAIN=0 turns it off again.
+    if (have_mt && multithreaded == "1") env.set("GOW3_SKIP_IB_DRAIN", in.original.get("GOW3_SKIP_IB_DRAIN", "1"));
     // Uncharted 3 used to hang with threaded rendering (GitHub #51); the runtime fix landed 19 Oct 2026 and from
     // 21 Oct the launcher's setting is honoured again. In a demanding Cartagena scene it made the difference between
     // 53.7 FPS with 11 stalls (off) and 60 FPS with 1 (on). If GOW3_DRAW_PIPE or GOW3_VK_RECORD_THREAD is already set
