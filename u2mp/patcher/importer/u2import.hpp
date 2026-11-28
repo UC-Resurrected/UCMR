@@ -60,6 +60,7 @@ public:
     PS3(const std::string &base, const std::string &dlc, bool title_updates);
     std::vector<const Entry *> candidates(const std::string &key) const;   // newest source first
     std::vector<std::string> archives;
+    std::set<std::string> map_packs;   // the DLC map packs mounted from --ps3-dlc ("dlc-map1", "dlc-map2")
     fs::path base_main;
 
 private:

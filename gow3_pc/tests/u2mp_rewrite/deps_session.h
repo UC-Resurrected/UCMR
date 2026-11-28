@@ -25,6 +25,7 @@ struct Incoming {
 };
 
 struct State {
+    uint32_t dlc_packs = 7;                    // what dlc_packs() reports (bit 0 base, bits 1, 2 the map packs)
     // net::Transport
     bool host_ok = true, join_ok = true, host_link_ok = true, join_link_ok = true;
     uint8_t local_slot = 0;                    // what local_slot() reports after join / pump

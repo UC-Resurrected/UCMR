@@ -20,6 +20,7 @@
 #include "json.h"
 #include "log_history.h"
 #include "port.h"
+#include "ps3titles.h"   // the PS3 releases' installs in dev_hdd0/game (Uncharted 2 and 3 DLC)
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1444,56 +1445,48 @@ std::string u2_data_folder() {
 }
 
 // The Uncharted 2 map packs the GOTY copy lacks (u2import --ps3-dlc): RPCS3 installs every Uncharted 2 release's DLC in
-// dev_hdd0/game/<title id>/USRDIR/build/main (dlc-map1.psarc, dlc-map2.psarc, as archives or unpacked folders). The
-// folders looked in: each of the player's PS3 folders (game data, the U2 game, the U3 import's) and up to five levels
-// above it, and their dev_hdd0/game. The map pack archives are byte-identical in every region's install, so the pick
-// is simply the first title id of this fixed list (US first) that has both; the import checks every file it takes by
-// the import list's SHA-1 and reads only the map packs from that folder (never its region's title updates). Folder
-// names compare without case and dashes ("bcus-98123" is BCUS98123); "<id>DATA2" is game data, never a match.
-const char *const U2_DLC_IDS[] = {"BCUS98123", "BCUS98257", "BCUS98257F", "NPUA80698", "NPUA70051", "BCES00757",
-                                  "BCES00509", "BCES00727", "NPEA00364", "NPEA00365", "BCJS30035", "BCJS70021",
-                                  "BCJS30051", "BCAS20097", "BCAS20142", "NPHA80194", "BCKS10086", "BCKS10084"};
+// dev_hdd0/game/<title id>/USRDIR/build/main (dlc-map1.psarc, dlc-map2.psarc, as archives or unpacked folders). The game
+// folder first (the player's Uncharted 2 game folder, then its own title's install), then every release's install
+// (ps3titles.h: the player's PS3 folders, up to five levels above them, and their dev_hdd0/game; title ids in the fixed
+// U2 order, US first). The map pack archives are byte-identical in every region's install; the import checks every file
+// it takes by the import list's SHA-1 and reads only the map packs from that folder (never its region's title updates).
+// A folder with both packs wins; else the first with one of them (that pack is imported, the other one's maps stay off).
 struct U2Dlc { std::string id, folder; };   // empty when none is found
 U2Dlc u2_dlc_source() {
-    std::vector<std::string> roots = {text(g.config, "u2mp_ps3_data"), text(g.config, "u2mp_ps3"), text(g.config, "u3mp_ps3_u2")};
-    if (const Value *f = g.config.get("u3mp_ps3_u3")) for (auto &x : f->items) roots.push_back(text(&x));
-    std::vector<std::string> dirs;   // the folders whose subfolders may be title ids, in this order
-    for (const std::string &root : roots) {
-        if (root.empty()) continue;
-        std::string q = as_path(root);
-        for (int up = 0; up <= 5; ++up) {
-            for (const std::string &d : {q, join(join(q, "dev_hdd0"), "game")})
-                if (is_dir(d) && std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
-            const std::string p = parent_of(q);
-            if (p == q) break;
-            q = p;
+    const std::string game = text(g.config, "u2mp_ps3");
+    std::vector<port::fs::path> roots;
+    for (const std::string &r : {text(g.config, "u2mp_ps3_data"), game, text(g.config, "u3mp_ps3_u2")})
+        if (!r.empty()) roots.push_back(port::path_utf8(as_path(r)));
+    if (const Value *f = g.config.get("u3mp_ps3_u3"))
+        for (auto &x : f->items)
+            if (!text(&x).empty()) roots.push_back(port::path_utf8(as_path(text(&x))));
+    auto packs = [](const std::string &folder) {   // 0 none, 1 or 2 = one of them, 3 = both
+        const std::string main = join(join(join(folder, "USRDIR"), "build"), "main");
+        int n = 0;
+        for (int k = 1; k <= 2; ++k) {
+            const std::string part = "dlc-map" + std::to_string(k);
+            if (is_file(join(main, part + ".psarc")) || is_dir(join(main, part))) n |= k;
         }
-    }
-    auto key = [](std::string n) {
-        std::string k;
-        for (char c : n) if (c != '-') k += (char)toupper((unsigned char)c);
-        return k;
+        return n;
     };
-    auto has = [](const std::string &main, const char *part) {
-        return is_file(join(main, std::string(part) + ".psarc")) || is_dir(join(main, part));
-    };
-    std::vector<std::pair<std::string, std::string>> titles;   // (key, folder) of every subfolder, folder order
-    for (const std::string &d : dirs) {
-        std::vector<std::string> names;
-        std::error_code ec;
-        for (port::fs::directory_iterator it(port::path_utf8(d), ec), end; !ec && it != end; it.increment(ec)) {
-            std::error_code e;
-            if (it->is_directory(e)) names.push_back(port::utf8(it->path().filename()));
-        }
-        std::sort(names.begin(), names.end());   // NTFS lists names sorted; Linux in no order
-        for (const std::string &n : names) titles.push_back({key(n), join(d, n)});
+    // the game folder's own title id: the folder's name, or its [BCUS98123]-style tag
+    std::string own;
+    if (!game.empty()) {
+        const std::string name = port::utf8(port::path_utf8(as_path(game)).filename());
+        const std::string k = ps3titles::key(name);
+        for (const std::string &id : ps3titles::u2_ids())
+            if (k == id || k.find("[" + id + "]") != std::string::npos) own = id;
     }
-    for (const char *id : U2_DLC_IDS)
-        for (const auto &[k, folder] : titles) {
-            if (k != id) continue;
-            const std::string main = join(join(join(folder, "USRDIR"), "build"), "main");
-            if (has(main, "dlc-map1") && has(main, "dlc-map2")) return {id, folder};
-        }
+    std::vector<std::pair<std::string, std::string>> cands;   // (title id, folder), in the order they are taken
+    if (!game.empty()) cands.push_back({own, as_path(game)});
+    std::vector<std::string> ids;
+    if (!own.empty()) ids.push_back(own);
+    for (const std::string &id : ps3titles::u2_ids())
+        if (id != own) ids.push_back(id);
+    for (const auto &[id, folder] : ps3titles::find(roots, ids)) cands.push_back({id, port::utf8(folder)});
+    for (int want : {3, 1, 2})   // both packs first, then any folder with one of them
+        for (const auto &[id, folder] : cands)
+            if ((packs(folder) & want) == want) return {id, folder};
     return {};
 }
 

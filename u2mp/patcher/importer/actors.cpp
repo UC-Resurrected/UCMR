@@ -96,6 +96,8 @@ struct TInfo {
 };
 const std::vector<std::pair<std::string, TInfo>> &template_index(const fs::path &dir, bool props) {
     static std::map<std::pair<std::string, bool>, std::vector<std::pair<std::string, TInfo>>> cache;
+    static std::mutex m;   // several conversion threads; the first one to ask builds an index
+    std::lock_guard<std::mutex> lock(m);
     const auto key = std::make_pair(S(dir), props);
     if (auto it = cache.find(key); it != cache.end()) return it->second;
     std::vector<std::pair<std::string, TInfo>> out;
@@ -382,7 +384,10 @@ Converted convert_actor(const Context &c, const Entry &entry, const fs::path &sr
             else {
                 const fs::path tsrc = c.work / "src" / P(basename(cands[0]->key));
                 const Bytes td = cands[0]->read();
-                if (!(fs::is_regular_file(tsrc, ec) && fs::file_size(tsrc, ec) == td.size())) write_bytes(tsrc, td);
+                {
+                    std::lock_guard<std::mutex> l(src_files_lock());   // another conversion may write the same file
+                    if (!(fs::is_regular_file(tsrc, ec) && fs::file_size(tsrc, ec) == td.size())) write_bytes(tsrc, td);
+                }
                 std::variant<TwinStats, std::string> r;
                 try {
                     r = twin_build(src, tsrc, c.ps4->files.at("actor27/" + t->second + ".pak"), tmp);

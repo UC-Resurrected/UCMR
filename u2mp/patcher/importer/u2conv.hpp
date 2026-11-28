@@ -3,7 +3,13 @@
 #pragma once
 #include "u2import.hpp"
 
+#include <mutex>
+
 namespace u2imp {
+
+// work/src/<name>: the PS3 paks written for the converters (u2import.cpp src_file, the twins in actors.cpp); held while
+// one is checked and written (the conversions run on several threads)
+std::mutex &src_files_lock();
 
 struct Context {
     const PS3 *ps3 = nullptr;

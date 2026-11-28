@@ -50,6 +50,7 @@
 #include <chrono>
 #include <cstdio>
 #include <regex>
+#include <atomic>
 #include <thread>
 
 using namespace u2imp;
@@ -202,7 +203,7 @@ Value sorted_keys(const Value &v) {
 }
 
 struct Args {
-    std::string ps4, ps3, ps3_dlc, ps3_data, out, groups = "A,B,C,D,E", speech_langs, list, only, ffmpeg, ps3_elf, objdump, dns;
+    std::string ps4, ps3, ps3_dlc, ps3_data, out, groups = "A,B,C,D,E", speech_langs, list, only, ffmpeg, ps3_elf, objdump, dns, jobs;   // jobs: conversion threads (default up to 8)
     bool dlc_ruins = false, no_dlc_ruins = false, drop_navmesh = false, no_verify = false, update = false, force = false, validate = false;
 };
 
@@ -376,6 +377,7 @@ private:
     std::unique_ptr<PS3> ps3;
     std::unique_ptr<PS4> ps4;
     std::set<std::string> music_refs_, langs;
+    std::multiset<std::string> later_outs_;   // step_items: the files the later rows of a conversion batch wrote
     std::string ffmpeg;
     bool dlc_ruins = false;
     std::vector<Row> rows;
@@ -446,6 +448,9 @@ private:
         const Value *old = item(key);
         const std::string o = old ? text_of(old->get("out")) : "";
         if (o.empty() || o == new_out) return;
+        // a later row of the same conversion batch wrote this file already (step_items runs them on threads): one
+        // after the other it would be removed here and written again, so it stays
+        if (later_outs_.count(o)) return;
         for (const auto &[k, it] : items().fields)   // another item writes the same file
             if (k != key && text_of(it.get("out")) == o && text_of(it.get("status")) == "ok") return;
         std::error_code ec;
@@ -594,6 +599,7 @@ private:
         std::error_code ec;
         fs::create_directories(d, ec);
         const fs::path p = d / P(basename(entry.key));
+        std::lock_guard<std::mutex> l(src_files_lock());   // another conversion may write the same file
         if (!(isfile(p) && fsize(p) == (long long)data.size())) write_bytes(p, data);
         return p;
     }
@@ -667,7 +673,12 @@ int Importer::run() {
     std::string arcs;
     for (size_t i = 0; i < ps3->archives.size(); i++) arcs += (i ? ", " : "") + basename(ps3->archives[i]);
     lg(fmt("PS3 archives: %zu (%s)", ps3->archives.size(), arcs.c_str()));
-    lg("PS3 map packs: " + (a.ps3_dlc.empty() ? std::string("none given (GOTY-only import)") : "from " + a.ps3_dlc));
+    {
+        std::string packs;
+        for (const std::string &p : ps3->map_packs) packs += (packs.empty() ? "" : ", ") + p;
+        lg("PS3 map packs: " + (a.ps3_dlc.empty() ? std::string("none given (GOTY-only import)")
+                                                  : "from " + a.ps3_dlc + " (" + (packs.empty() ? std::string("none found there") : packs) + ")"));
+    }
     // the decrypted PS3 EBOOT.elf is required: no import without it
     const std::string elf = !a.ps3_elf.empty() ? a.ps3_elf : S(ps3->base_main.parent_path().parent_path() / "EBOOT.elf");
     bool ok = false;
@@ -702,7 +713,7 @@ int Importer::run() {
     // all had map pack 1, and dlc-map1.psarc, mounted over the base archives, gave every one of them its ruins-multi.
     // The runtime counts map pack 1 as present from its levels (gow3_pc/src/u2mp/dlc.cpp), so every PC with the pack
     // plays the same Ruins. --dlc-ruins is still accepted (it was the opt-in before).
-    dlc_ruins = !a.ps3_dlc.empty() && !a.no_dlc_ruins;
+    dlc_ruins = ps3->map_packs.count("dlc-map1") && !a.no_dlc_ruins;   // only with map pack 1 itself
     ffmpeg = find_ffmpeg(a.ffmpeg);
     lg("ffmpeg: " + (ffmpeg.empty() ? std::string("not found (banks with MP3 samples are skipped)") : ffmpeg));
     ctx.ps3 = ps3.get();
@@ -919,9 +930,96 @@ bool Importer::step_outputs_ok(const std::string &sid) {
 }
 
 // step import-list: every import-list row the PS4 game lacks, converted (unchanged inputs keep their files)
+// The actors and levels (minutes each) are converted on up to 8 threads, the other rows one after the other. Every
+// record, log line and state save still happens in list order: a row's result waits until the rows before it are
+// recorded, so state.json and the converted files are the same as with --jobs 1.
 void Importer::step_items() {
     level_txt.clear();
     sha1_memo_load(work);
+    struct Job {
+        size_t n = 0;
+        std::function<void()> apply;   // a row without a conversion: its record
+        // a conversion on a thread
+        const Row *row = nullptr;
+        const Entry *entry = nullptr;
+        Bytes data;
+        std::string src_sha;
+        std::function<Converted(const Row &, const Entry &, const Bytes &)> fn;
+        std::optional<Converted> got;
+        std::exception_ptr error;
+        double secs = 0;
+    };
+    std::vector<Job> jobs;
+    size_t job_bytes = 0;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned threads = a.jobs.empty() ? std::min(8u, hw) : (unsigned)std::max(1, std::atoi(a.jobs.c_str()));
+    // the result of a conversion: recorded as before
+    const auto finish = [this](const Row &row, const Entry &entry, const std::string &src_sha, const std::optional<Converted> &got,
+                               std::exception_ptr error, double secs) {
+        const std::string key = row["key"], kl = lower(key), group = row["group"];
+        try {
+            if (error) std::rethrow_exception(error);
+            const Converted &c = *got;
+            const std::string notes = join_notes(c.notes);
+            record(key, group, c.rel, {{"src", str(entry.source)}, {"src_sha1", str(src_sha)}, {"note", str(cut(notes, 400))}});
+            if (!starts(kl, "sound1/speech/")) lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), entry.source.c_str(), secs, cut(notes, 200).c_str()));
+        } catch (const Unsupported &e) {
+            set_item(key, "unsupported", group, {{"note", str(cut(e.what(), 400))}, {"src", str(entry.source)}});
+            lg("UNSUPPORTED " + key + ": " + e.what());
+        } catch (const std::exception &e) {
+            set_item(key, "failed", group, {{"src", str(entry.source)}, {"note", str(cut(e.what(), 400))}});
+            lg("FAILED " + key + ": " + cut(e.what(), 300));
+        }
+    };
+    const auto convert = [](Job &j) {
+        const auto t = std::chrono::steady_clock::now();
+        try {
+            j.got = j.fn(*j.row, *j.entry, j.data);
+        } catch (...) {
+            j.error = std::current_exception();
+        }
+        j.secs = seconds_since(t);
+        Bytes().swap(j.data);
+    };
+    // the waiting conversions on the threads (largest first), then every waiting row recorded in list order
+    const auto flush = [&] {
+        std::vector<Job *> todo;
+        for (Job &j : jobs)
+            if (j.fn) todo.push_back(&j);
+        std::stable_sort(todo.begin(), todo.end(), [](const Job *x, const Job *y) { return x->data.size() > y->data.size(); });
+        std::atomic<size_t> next{0};
+        const auto work_on = [&] {
+            for (size_t i; (i = next++) < todo.size();) convert(*todo[i]);
+        };
+        std::vector<std::thread> pool;
+        for (unsigned i = 1; i < std::min<size_t>(threads, todo.size()); i++) pool.emplace_back(work_on);
+        work_on();
+        for (std::thread &t : pool) t.join();
+        for (const Job *j : todo)
+            if (j->got) later_outs_.insert(OUT_MAIN + "/" + j->got->rel);
+        for (Job &j : jobs) {
+            if (!j.fn) {
+                j.apply();
+                continue;
+            }
+            if (j.got) later_outs_.erase(later_outs_.find(OUT_MAIN + "/" + j.got->rel));
+            finish(*j.row, *j.entry, j.src_sha, j.got, j.error, j.secs);
+            if (j.n % 20 == 0 && state_dirty) save();
+        }
+        later_outs_.clear();
+        jobs.clear();
+        job_bytes = 0;
+    };
+    // a row's record: now, or after the conversions still waiting before it
+    const auto in_order = [&](size_t n, std::function<void()> f) {
+        if (jobs.empty()) f();
+        else {
+            Job j;
+            j.n = n;
+            j.apply = std::move(f);
+            jobs.push_back(std::move(j));
+        }
+    };
     for (size_t n = 0; n < rows.size(); n++) {
         const Row &row = rows[n];
         const std::string key = row["key"], kl = lower(key), group = row["group"];
@@ -930,7 +1028,7 @@ void Importer::step_items() {
         const std::string have = ps4_has(row);
         if (!have.empty()) {
             const std::string st = starts(have, "PS4 ") && have.find("do not use") == std::string::npos ? "ps4" : "skipped";
-            set_item(key, st, group, {{"note", str(have)}});
+            in_order(n, [this, key, st, group, have] { set_item(key, st, group, {{"note", str(have)}}); });
             continue;
         }
         const bool txt_input = ends(kl, ".txt") && starts(kl, "pak22/");
@@ -940,54 +1038,76 @@ void Importer::step_items() {
         try {
             std::tie(entry, data) = source(row, !done);
         } catch (const std::out_of_range &e) {
-            if ((group[0] == 'C' || group[0] == 'D') && a.ps3_dlc.empty() && ps3->candidates(key).empty()) {
-                // map pack rows without --ps3-dlc (the launcher's GOTY-only import): not part of this import
-                set_item(key, "skipped", group, {{"note", str(std::string("map pack ") + group[0] + " not given (--ps3-dlc): GOTY-only import")}});
+            if ((group[0] == 'C' || group[0] == 'D') && ps3->candidates(key).empty() &&
+                (a.ps3_dlc.empty() || ps3->map_packs.size() < 2)) {
+                // map pack rows without --ps3-dlc (the launcher's GOTY-only import), or with a DLC folder that lacks one
+                // of the two packs: not part of this import (the game shows only the packs whose levels are there)
+                std::string note = a.ps3_dlc.empty() ? std::string("map pack ") + group[0] + " not given (--ps3-dlc): GOTY-only import"
+                                                     : std::string("map pack ") + group[0] + ": its archive is not in " + a.ps3_dlc;
+                in_order(n, [this, key, group, note] { set_item(key, "skipped", group, {{"note", str(note)}}); });
                 continue;
             }
-            set_item(key, "missing", group, {{"note", str(e.what())}});
-            lg("MISSING " + key + ": " + e.what());
+            const std::string why = e.what();
+            in_order(n, [this, key, group, why] {
+                set_item(key, "missing", group, {{"note", str(why)}});
+                lg("MISSING " + key + ": " + why);
+            });
             continue;
         }
         const std::string src_sha = !row["sha1"].empty() ? row["sha1"] : sha1_hex(data);
         if (txt_input) {
             const std::string b = basename(key);
             level_txt[b.substr(0, b.size() - 4)] = std::string(data.begin(), data.end());
-            set_item(key, "ok", group, {{"note", str("registry input")}, {"src", str(entry->source)}, {"src_sha1", str(src_sha)}});
+            in_order(n, [this, key, group, entry, src_sha] {
+                set_item(key, "ok", group, {{"note", str("registry input")}, {"src", str(entry->source)}, {"src_sha1", str(src_sha)}});
+            });
             continue;
         }
         if (done || done_before(key, src_sha)) {
-            Value *it = item(key);
-            if (text_of(it->get("src")) != entry->source) {   // same bytes; the archive they are read from now
-                it->set("src", str(entry->source));
-                state_dirty = true;
-            }
+            in_order(n, [this, key, entry] {
+                Value *it = item(key);
+                if (text_of(it->get("src")) != entry->source) {   // same bytes; the archive they are read from now
+                    it->set("src", str(entry->source));
+                    state_dirty = true;
+                }
+            });
             continue;
         }
         std::function<Converted(const Row &, const Entry &, const Bytes &)> fn;
+        bool threaded = false;   // the sounds stay on this thread (quick; the bank envelope table is not shared safely)
         if (ends(kl, ".xvag")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_xvag(r, e, d); };
         else if (ends(kl, ".bnk")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_bank(r, e, d); };
-        else if (starts(kl, "actor27/") && ends(kl, ".pak")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_actor(r, e, d); };
-        else if (starts(kl, "pak22/") && ends(kl, ".pak")) fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_level(r, e, d); };
-        else {
-            set_item(key, "skipped", group, {{"note", str("optional (" + split(key, '/')[0] + "): not referenced by the PS4 game")}});
+        else if (starts(kl, "actor27/") && ends(kl, ".pak")) {
+            fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_actor(r, e, d); };
+            threaded = true;
+        } else if (starts(kl, "pak22/") && ends(kl, ".pak")) {
+            fn = [this](const Row &r, const Entry &e, const Bytes &d) { return conv_level(r, e, d); };
+            threaded = true;
+        } else {
+            in_order(n, [this, key, group] {
+                set_item(key, "skipped", group, {{"note", str("optional (" + split(key, '/')[0] + "): not referenced by the PS4 game")}});
+            });
             continue;
         }
-        const auto t = std::chrono::steady_clock::now();
-        try {
-            const Converted c = fn(row, *entry, data);
-            const std::string notes = join_notes(c.notes);
-            record(key, group, c.rel, {{"src", str(entry->source)}, {"src_sha1", str(src_sha)}, {"note", str(cut(notes, 400))}});
-            if (!starts(kl, "sound1/speech/")) lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), entry->source.c_str(), seconds_since(t), cut(notes, 200).c_str()));
-        } catch (const Unsupported &e) {
-            set_item(key, "unsupported", group, {{"note", str(cut(e.what(), 400))}, {"src", str(entry->source)}});
-            lg("UNSUPPORTED " + key + ": " + e.what());
-        } catch (const std::exception &e) {
-            set_item(key, "failed", group, {{"src", str(entry->source)}, {"note", str(cut(e.what(), 400))}});
-            lg("FAILED " + key + ": " + cut(e.what(), 300));
+        Job j;
+        j.n = n;
+        j.row = &row;
+        j.entry = entry;
+        j.data = std::move(data);
+        j.src_sha = src_sha;
+        j.fn = std::move(fn);
+        if (threaded && threads > 1) {
+            job_bytes += j.data.size();
+            jobs.push_back(std::move(j));
+            if (job_bytes > (1500u << 20)) flush();   // at most about 1.5 GB of PS3 files waiting
+            continue;
         }
+        if (!jobs.empty()) flush();
+        convert(j);
+        finish(row, *entry, src_sha, j.got, j.error, j.secs);
         if (n % 20 == 0 && state_dirty) save();
     }
+    flush();
     // rows that left the import list (a newer list, or the PS4 game has them now): their records and converted files
     // go, so an update keeps only what this import makes. Only on a full run of the groups this run imports; the items
     // of the net steps (net spawn paks, net-patch9, net images) are not import-list rows and stay.
@@ -1672,7 +1792,7 @@ int main(int argc, char **argv) {   // Linux: the arguments are UTF-8 already
         const std::map<std::string, std::string *> vals = {{"--ps4", &a.ps4},         {"--ps3", &a.ps3},       {"--ps3-dlc", &a.ps3_dlc}, {"--ps3-data", &a.ps3_data},
                                                            {"--out", &a.out},         {"--groups", &a.groups}, {"--speech-langs", &a.speech_langs},
                                                            {"--list", &a.list},       {"--only", &a.only},     {"--ffmpeg", &a.ffmpeg},
-                                                           {"--ps3-elf", &a.ps3_elf}, {"--objdump", &a.objdump},  {"--dns", &a.dns}};
+                                                           {"--ps3-elf", &a.ps3_elf}, {"--objdump", &a.objdump},  {"--dns", &a.dns}, {"--jobs", &a.jobs}};
         const std::map<std::string, bool *> flags = {{"--dlc-ruins", &a.dlc_ruins}, {"--no-dlc-ruins", &a.no_dlc_ruins}, {"--drop-navmesh", &a.drop_navmesh},
                                                      {"--no-verify", &a.no_verify}, {"--update", &a.update},             {"--force", &a.force},
                                                      {"--validate", &a.validate}};

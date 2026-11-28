@@ -71,7 +71,10 @@ menu opens with a map pack owned ("... Would you like to go to your Profile page
 row's query).
 
 On PC: menus.cpp `query_matchmaking` (MENUS.md 3.3) shows the row when `dlc_packs()` has map pack 1 or 2;
-session.cpp `mm_pack_mask` (the H5 key mask of `parity-h-session.md`) returns 0 unless the row says DLC.
+session.cpp `mm_pack_mask` (the H5 key mask of `parity-h-session.md`) returns 0 unless the row says DLC, and also 0
+when the party has no map pack in common (bits 1, 2 of the AND; bit 0, the base maps, is always set): such a party
+searches the plain key as with Default, as PS3 does when the common mask is 0. A career saved as DLC on a PC whose map
+packs are gone (the row is hidden there) therefore searches the plain key too.
 
 ## Not verified
 

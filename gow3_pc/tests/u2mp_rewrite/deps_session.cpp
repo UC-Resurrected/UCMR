@@ -386,9 +386,13 @@ void progression_note_met(const std::vector<std::string> &names) {
 }
 // parity group D: Start Match checks, teardown releases, cinema mode, start failure box
 void game_message_box(uint32_t body, uint32_t second) { hx::rec("game_message_box 0x%x 0x%x", body, second); }
+// since #63 (map packs) and the co-op presets: no base copy of a pack map, no co-op preset character (the scenarios
+// predate both, so nothing more is asked of them)
+bool dlc_net_game_has_base(int32_t) { return false; }
+const char *unlocks_coop_character(int) { return nullptr; }
 uint32_t dlc_packs() {
     hx::rec("dlc_packs");
-    return 7;
+    return st.dlc_packs;
 }
 int32_t dlc_net_game_pack(int32_t index, bool &local_ok) {
     hx::rec("dlc_net_game_pack %d", index);

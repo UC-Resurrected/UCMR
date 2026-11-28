@@ -10,6 +10,7 @@
 #include "u2import.hpp"
 
 #include <algorithm>
+#include <mutex>
 
 namespace u2imp {
 namespace {
@@ -59,6 +60,9 @@ std::vector<std::string> listdir_sorted(const fs::path &d) {
 
 Bytes Entry::read() const {
     if (!path.empty()) return read_bytes(path);
+    // an archive reads through one stream: one entry at a time (the import converts on several threads)
+    static std::mutex m;
+    std::lock_guard<std::mutex> l(m);
     return arc->read(index);
 }
 std::string Entry::where() const { return !path.empty() ? S(path) : arc_path + " :: " + name; }
@@ -118,7 +122,9 @@ PS3::PS3(const std::string &base, const std::string &dlc, bool title_updates) {
             } else if (isdir(dm / tag)) {
                 add_tree(dm / tag, tag);
                 found++;
-            }
+            } else
+                continue;
+            if (starts(tag, "dlc-map")) map_packs.insert(tag);
         }
         if (!found) log("note: no dlc-map / dlc-patch archives under " + dlc);
         const fs::path dsp = dm / "sound1" / "speech";   // the disc copy's speech update archives: DLC character lines
@@ -239,4 +245,11 @@ std::set<std::string> PS4::music_refs() const {
     return refs;
 }
 
+}  // namespace u2imp
+
+namespace u2imp {
+std::mutex &src_files_lock() {
+    static std::mutex m;
+    return m;
+}
 }  // namespace u2imp
