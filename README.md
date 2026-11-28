@@ -41,12 +41,12 @@ Four CPU cores can hold 60 FPS in Drake's Fortune and Uncharted 3. On Ryzen 7000
 
 ## Install and update
 
-1. Download **[Windows](../../releases/latest/download/UCMR_windows.zip)** or **[Linux](../../releases/latest/download/UCMR_linux.tar.gz)** from [Releases](../../releases/) and extract it.
-2. Open **UCMR_Launcher.exe** and select your dumped `CUSA02344` folder containing `eboot.bin` and `sce_sys`.
-3. Add update **1.02** through **SETUP → step 2**, or place it beside the game as `CUSA02344-patch`.
+1. Download **[Windows](../../releases/latest/download/UCMR_windows.zip)** or **[Linux](../../releases/latest/download/UCMR_linux.tar.gz)** from **[releases](../../releases/)** and extract it.
+2. Open **UCMR_Launcher** and select your dumped game folder.
+3. Add update **1.02** through **SETUP → step 2**.
 4. Choose a game and preset, then press **PLAY**. First launch compiles shaders, so loading and stutter are expected.
 
-- **In-game menu:** `Insert` or `R3 + L2`.
+- **In-game menu:** `Insert` or `R3 + L2` (configurable in the launcher settings).
 - **Settings:** Saved separately for each game.
 - **Saves and logs:** In `analysis` beside the launcher.
 - **Updates:** Use **UPDATE TO x.y.z** in the launcher. It checks SHA-256, preserves saves, settings and shader caches, and rolls back if an update fails.
