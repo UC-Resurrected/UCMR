@@ -9,7 +9,7 @@ the latest converter).
 | file | what |
 |---|---|
 | `plan.tsv` | one row per level pak: method, options (`mb` = map-build fix passes), PS3 source archive / pak, sha256 of the latest converter's build |
-| `levels.cpp` | the driver: skip a file already at its sha256, build the rest, install only a matching build, back up a replaced file to `work/backup-pak23-levels/` |
+| `levels.cpp` | the driver: skip a file already at its sha256, build the rest, install only a matching build (no backup of the replaced file; an older import's `work/backup-pak23-levels/` is removed) |
 | `data/conv_anim_actors.json` | actor names the converter treats as animated |
 | `data/water_templates.json` | the retail water.fx templates the sky planner scores PS3 water materials against |
 | `data/overrides/overlay-r3/coop-syria-area1.json`, `-area2.json` | `gobo`: the projector-light gobo textures taken from the retail PS4 syria paks |
@@ -79,3 +79,19 @@ Checked against the PS3 levels (fragment programs, material textures and constan
 | a shadow-only blocker submesh's pass-exclusion word (+0x24: 0x1 = left out of the rain / snow occluder depth map, 0x100 = left out of the surface-reflection pass) follows retail's blockers by material: general/shadowblocker boxes 0 (a roof box keeps snow and rain off the ground under it: Facility's hangar box Prototype114.Submesh17 was 0x101), canopy shadows 0x100, library / layout / ik-only blockers 0x101 | `ps4stage.cpp` `blocker_pass_flags` | 66 stage rows (Facility, Fort, Airstrip, Chateau, Dig, Museum, Village, Warzone, Shambhala, co-op levels) |
 
 Trade-off: the softness templates near some PS3 materials have no specular layers, so PS3 material textures bound 29050 -> 28990 of 30152 (107 lost, 66 of them on the co-op Monastery floors and walls: 83 spec masks, 12 second normal maps; 47 gained). Render classes unchanged. 154 stage rows rehashed, built together with the fix-up steps folded into the converter; 66 again for the blocker pass flags.
+
+## Grime masks, second normals, PS3 constants, full-size donors (2026-11-28)
+
+Checked against the PS3 levels (fragment programs, material textures and constants, the sRGB decode of each texture
+read) and the retail PS4 templates:
+
+| rule | where | effect (7 measured MP maps) |
+|---|---|---|
+| a PS3 grime / streak '-detail' map is a colour-layer mask: a template whose Mask slot holds a retail '-detail' map takes it (scored as the detail role, not as a foreign layer; -12 without such a slot, -6 when the mask cannot carry the PS3 `g_uvScale2` tiling). A Detail (detail-normal) slot never takes it. The old far-tiling penalty no longer fires when the grime map is the only texture on the second UV pair | `stageplan.cpp` (detail-mask scoring), `ps4stage.cpp` (Detail slot binding) | PS3 textures lost: Ruins 90 -> 36 (grime 50 -> 2), Museum 59 -> 30 (grime 21 -> 0), Yemen 27 -> 12 |
+| grime maps stay sRGB (the PS3 programs decode them as sRGB: Ruins 74 of 75 reads, Museum 79 of 81, Yemen 79 of 79); spec maps are stored linear (read without decode: Facility 64 of 64) | `ps4stage.cpp` `convert_ps3_texture` | grime keeps its PS3 darkness |
+| a template with NORMAL_2_USE_NORMAL_MAP (or another layer feature) but no slot for it gets the slot, filled with the PS3 second normal / layer texture (non-exact, non-twin prime-shader templates, only when the PS3 material has that texture) | `ps4stage.cpp` | features on with their map missing: Facility 16 -> 0, Museum 12 -> 0, Highrise 13 -> 0 |
+| PS3 shading constants (rim, surfer rim, metalness, ambient diffuse bias, normal strength, translucency, facing tint) need the template feature that carries them: -6 per constant a template cannot carry; rim / facing-tint layers carrying them are not foreign | `stageplan.cpp` | PS3 constants kept: Facility 60.3 -> 76.5 %, Ruins 68.8 -> 78.9 %, Museum 76.1 -> 83.7 % |
+| a retail texture the PS3 level lacks (a donor) gets its dictionary size, at most 512 x 512 (the size of the PS3 textures around it), not a 64 x 64 copy | `ps4stage.cpp` | 64 x 64 copies on Chateau 50 -> 8 (texture memory 81 -> 88 MB) |
+
+All of it is Uncharted 3 only (`!g_u2`). The stage rows' hashes were recorded again with `u3fix.exe levels <family>
+--apply --rehash`; a player's update rebuilds only the level paks whose hash changed.

@@ -51,7 +51,9 @@ The driver is C++ (`u3mp/patcher/importer`: `recipe.cpp`, the former `rebuild_ov
 launcher's import (`u3import.exe` without `--recipe`) runs the same recipe after the multiplayer image. Every script
 step runs `u3fix.exe` (next to `u3import.exe`); no step needs Python.
 
-Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the fix steps replaced),
+Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the DC fix steps replaced and read back; the
+level and actor converters keep no backup since 1.32.7 and remove the 5+ GB `backup-pak23-levels` / `backup-actor33` of
+older imports, and they drop the PS3 paks they unpacked into `scratch` when they finish),
 `<out>/scratch/<job>` (rendered job folders), `<out>/_recipe/state.json` + `log.txt`. Re-running on the
 same `--out` skips steps whose recorded outputs are unchanged and steps whose files already equal
 the reference manifest, so updates are incremental. ffmpeg for the steps that say so (`--list`, `needs`).
@@ -63,7 +65,15 @@ A step runs again only when something it uses changed (its fingerprint, recorded
   into u3fix.exe a hash of exactly the compiled objects that step runs (the object defining its function and every
   object it needs, found through the symbols), so a change in another step's code, or a comment, reruns nothing;
 * `inputs`: `"fingerprint_inputs"` (1.28.0: `netgame-order-119` and `booster-table` follow the server's
-  net18.bin), the whole PS3 game data (DATA2) for steps that need it, and the paks a higher overlay hides.
+  net18.bin), the whole PS3 game data (DATA2) for steps that need it, and the paks a higher overlay hides;
+* `dlc`: the DLC map packs found (which of dlc-map1..4, and whether the GOTY disc has them), for steps with
+  `"uses_dlc": true` and copy steps whose list reads DLC data. A pack added to the RPCS3 folder later reruns only these
+  steps; the other steps stay as they are. A record without this part gets it filled in without a rerun.
+
+Converter changes (actor and level steps): `jobs.tsv` / `plan.tsv` hold the hash of every built pak, so a converter
+change that alters a pak also needs its new hash recorded: `u3fix.exe actors --apply --rehash ...` builds every row
+again and writes the new hashes into `jobs.tsv` (run it without `RECIPE_SHADOWED`, so the hidden rows are recorded too).
+Only the paks whose hash changed are rebuilt on the players' update.
 
 Later steps edit files earlier steps made (net.bin, level and actor paks): a file counts as unchanged when it has the
 hash the last step writing it recorded. A step that runs again first gets fresh copies of its files: the first step

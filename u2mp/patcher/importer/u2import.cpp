@@ -163,7 +163,7 @@ namespace {
 
 const char *CONV_VERSION = "5";        // bump when a converter changes its output: those files are converted again
 const char *SKIN_VERSION = "twin3";    // mp-hero skins: PS4-twin build first, re-textured materials kept from PS3; older builds are redone
-const char *ACTOR_VERSION = "u2ag3";   // actor27 paks: U2 artgroup / lookup / LEVEL_PATS layout, props, anims; same-object template materials
+const char *ACTOR_VERSION = "u2ag4";   // actor27 paks: U2 artgroup / lookup / LEVEL_PATS layout, props, anims; same-object template materials; ag4: retail textures by path
 // PS3 speech language -> PS4 speech archive (<name>_ps4.psarc). NPUA80698 is the North American release: its Spanish /
 // Portuguese tracks are taken as the Latin American Spanish / Brazilian Portuguese the PS4 game has.
 const std::map<std::string, std::string> SPEECH_LANGS = {{"english", "english"}, {"french", "french"}, {"spanish", "sam-spanish"}, {"portuguese", "brazilian"}};
@@ -1140,6 +1140,9 @@ void Importer::step_items() {
     write_text(work / "level-txt.json", dumps(lt));
     save();
     sha1_memo_save(work);
+    // The PS3 level and actor paks copied to work/src for their conversions (about 1 GB) are only this step's working
+    // files: a later run copies the ones it converts again (src_file), so they are not left in the import folder.
+    if (fs::is_directory(work / "src", ec)) rmtree(work / "src");
 }
 
 namespace {

@@ -898,6 +898,24 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
         const Bytes d = desc_bytes(hsh, 2, fmt4, 0x060f0000, t.mips, t.width, t.height, flag);
         return add_texture_desc(path_ndb, d, *out, gtex_bytes(hsh, 0x100, fmt4 == 0x48 ? 4 : 5));
     };
+    // U3: a PS3 '-detail' (grime / streak) map is stored as the PS3 programs read it: sRGB when one of them decodes it on
+    // the read (gamma bits 20-22 of its texture reference: 74 of Ruins' 75 reads, 79 of Museum's 81), linear when every
+    // read is without decode. File names say nothing about it: the spec maps are mostly read linear (Facility 64 of 64)
+    std::optional<std::set<std::string>> detail_lin;   // file names ('x-detail.tga') read linear only
+    auto linear_detail = [&](const std::string &shrt) {
+        if (!detail_lin) {
+            detail_lin.emplace();
+            fp::Ps3Programs P3(p);
+            fp::texture_coords(P3, "");   // builds the reference table of every material
+            std::map<std::string, bool> gam;
+            if (P3.table)
+                for (const auto &[nm, t] : *P3.table)
+                    for (const auto &r : t.second) gam[r.shrt] = gam[r.shrt] || ((r.fl[2] >> 20) & 7) != 0;
+            for (const auto &[s, g] : gam)
+                if (!g) detail_lin->insert(s);
+        }
+        return detail_lin->count(shrt.substr(shrt.rfind('/') == std::string::npos ? 0 : shrt.rfind('/') + 1)) != 0;
+    };
     auto convert_ps3_texture = [&](const PakTexture &t, const std::string &path_ndb, const std::string &shrt, uint32_t flag,
                                    std::optional<bool> srgb, bool invert = false) -> TexP {
         const auto fmt3 = tc::ps3_format(t);
@@ -944,7 +962,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 const auto xr = xrole(shrt);
                 if (xr == "height" || xr == "inc" || xr == "blend") role8 = "mask";
             }
-            const bool sr8 = srgb ? *srgb : (role8 == "color" || role8 == "spec" || role8 == "detail");
+            const bool sr8 = srgb ? *srgb : (role8 == "color" || (role8 == "spec" && g_u2) || (role8 == "detail" && (g_u2 || !opt.fixes || !linear_detail(shrt))));   // spec: linear (below)
             const uint32_t fmt8 = sr8 ? 0x5b : 0x57;   // B8G8R8A8_UNORM_SRGB / _UNORM
             const uint32_t hsh = sidu(after_prefix(path_ndb));
             const Bytes d = desc_bytes(hsh, 1, fmt8, sr8 ? 0x010f0000 : 0x01000000, uint32_t(lv.size()), w_, h_, flag);
@@ -984,7 +1002,11 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
             const auto xr = xrole(shrt);
             if (xr == "height" || xr == "inc" || xr == "blend") role = "mask";
         }
-        const bool sr = srgb ? *srgb : (role == "color" || role == "spec" || role == "detail");
+        // Specular maps are linear, as retail PS4 keeps them (293 of 316 retail '-spec-mask' maps, 61 of 82 '-spec'; they
+        // are bound in Mask slots, all linear in retail): read as sRGB a mask of 137/255 gave 25 % instead of 54 %, and
+        // every specular surface came out duller than on PS3. U3 only: the Uncharted 2 levels keep their conversion.
+        const bool spec_linear = !g_u2 && (role == "spec" || (role == "detail" && opt.fixes && linear_detail(shrt)));   // (and a '-detail' map PS3 reads linear: above)
+        const bool sr = srgb ? *srgb : ((role == "color" || role == "spec" || role == "detail") && !spec_linear);
         uint32_t fmt4;
         if (kind == "DXT1") fmt4 = sr ? 0x48 : 0x47;
         else if (kind == "DXT5") fmt4 = sr ? 0x4e : 0x4d;
@@ -1025,10 +1047,15 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
             // a retail level pak's copy of a texture the game streams is only its small resident copy (64x64): the PS3
             // level has the texture at full size, so the full size from the PS4 texture dictionary (up to the PS3 size),
             // else the PS3 texture itself. Desert drew 139 of its 143 textures from 64x64 copies.
-            if (const PakTexture *t3 = d0.size() >= 0x30 ? ps3tex_get(t->shrt) : nullptr;
-                t3 && t3->type != 2 && uint64_t(t3->width) * t3->height > uint64_t(rd32le(d0, 0x28)) * rd32le(d0, 0x2c) &&
+            const PakTexture *t3 = d0.size() >= 0x30 ? ps3tex_get(t->shrt) : nullptr;
+            if (t3 && t3->type != 2 && uint64_t(t3->width) * t3->height > uint64_t(rd32le(d0, 0x28)) * rd32le(d0, 0x2c) &&
                 !dict_texture(opt.pak_dir, t->path, t3->width, t3->height, d0, t0))
                 if (TexP e = convert_ps3_texture(*t3, t->path, t->shrt, 3, std::nullopt)) return e;
+            // U3: a retail donor texture the PS3 level lacks (a template's own map: Chateau's cha-moss-blend,
+            // cha-wood-panel-spec-mask) gets its full size from the dictionary as well, its top mips above 512 x 512 left
+            // out: the size of the PS3 level's own textures around it (Chateau's are 512 / 256; at the dictionary's 1024
+            // its texture VRAM grew by a third). Chateau kept 50 of them as 64x64 resident copies
+            if (!t3 && opt.fixes && !g_u2 && d0.size() >= 0x30) dict_texture(opt.pak_dir, t->path, 512, 512, d0, t0);
             cap_raw_texture(d0, t0, dsc, txl);
             std::optional<Bytes> g;
             if (auto gi = R.gtex.find(full); gi != R.gtex.end() && !gi->second.empty()) g = gi->second;
@@ -1283,7 +1310,24 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 const uint32_t hsh_ = sidu(after_prefix(pg_));
                 return add_texture_desc(pg_, desc_bytes(hsh_, 1, 0x47, 0x01000000, mp_, w_, h_, 3), tl_, gtex_bytes(hsh_, 0x400, 4));
             };
-            for (const MatBind &b : rec0.binds) {
+            // U3: a template layer whose feature reads a texture its retail material binds none for (NORMAL_d_USE_NORMAL_MAP
+            // without g_tNdFetchNormal<d>Map, COLOR_d_APPLY_COLOR_MAP / _APPLY_MASK_TEXTURE without Color<d> / Mask<d>: 15 of
+            // Facility's 47 normal-2 templates, e.g. syria-waterlock-metal-01) gets that slot, filled by the role rules
+            // below from the PS3 material's textures of that role (the second normal map for normal 2); only when the PS3
+            // material has one, else it stays as retail draws it. Not for texture twins: retail's own authored material
+            std::vector<MatBind> tbinds = rec0.binds;
+            if (opt.fixes && !g_u2 && !pe->twin && rec0.shader == "prime-shader.fx")
+                for (const std::string &f : rec0.feats) {
+                    std::string slot, r;
+                    if (f.size() == 23 && starts_with(f, "NORMAL_") && ends_with(f, "_USE_NORMAL_MAP")) slot = "Normal", r = "normal";
+                    else if (f.size() == 23 && starts_with(f, "COLOR_") && ends_with(f, "_APPLY_COLOR_MAP")) slot = "Color", r = "color";
+                    else if (f.size() == 26 && starts_with(f, "COLOR_") && ends_with(f, "_APPLY_MASK_TEXTURE")) slot = "Mask", r = "mask";
+                    const char d = slot.empty() ? '\0' : f[slot == "Normal" ? 7 : 6];
+                    if (d < '1' || d > '9' || !own_get(r)) continue;
+                    const std::string prm = "g_tNdFetch" + slot + std::string(1, d) + "Map";
+                    if (std::none_of(tbinds.begin(), tbinds.end(), [&](const MatBind &x) { return x.param == prm; })) tbinds.push_back({prm, "", ""});
+                }
+            for (const MatBind &b : tbinds) {
                 auto role = param_role(b.param);
                 if (role == "spec") role = "mask";
                 bool detail_layer = false;
@@ -1348,11 +1392,13 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 }
                 // a detail-normal slot without a PS3 '-detail' map takes the PS3 material's second normal map (the scrolled
                 // rain-drip / ripple normals of wet walls and floors), which the role rule would leave unbound
+                // (U3: a PS3 '-detail' map is never a detail normal but a grime / streak mask, bound in the template's
+                // '-detail' colour-layer mask above: a detail-normal slot takes the second normal, else what is below)
                 static const std::regex DETAILN(R"(^g_tNdFetchDetail\dMap$)");
-                if (opt.fixes && !e && role == "detail" && std::regex_search(b.param, DETAILN) && !own_get("detail") &&
-                    own_get("normal") && own_get("normal")->size() >= 2)
+                const bool detail_normal = role == "detail" && std::regex_search(b.param, DETAILN);
+                if (opt.fixes && !e && detail_normal && (!g_u2 || !own_get("detail")) && own_get("normal") && own_get("normal")->size() >= 2)
                     e = texture_for_short((*own_get("normal"))[1]);
-                if (!e && role && own_get(*role) && *role != "lightmap") {
+                if (!e && role && own_get(*role) && *role != "lightmap" && !(opt.fixes && !g_u2 && detail_normal)) {
                     const size_t k = used_role[*role]++;
                     const auto &v = *own_get(*role);
                     e = texture_for_short(v[std::min(k, v.size() - 1)]);

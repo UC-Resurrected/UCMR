@@ -2,6 +2,7 @@
  "id": "convert-levels-port",
  "title": "overlay-port: 160 level paks (first PS3->PS4 conversion pass, 2026-10-26) rebuilt per plan.tsv (u3fix.exe levels port, pak23-levels/levels.cpp; the latest converter)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "pak23-levels",
  "with_jobs": [
   "dctools"
@@ -36,8 +37,7 @@
   ]
  ],
  "writes": [
-  "work/overlay-port/u3data/build/main/pak23/ps4/*.pak",
-  "work/backup-pak23-levels/overlay-port/*.pak"
+  "work/overlay-port/u3data/build/main/pak23/ps4/*.pak"
  ],
  "must_write": false,
  "reference_check": false,

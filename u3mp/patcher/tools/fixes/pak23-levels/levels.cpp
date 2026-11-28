@@ -6,8 +6,8 @@
 // A plan row names the level, its method, options, the PS3 source (archive + pak) and the sha256 the result must have.
 // A file already equal to that sha256 is skipped. A row that is not 'identical' never replaces an existing file, except a
 // 'base' row whose file is neither its own result nor the finished reference (an older plan's build). An 'identical'
-// row whose build differs is reported and not installed. Replaced files are backed up once to
-// work/backup-pak23-levels/<overlay>/. Rows hidden by a higher overlay ($RECIPE_SHADOWED) are not built.
+// row whose build differs is reported and not installed. Replaced files are not backed up (an older import's
+// work/backup-pak23-levels/ is removed). Rows hidden by a higher overlay ($RECIPE_SHADOWED) are not built.
 // The PS3 sources: ps3idx.tsv (every pak23 level pak of the player's PS3 archives, in source priority) and one extract
 // per row (a GOTY disc stands in for the DLC map packs); both caches are dropped when the PS3 inputs change.
 // In C++: empty (dctools/ps4writer.cpp), ingame (dctools/ps4ingame.cpp), vischeat, windoff, hud (dctools/texcodec.cpp),
@@ -444,11 +444,11 @@ int levels(const std::vector<std::string> &argv) {
     for (size_t i = 0; i < argv.size(); i++) {
         if (argv[i].rfind("--", 0) == 0) {
             opts.push_back(argv[i]);
-            if (argv[i] != "--apply" && argv[i] != "--strict" && argv[i] != "--keep-work" && i + 1 < argv.size()) opts.push_back(argv[++i]);
+            if (argv[i] != "--apply" && argv[i] != "--strict" && argv[i] != "--keep-work" && argv[i] != "--rehash" && i + 1 < argv.size()) opts.push_back(argv[++i]);
         } else if (family.empty()) family = argv[i];
         else throw Stop("unexpected argument " + argv[i]);
     }
-    const Args a(opts, {"--apply", "--strict", "--keep-work"},
+    const Args a(opts, {"--apply", "--strict", "--keep-work", "--rehash"},
                  {"--project", "--job", "--ps4", "--ps3-disc", "--ps3-update", "--ps3-data2", "--ps3-dlcmaps", "--only", "--jobs", "--cache-mb"});
     if (family.empty()) throw Stop("missing family");
     if (family != "port" && family != "r2" && family != "r3") throw Stop("family " + family + " is not supported (lab and maps-batch are retired)");
@@ -460,6 +460,10 @@ int levels(const std::vector<std::string> &argv) {
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int jobs = a.val.count("--jobs") ? std::stoi(a.get("--jobs", "1")) : (lj && *lj ? std::atoi(lj) : int(hw));
     const bool apply = a.has("--apply"), strict = a.has("--strict");
+    // --rehash (maintainers, after a converter change): every 'identical' row is built again, installed whatever its hash,
+    // and its new hash written into plan.tsv; the players' update then rebuilds only the rows whose hash changed
+    const bool rehash = a.has("--rehash");
+    std::map<std::string, std::string> new_sha;   // overlay TAB name -> built hash
 
     std::vector<Row> rows;
     const std::regex only(a.get("--only", ""));
@@ -496,7 +500,7 @@ int levels(const std::vector<std::string> &argv) {
         r["dst"] = utf8(dst);
         const bool exists = fs::exists(dst);
         const std::string h = exists ? sha_file(dst) : "";
-        if (exists && plan_sha(r, h)) { done++; continue; }
+        if (exists && plan_sha(r, h) && !(rehash && r.at("status") == "identical")) { done++; continue; }
         auto rf = ref.find({r.at("overlay"), r.at("name")});
         if (r.at("status") == "base" && !strict && exists && rf != ref.end() && h != rf->second) {
             r["replace"] = "1";   // an earlier import's build of an older plan row: build it again so the later steps apply
@@ -689,7 +693,12 @@ int levels(const std::vector<std::string> &argv) {
                 continue;
             }
             const std::string &h = hashes[i];
-            const bool same = plan_sha(r, h);
+            if (rehash && r.at("status") == "identical") {
+                if (h != r.at("sha256"))
+                    std::printf("rehash %s/%s %s -> %s\n", r.at("overlay").c_str(), r.at("name").c_str(), r.at("sha256").substr(0, 12).c_str(), h.substr(0, 12).c_str());
+                new_sha[r.at("overlay") + "\t" + r.at("name")] = h;
+            }
+            const bool same = plan_sha(r, h) || (rehash && r.at("status") == "identical");
             if (!same && r.at("status") == "identical") {
                 std::printf("MISMATCH %s/%s: built %s, plan %s (not installed)\n", r.at("overlay").c_str(), r.at("name").c_str(), h.substr(0, 12).c_str(), r.at("sha256").substr(0, 12).c_str());
                 bad++;
@@ -704,13 +713,6 @@ int levels(const std::vector<std::string> &argv) {
             report.items.push_back(e);
             if (apply) {
                 const fs::path dst = upath(r.at("dst"));
-                if (fs::exists(dst) && !r.count("replace")) {   // a replaced earlier build needs no backup
-                    const fs::path bk = work / "backup-pak23-levels" / upath(r.at("overlay")) / upath(r.at("name") + ".pak");
-                    if (!fs::exists(bk)) {
-                        fs::create_directories(bk.parent_path());
-                        copy2(dst, bk);
-                    }
-                }
                 fs::create_directories(dst.parent_path());
                 write_file_replace(dst, data);
                 std::printf("installed %s/%s: %s\n", r.at("overlay").c_str(), r.at("name").c_str(), tag.c_str());
@@ -748,12 +750,53 @@ int levels(const std::vector<std::string> &argv) {
         std::printf("%s: %zu batches: workers busy %.0f%% of %.0f s, reads waited for %.0f s, writes %.0f s\n", family.c_str(), nbatches,
                     batch_secs > 0 ? 100.0 * busy / (batch_secs * std::max(1, jobs)) : 0.0, batch_secs, pf_wait, write_secs);
     write_text(g_tmp / ("report-" + family + ".json"), json_dump_indent1(report));
+    if (rehash && !new_sha.empty()) {   // column 9 (sha256) of the rebuilt rows; the rest of the file as it was
+        const fs::path pf = upath(g_here + "/plan.tsv");
+        const std::string t = text_file(pf);
+        std::string o;
+        size_t n = 0;
+        for (size_t a0 = 0; a0 < t.size();) {
+            size_t e = t.find('\n', a0);
+            if (e == std::string::npos) e = t.size();
+            std::string l = t.substr(a0, e - a0);
+            const bool cr = !l.empty() && l.back() == '\r';
+            if (cr) l.pop_back();
+            if (!l.empty() && l[0] != '#') {
+                std::vector<std::string> f;
+                for (size_t b = 0;;) {
+                    const size_t c = l.find('\t', b);
+                    f.push_back(l.substr(b, c == std::string::npos ? std::string::npos : c - b));
+                    if (c == std::string::npos) break;
+                    b = c + 1;
+                }
+                if (f.size() > 9)
+                    if (auto it = new_sha.find(f[1] + "\t" + f[2]); it != new_sha.end() && f[8] != it->second) {
+                        f[8] = it->second;
+                        l.clear();
+                        for (size_t i = 0; i < f.size(); i++) l += (i ? "\t" : "") + f[i];
+                        n++;
+                    }
+            }
+            o += l + (cr ? "\r" : "") + (e < t.size() ? "\n" : "");
+            a0 = e + 1;
+        }
+        write_text(pf, o);
+        std::printf("rehash: %zu row(s) of %s updated\n", n, utf8(pf).c_str());
+    }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("%s: %zu built, %d failed/mismatched, %.0f s\n", family.c_str(), todo.size() - size_t(bad), bad, secs);
     if (!a.has("--keep-work")) {
         std::error_code ec;
         fs::remove_all(g_tmp / "out", ec);
+        // the PS3 level paks unpacked for this family (plain files; about 100 MB): a later run unpacks what it builds
+        // again from the PS3 archives, so they are not left in the import folder (the retail survey res/ stays)
+        fs::remove_all(g_tmp / "ps3", ec);
     }
+    // older imports kept a copy of every level pak a rebuild replaced (several GB): only an older converter's output,
+    // which any run rebuilds from the player's own PS3 / PS4 files, so nothing reads it
+    if (apply)
+        if (const uint64_t freed = drop_backup_folder(work / "backup-pak23-levels"))
+            std::printf("removed the old level pak backups (%.0f MB)\n", double(freed) / (1 << 20));
     return bad ? 1 : 0;
 }
 

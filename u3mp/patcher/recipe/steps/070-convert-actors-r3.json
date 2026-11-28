@@ -2,6 +2,7 @@
  "id": "convert-actors-r3",
  "title": "Converted actor paks of overlay-port / -r2 / -r3 / -mp + overlay-mp net.pak, rebuilt with the latest converter (u3fix.exe actors, actor33/build_actors.cpp, jobs.tsv)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "actor33",
  "with_jobs": [
   "dctools"

@@ -2,6 +2,7 @@
  "id": "world-levels",
  "title": "World levels of every net.bin map registered in overlay-r3 pak23_ps4.txt (u3fix.exe world-levels, world-levels/world_levels.cpp)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "world-levels",
  "with_jobs": [
   "dctools"
