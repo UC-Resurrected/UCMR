@@ -11,10 +11,12 @@
 <p align="center">
   <a href="../../releases/latest/download/UCMR_windows.zip"><img src="https://img.shields.io/badge/%E2%AC%87%20DOWNLOAD-%20Windows-2ea44f?style=for-the-badge"></a>
   &nbsp;
+  <a href="../../releases/latest/download/UCMR_linux.tar.gz"><img src="https://img.shields.io/badge/%E2%AC%87%20DOWNLOAD-%20Linux-2ea44f?style=for-the-badge"></a>
+  &nbsp;
   <a href="https://discord.com/invite/T545xWcpSw"><img src="https://img.shields.io/badge/JOIN-DISCORD-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
-A free, **NON-COMMERCIAL** fan project that aims to run PS4 *Uncharted: The Nathan Drake Collection* natively on Windows, using your own copy. Includes *Drake's Fortune*, *Among Thieves* and *Drake's Deception*, plus **Uncharted 2 & Uncharted 3 multiplayer restoration**.
+A free, **NON-COMMERCIAL** fan project that aims to run PS4 *Uncharted: The Nathan Drake Collection* natively on Windows & Linux, using your own copy. Includes *Drake's Fortune*, *Among Thieves* and *Drake's Deception*, plus **Among Thieves & Drake's Deception multiplayer restoration**.
 
 The games' x86-64 code runs directly on your PC, with a runtime for PS4 system libraries and a Vulkan renderer.
 
@@ -28,7 +30,7 @@ The games' x86-64 code runs directly on your PC, with a runtime for PS4 system l
 
 ## Requirements
 
-- **OS:** Windows 10 or 11, 64-bit.
+- **OS:** Windows 10 or 11, 64-bit, and Linux.
 - **RAM:** About 6 GB free; 16 GB installed recommended.
 - **CPU:** Intel Core 4th generation (Haswell) or newer, or any AMD Ryzen.
 - **CPU features:** AVX, F16C, BMI1, MOVBE and LZCNT.
@@ -39,7 +41,7 @@ Four CPU cores can hold 60 FPS in Drake's Fortune and Uncharted 3. On Ryzen 7000
 
 ## Install and update
 
-1. Download **UCMR_windows.zip** from [Releases](../../releases/latest/download/UCMR_windows.zip) and extract it.
+1. Download **[Windows](../../releases/latest/download/UCMR_windows.zip)** or **[Linux](../../releases/latest/download/UCMR_linux.tar.gz)** from [Releases](../../releases/) and extract it.
 2. Open **UCMR_Launcher.exe** and select your dumped `CUSA02344` folder containing `eboot.bin` and `sce_sys`.
 3. Add update **1.02** through **SETUP → step 2**, or place it beside the game as `CUSA02344-patch`.
 4. Choose a game and preset, then press **PLAY**. First launch compiles shaders, so loading and stutter are expected.
@@ -96,7 +98,7 @@ Comment on an issue and wait for a reply before starting. Submit one small fix p
 - [**Johnny**](https://github.com/fidalgojoao): launcher, Uncharted 2 and 3 multiplayer restoration, pak tools.
 - [**Tha14**](https://github.com/Tha14): launcher, Uncharted 2 and 3 multiplayer.
 - [**33martyr**](https://github.com/33martyr): Uncharted 3 multiplayer map and character visual fixes.
-- [**BilalReloaded**](https://github.com/bc160201983): the [original PC port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port), whose PC runtime (`gow3_pc`) this project started from.
+- [**BilalReloaded**](https://github.com/bc160201983): the [original PC port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port), whose PC runtime (`gow3_pc`) this project started from. The launcher and runtime has been rewritten before the first release on this repository,
 - **Runtime base:** [gow3_pc](https://github.com/FelipePrado0/gow3_pc) and the [shadPS4](https://github.com/shadps4-emu/shadPS4) video core.
 - **Online:** [RPCN](https://github.com/RipleyTom/rpcn) by RipleyTom and [RPCS3](https://github.com/RPCS3/rpcs3); this project is independent and not endorsed by either.
 - **Anti-aliasing:** camera motion follows [SuperMedo's Uncharted port](https://github.com/Supermedo/uncharted_pc) (GPL v2).
