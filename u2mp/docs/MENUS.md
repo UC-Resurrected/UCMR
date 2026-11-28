@@ -176,6 +176,14 @@ intact; their data is NetPlayerData (now loaded and saved). Restored texts: NET_
 not available on PC (remaining.cpp). Boosters and Hero / Villain are kind-8 carousels, Co-op Difficulty, Taunt and
 Matchmaking kind-13 drop-downs: no "<>" beside a focused closed carousel in multiplayer (3.2).
 
+Co-op difficulty, Hard from the start (owner request 2026-11-28): the Profile list (cond 80, query `0x65a1e0`) and the
+custom lobby row (cond 65, `0x6576d0`) end at max(highest co-op win + 1, 2, floor) (1 Easy .. 4 Crushing; the highest
+win is NetPlayerData `+0x120`, saved with the career), so a new career had Easy and Normal until a co-op win on
+Normal. The floor is a u32 at `0x104f4b0 + 0x74` that the game never writes and only these two queries read; menus.cpp
+`unlock_coop_hard` sets it to 3 (both readers checked first; `UNCHARTED_U2MP_COOP_HARD=0` leaves it). Crushing still
+needs a co-op win on Hard; the career is not changed. Matchmaking already takes the Profile choice (`+0x124`) as it
+is, and guests follow the host. Not verified in the game.
+
 Boosters greyed out in a co-op custom game (owner report 2026-11-27): PS3 does the same. The booster list query (PS3
 `0x4be788`, PS4 `0x659bd0`) answers op 7 (enabled) with 0 when the lobby's current net game is a co-op type (PS3
 `0x4a0bcc`: game type 4, 8, 9 or 12; PS4 inlines the same test) and the page under the Profile is PAGE_LOBBY in
