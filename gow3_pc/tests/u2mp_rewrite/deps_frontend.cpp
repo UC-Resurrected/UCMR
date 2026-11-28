@@ -102,11 +102,13 @@ void hide_for_start(bool on) { hx::rec("hide_for_start %d", on); }
 }  // namespace online
 
 #if !defined(u2mp)
-// New-only (475fba8 / parity F): menus.cpp's playlist index, the session's party leave and team balance, voice J3.
+// New-only (475fba8 / parity F): menus.cpp's playlist index, the session's party leave, voice J3.
 int32_t playlist_index(uint32_t) { return hx::fe::s.playlist_index; }
 namespace session {
 void leave_party() { hx::rec("session::leave_party"); }
-int mm_balance_slot() { return hx::fe::s.balance_slot; }
+// #63: a map pack map only when every member loads the same map; the scenarios have no map packs (every map is the
+// same for all), so the vote pool stays the old one
+bool net_game_same_map(int32_t) { return true; }
 }  // namespace session
 namespace voice {
 void unmute_strangers() { hx::rec("voice::unmute_strangers"); }

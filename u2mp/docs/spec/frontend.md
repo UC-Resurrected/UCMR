@@ -150,7 +150,7 @@ Declared in `frontend3.h`, namespace `u2mp::matchmaking`:
 
 Also used (2026-11-25, spec parity-f 7): `online::mm_begin(playlist, index, MmCriteria)`, `mm_create()`,
 `mm_pending_members()`, `party_missing()`, `host_in_party()`, `party_member()`, `own_party_id()`, `match_room()`,
-`mm_host_gone(why, bad)`, `mm_leave_to_leader()`, `active()`; `session::mm_balance_slot()`, `session::leave_party()`.
+`mm_host_gone(why, bad)`, `mm_leave_to_leader()`, `active()`; `session::leave_party()`.
 
 Declared in `u2mp_internal.h`: `void install_frontend3(int &installed);`.
 
@@ -253,7 +253,6 @@ Times (clock ticks, 300 per second):
 | tip period | 2400 | 8 s |
 | online gather reference | 2400 | 8 s after the room was made (PS3 0x4b0a58 state 16), never restarted |
 | online gather wait by N other players | 300 x {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0}[N] | PS3 timing data 0xb40710 |
-| balance kick quiet | 1500 | 5 s without a gather decision after a balance kick |
 | party back wait | 3000 | a leader waits up to 10 s for its party to come back before searching |
 | leader leave delay | 90 | 0.3 s between telling the party (0x19) and leaving a stranger's room |
 | criteria pause | 300 + rand() % 601 | random 1..3 s between two search passes |
@@ -279,7 +278,7 @@ Session messages (type byte first; multi-byte fields little-endian, unaligned):
 | 0x15 | leave | none | anyone (a member's leave is only logged by the host) |
 | 0x16 | leader back | none | host -> all |
 | 0x17 | starting | none (frontend6) | host -> all |
-| 0x18 | balance kick | none | host -> one stranger (F6: removed to balance the teams) |
+| 0x18 | balance kick | none | host -> one stranger (F6: removed to balance the teams); sent only by hosts of 0.10.173 and earlier, still obeyed |
 | 0x19 | party leave | u64 party room id (9 bytes total) | a party leader in a stranger's room -> host; the host relays it to every other slot (PS3 0x108) |
 
 ### 3.4 Behaviour
@@ -450,10 +449,9 @@ In this order:
       - Online room set (PS3 state 16): N = `session::member_count()` - 1 (0..10); due = gather reference +
         300 x wait[N] (3.3). When N differs from the gather count logged: log `matchmaking: %d other player(s)
         connected: Game starting in %d seconds` (whole seconds left, 0 when past) and remember N. Nothing before
-        due, before the quiet-until time, or while `online::mm_pending_members()` > 0 (an open reservation). Then,
-        when N + 1 >= the minimum (3.3): if N is odd and the playlist is not co-op only, `session::mm_balance_slot()`;
-        a slot > 0: log `matchmaking: %d players for a team playlist: slot %d came alone, removed to balance the
-        teams`, send(slot, [0x18]), quiet-until = clock + 1500, stop; otherwise start the vote. Below the minimum:
+        due, or while `online::mm_pending_members()` > 0 (an open reservation). Then, when N + 1 >= the minimum
+        (3.3): start the vote, with any count, an odd one in a team playlist included (owner's rule, 2026-11-28: the
+        minimum is 2, everyone who joined plays; PS3's team balance kick F6 is not done). Below the minimum:
         log `matchmaking: time out %d players: leaving the room, searching again`; `online::mm_research()`; online
         room = false; gather reference = 0; pass = 0; retry time = clock; NET_SM = 19.
       - No online room (LAN, no strangers can come): ready = number of set bits; waited = clock - gather start. On

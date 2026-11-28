@@ -2774,36 +2774,6 @@ std::vector<MmEntry> mm_list() {
     return list;
 }
 
-// Team balance before the vote (PS3 0x4b0a58 state 16, order 0x4af524): the players of the slot list sorted by how
-// many listed players share their party id (ascending), then party id, then list position; the last one is kicked
-// only when it came alone. -1: nobody (the last one is part of a party, or it is this PC).
-int balance_kick_slot() {
-    struct Row {
-        int share;
-        uint64_t party;
-        int position;
-        int slot;
-    };
-    const std::vector<MmEntry> list = mm_list();
-    std::vector<Row> rows;
-    for (size_t i = 0; i < list.size(); ++i) {
-        const MmEntry &e = list[i];
-        if (e.kind == kOpenSlot || e.slot < 0) continue;
-        int share = 0;
-        for (const MmEntry &o : list) share += e.party && o.kind != kOpenSlot && o.party == e.party;
-        rows.push_back(Row{e.party ? share : 1, e.party, int(i), e.slot});
-    }
-    if (rows.empty()) return -1;
-    std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
-        if (a.share != b.share) return a.share < b.share;
-        if (a.party != b.party) return a.party < b.party;
-        return a.position < b.position;
-    });
-    const Row &last = rows.back();
-    if (last.share != 1 || last.slot == 0 || members[last.slot].net_id == my_id) return -1;
-    return last.slot;
-}
-
 // The five party group colours (PS3 data, spec 11.3), by the party's position among the shared party ids.
 constexpr uint32_t kPartyColours[5] = {0x1020E0E0u, 0x102000E0u, 0x10E000E0u, 0x1020E000u, 0x10E02000u};
 
@@ -3234,7 +3204,6 @@ bool party_member(uint32_t net_id) {
     return it != npids.end() && online::in_own_party(it->second);
 }
 
-int mm_balance_slot() { return active && hosting ? balance_kick_slot() : -1; }
 
 void leave_party() {
     if (!active || hosting) return;
