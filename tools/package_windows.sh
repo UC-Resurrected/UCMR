@@ -160,7 +160,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
     local dir=$obj/u3fix s o objs=()
     mkdir -p "$dir"
     : > "$dir/objects.txt"
-    for s in "$fx/dctools/u3fix.cpp" "$fx/dctools/fixlib.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
+    for s in "$fx/dctools/u3fix.cpp" "$fx/dctools/fixlib.cpp" "$fx/dctools/backup_folder.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
         "$fx/no-rpcn-menu/remove_rpcn_page.cpp" "$fx/netgame-order/netgame_order.cpp" \
         "$fx/enemy-stall/apply_ss_option_defaults.cpp" \
         "$fx/coop-chars/apply_coop_desc_fix.cpp" "$fx/airport-igc3/airport_igc3.cpp" \

@@ -9,7 +9,7 @@ the latest converter).
 | file | what |
 |---|---|
 | `plan.tsv` | one row per level pak: method, options (`mb` = map-build fix passes), PS3 source archive / pak, sha256 of the latest converter's build |
-| `levels.cpp` | the driver: skip a file already at its sha256, build the rest, install only a matching build, back up a replaced file to `work/backup-pak23-levels/` |
+| `levels.cpp` | the driver: skip a file already at its sha256, build the rest, install only a matching build (no backup of the replaced file; an older import's `work/backup-pak23-levels/` is removed) |
 | `data/conv_anim_actors.json` | actor names the converter treats as animated |
 | `data/water_templates.json` | the retail water.fx templates the sky planner scores PS3 water materials against |
 | `data/overrides/overlay-r3/coop-syria-area1.json`, `-area2.json` | `gobo`: the projector-light gobo textures taken from the retail PS4 syria paks |
