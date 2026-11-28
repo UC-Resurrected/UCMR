@@ -250,6 +250,7 @@ Bytes build(const Job &r) {
         kw.max_tex = std::stoi(r.at("cap"));
         actor::Options o;
         o.texdict = texdict();
+        o.retail_textures = upath(ret());
         o.am = true;
         o.mat_choice = actor::am_choice(p3, tpl, md != "retail-mats", md == "tint");
         return actor::cb3fix(stage::cubefix_pak(actor::convert(p3, tpl, kw, o), p3));
@@ -281,6 +282,7 @@ Bytes build(const Job &r) {
         // (the cap only applies to textures a retail dictionary streams: o.texdict)
         kw.max_tex = std::stoi(r.at("cap"));
         o.texdict = texdict();
+        o.retail_textures = upath(ret());
         const std::string &es = r.at("env");
         if (es != "" && es != "-" && es != "{}") {
             json::Value e;
@@ -408,7 +410,7 @@ int setup(const Args &a) {
 }  // namespace
 
 int actors(const std::vector<std::string> &argv) {
-    const Args a(argv, {"--apply", "--allow-equivalent"},
+    const Args a(argv, {"--apply", "--allow-equivalent", "--rehash"},
                  {"--project", "--job", "--ps4", "--ps3-disc", "--ps3-update", "--ps3-data2", "--overlays", "--only", "--jobs", "--cache-mb"});
     const int jobs = setup(a);
     const fs::path work = upath(a.need("--project")) / "work";
@@ -460,6 +462,7 @@ int actors(const std::vector<std::string> &argv) {
     std::fflush(stdout);
     const auto t0 = std::chrono::steady_clock::now();
     int same = 0, installed = 0, built_diff = 0, fail = 0, skipped = 0;
+    std::map<std::string, std::string> rehash;   // overlay TAB name -> the sha256 built (maintainer option --rehash)
     struct Todo {
         Job r;
         fs::path dst;
@@ -467,7 +470,8 @@ int actors(const std::vector<std::string> &argv) {
     std::vector<Todo> todo;
     for (const Job &r : rows) {
         const fs::path dst = work / upath(r.at("overlay")) / "u3data" / "build" / "main" / (r.at("method") == "convert_net" ? "pak23" : "actor33") / "ps4" / upath(r.at("name"));
-        if (fs::exists(dst) && sha_file(dst) == r.at("sha256")) { same++; continue; }
+        // (--rehash: every row is built again, a file matching the recorded hash may come from an older converter)
+        if (!a.has("--rehash") && fs::exists(dst) && sha_file(dst) == r.at("sha256")) { same++; continue; }
         if (r.at("status") == "base" && fs::exists(dst)) { same++; continue; }   // a later recipe step owns this file now
         if (r.at("status") != "identical" && r.at("status") != "base" && !a.has("--allow-equivalent")) {
             skipped++;
@@ -544,7 +548,10 @@ int actors(const std::vector<std::string> &argv) {
                 std::printf("FAIL %s %s %s\n", r.at("overlay").c_str(), r.at("name").c_str(), err[i].c_str());
                 continue;
             }
-            if (h != r.at("sha256") && (r.at("status") == "identical" || r.at("status") == "base")) {
+            rehash[r.at("overlay") + "\t" + r.at("name")] = h;   // --rehash: the hash this build made
+            if (a.has("--rehash") && h != r.at("sha256")) {
+                std::printf("rehash %s %s %s\n", r.at("overlay").c_str(), r.at("name").c_str(), h.c_str());
+            } else if (h != r.at("sha256") && (r.at("status") == "identical" || r.at("status") == "base")) {
                 built_diff++;
                 std::printf("DIFF %s %s %s != %s\n", r.at("overlay").c_str(), r.at("name").c_str(), h.substr(0, 16).c_str(), r.at("sha256").substr(0, 16).c_str());
                 continue;
@@ -567,6 +574,47 @@ int actors(const std::vector<std::string> &argv) {
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("actor33: same %d, installed %d, built_diff %d, fail %d, skipped %d, %.0f s%s\n", same, installed, built_diff, fail, skipped, secs,
                 a.has("--apply") ? "" : " (dry run)");
+    // The PS3 actor paks, animation streams and template copies this step unpacked (about 850 MB) are only its own
+    // working files (plain files it wrote, no links): a later run unpacks what it needs again from the PS3 archives in
+    // seconds, so they are not left in the player's import folder. The Havok tables (hk/) stay for actors-hk-tables.
+    {
+        std::error_code ec;
+        for (const char *dir : {"ps3", "stm", "tsolo", "labsrc"}) fs::remove_all(a_tmp / dir, ec);
+    }
+    // maintainers, after an intended converter change (never in the import): --rehash writes the sha256 of every row
+    // built here into the job's jobs.tsv (column 3), so the step checks the new results from then on
+    if (a.has("--rehash")) {
+        const fs::path jt = upath(a_here + "/jobs.tsv");
+        const std::string t = text_file(jt);
+        std::string out;
+        int changed = 0;
+        size_t pos = 0;
+        while (pos < t.size()) {
+            size_t e = t.find('\n', pos);
+            if (e == std::string::npos) e = t.size();
+            std::string line = t.substr(pos, e - pos);
+            pos = e + 1;
+            const bool cr = !line.empty() && line.back() == '\r';
+            if (cr) line.pop_back();
+            std::vector<std::string> f;
+            for (size_t a0 = 0;;) {
+                const size_t b0 = line.find('\t', a0);
+                f.push_back(line.substr(a0, b0 == std::string::npos ? std::string::npos : b0 - a0));
+                if (b0 == std::string::npos) break;
+                a0 = b0 + 1;
+            }
+            if (f.size() > 2 && !f[0].empty() && f[0][0] != '#')
+                if (auto it = rehash.find(f[0] + "\t" + f[1]); it != rehash.end() && f[2] != it->second) {
+                    f[2] = it->second;
+                    changed++;
+                    line.clear();
+                    for (size_t k = 0; k < f.size(); k++) line += (k ? "\t" : "") + f[k];
+                }
+            out += line + (cr ? "\r" : "") + (e < t.size() ? "\n" : "");
+        }
+        write_text(jt, out);
+        std::printf("rehash: %d row(s) of %s updated\n", changed, utf8(jt).c_str());
+    }
     return fail || built_diff ? 1 : 0;
 }
 

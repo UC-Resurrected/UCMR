@@ -2,6 +2,7 @@
  "id": "convert-levels-r2",
  "title": "overlay-r2: 427 level paks (second conversion pass, 2026-10-27 04:50) rebuilt per plan.tsv (u3fix.exe levels r2, pak23-levels/levels.cpp; the latest converter)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "pak23-levels",
  "with_jobs": [
   "dctools"

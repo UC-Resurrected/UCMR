@@ -102,5 +102,12 @@ bool user_switch(const char *word);
 bool improved_tonemap_curve(float *constants, const unsigned char *settings, bool t1_curve, bool display = true);
 // the default choice: the improved curve where the render settings' exposure maximum is at least 2 (not Borneo co-op)
 bool improved_curve_by_default(const unsigned char *settings);
+// the PS3 colour grading in net games: the LUT update samples a table baked from the render settings (lut_grading.cpp)
+bool install_ps3_lut_grading(unsigned char *image, uint64_t size);
+// true when the render settings ask for PS3 grading (lut-enable above one half, no PS4 table named; as on PS3 also when
+// all values are zero); lut gets lut-enable and the 35 parameters in their order (+0x740, then +0x760..+0x7e8)
+bool ps3_grading_inputs(const unsigned char *settings, float lut[36]);
+// the PS3 colour table of those 36 values: 32x32x32 RGBA8, index r + 32 g + 1024 b (the caller's rounding mode is kept)
+void bake_ps3_grading_lut(const float lut[36], unsigned char *rgba);
 
 }  // namespace u3fix

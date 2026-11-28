@@ -313,6 +313,11 @@ struct SMat {
     bool proxy = false;   // GLOBAL_SHADOW_PROXY: the template draws into the shadow maps only
     bool sun = false;     // DIFFUSE_LIGHT_ADD_SUNLIGHT: the template is lit by the sun
     unsigned uvs = 0;     // bit d: UV_d_APPLY_SCALE (the template scales layer d's UVs by g_uvScale<d>)
+    // U3: the template's colour-layer masks of '-detail' maps: bit k when its Mask<k> slot holds a retail '-detail' map
+    // (layer k multiplied by that mask; ps4stage binds the PS3 material's own '-detail' map there); dmscale: one of them
+    // reads a UV channel d >= 2 that UV_d_APPLY_SCALE scales; mask_other: a mask slot of another kind (spec / tint mask)
+    unsigned dmask = 0;
+    bool dmscale = false, mask_other = false;
 };
 struct SEnt {
     std::string pak;
@@ -527,6 +532,27 @@ std::shared_ptr<Survey> load_survey(const fs::path &res) {
                 for (int e = 2; e <= 4; e++) other = other || (e != d && fset.count("COLOR_" + ds + "_COLOR_MAP_USE_UV" + std::to_string(e)));
                 if (fset.count("UV_" + ds + "_APPLY_SCALE") && !other && (d == 1 || fset.count("COLOR_" + ds + "_COLOR_MAP_USE_UV" + ds))) sm->uvs |= 1u << d;
             }
+            for (const auto &bd : sm->b) {
+                const auto r = param_role(bd.first);
+                if (r != "mask" && r != "spec") continue;
+                const bool slot = bd.first.size() == 18 && starts_with(bd.first, "g_tNdFetchMask") && ends_with(bd.first, "Map") &&
+                                  bd.first[14] >= '1' && bd.first[14] <= '9';
+                const std::string k = slot ? bd.first.substr(14, 1) : std::string();
+                if (!slot || tex_role_final(bd.second) != "detail" || !fset.count("COLOR_" + k + "_APPLY_MASK_TEXTURE")) {
+                    sm->mask_other = true;
+                    continue;
+                }
+                sm->dmask |= 1u << (k[0] - '0');
+                int uv = 1;
+                for (int e = 2; e <= 4; e++)
+                    if (fset.count("COLOR_" + k + "_MASK_USE_UV" + std::to_string(e))) uv = e;
+                // (a UV channel no colour or normal map shares: ps4stage gives its g_uvScale<d> the PS3 scale of the mask)
+                const std::string us = std::to_string(uv);
+                bool shared = false;
+                for (const std::string &x : fset)
+                    shared = shared || ((has(x, "_COLOR_MAP_USE_UV") || has(x, "_NORMAL_MAP_USE_UV")) && ends_with(x, "_USE_UV" + us));
+                sm->dmscale = sm->dmscale || (uv >= 2 && !shared && fset.count("UV_" + us + "_APPLY_SCALE"));
+            }
             sm->tmus1a = fset.count("TRANSPARENCY_MAP_USE_SHARED_TEXTURE_1_A") != 0;
             for (const std::string &x : fset)
                 for (const char *w : {"GLOBAL_PIVOT_WIND", "BP_TREE_ANIM", "ND_TREE_ANIM"}) sm->wind = sm->wind || has(x, w);
@@ -686,6 +712,29 @@ bool uvp(const std::string &k, int &d) {   // re.match(r'g_uvScale(\d)$', k)
     return false;
 }
 
+// U3: the prime-shader feature that gives a template the slot for a PS3 shading constant ('' for other constants), as the
+// retail materials carrying these constants have it: g_rim<k> -> COLOR_k_DSR_RIM, g_reparameterRimIn / Out<k> ->
+// COLOR_k_DSR_USE_SURFER_PARAMS, g_specularMetalness -> SPECULAR_LIGHT_APPLY_METALNESS, g_ambientDiffuseBiasU / V ->
+// AMBIENT_LIGHT_ADD_AMBIENT_DIFFUSE, g_normalStrength<k> -> NORMAL_k_APPLY_STRENGTH, g_translucency* ->
+// DIFFUSE_LIGHT_ADD_TRANSLUCENCY, g_facingTintIn / Out / Falloff<k> -> COLOR_k_APPLY_FACING_TINT
+std::string shading_feature(const std::string &k) {
+    auto layer = [&](const char *pre, std::string &d) {
+        const size_t n = std::strlen(pre);
+        if (k.size() != n + 1 || !starts_with(k, pre) || k[n] < '1' || k[n] > '9') return false;
+        d = k.substr(n, 1);
+        return true;
+    };
+    std::string d;
+    if (layer("g_rim", d)) return "COLOR_" + d + "_DSR_RIM";
+    if (layer("g_reparameterRimIn", d) || layer("g_reparameterRimOut", d)) return "COLOR_" + d + "_DSR_USE_SURFER_PARAMS";
+    if (k == "g_specularMetalness") return "SPECULAR_LIGHT_APPLY_METALNESS";
+    if (k == "g_ambientDiffuseBiasU" || k == "g_ambientDiffuseBiasV") return "AMBIENT_LIGHT_ADD_AMBIENT_DIFFUSE";
+    if (layer("g_normalStrength", d)) return "NORMAL_" + d + "_APPLY_STRENGTH";
+    if (starts_with(k, "g_translucency")) return "DIFFUSE_LIGHT_ADD_TRANSLUCENCY";
+    if (layer("g_facingTintIn", d) || layer("g_facingTintOut", d) || layer("g_facingTintFalloff", d)) return "COLOR_" + d + "_APPLY_FACING_TINT";
+    return "";
+}
+
 // the per-material facts of the fallback scoring
 struct M3 {
     std::string n, low, fdir, top;
@@ -706,7 +755,13 @@ struct M3 {
     bool nrm2 = false;                 // the PS3 material has two normal maps of its own (one per layer)
     int two_sided = -1;                // the PS3 pass state draws both faces (1), culls (0), unknown (-1)
     unsigned uvfar = 0;                // bit d: g_uvScale<d> at least 1.5x away from 1 (a tiling only a UV_d scale carries)
-    std::unordered_map<size_t, int> cache;   // feature set id -> v2 + v2.3 score
+    // U3: the PS3 material has a '-detail' grime / streak map (its program multiplies the diffuse colour by one channel of
+    // it); grime_zw: read with the second UV slot (f[TEX0].zw) at a g_uvScale2 of its own (not g_uvScale1)
+    bool grime3 = false, grime_zw = false;
+    // U3: the PS4 features that carry the PS3 material's shading constants (rim, metalness, ambient diffuse, normal
+    // strength, translucency, facing tint) and how many of its constants each carries
+    std::vector<std::pair<std::string, int>> cfeat3;
+    std::unordered_map<size_t, int> cache;   // feature set id (<< 16 | the template's grime mask layers) -> v2 + v2.3 score
 };
 
 // U3: a PS3 layer blend with a softness (the program divides the blend-map term by 2s + 0.01, s the material's
@@ -723,8 +778,10 @@ int trans_map_score(const M3 &m, const SMat &sm, const FeatSet &f) {
     return (sm.r4 & R_TRANS) || f.tmap ? 0 : -30;
 }
 
-int v2_v23(const M3 &m, const FeatSet &f) {
+// dlayers: the template's grime mask layers (SMat::dmask) when the PS3 material has a grime map (U3), else 0
+int v2_v23(const M3 &m, const FeatSet &f, unsigned dlayers) {
     int pen = 0;
+    auto has_feat = [&](const std::string &x) { return std::find(f.feats.begin(), f.feats.end(), x) != f.feats.end(); };
     const bool blend3 = (m.r3 & R_BLEND) || m.two3;
     if (m.two3 && !f.blend12) pen -= 45;
     if (m.nrm3 && !f.normalmap) pen -= 15;
@@ -762,6 +819,21 @@ int v2_v23(const M3 &m, const FeatSet &f) {
             int d;
             if (layer_of(x, d) && ends_with(x, "_APPLY_OVERLAY_TEXTURE")) allowed |= 1u << d;
         }
+    // U3: a PS3 grime map multiplies the colour by the template's '-detail' mask layer: that layer is needed, not foreign
+    allowed |= dlayers;
+    // U3: the PS3 shading constants (rim, metalness, ambient diffuse, normal strength, translucency, facing tint) need the
+    // template feature that has their slot, else they are dropped and the surface loses its edge highlights / metal
+    // reflectance / ambient diffuse (Facility kept 424 of its 703 PS3 constants): 6 per constant the template cannot
+    // carry (4 kept 74 %, 6 77 %, 8 79 % of Facility's but lost PS3 textures). A rim / facing-tint layer that carries them
+    // is no foreign layer, and their features no foreign feature (below)
+    for (const auto &[feat, n] : m.cfeat3) {
+        if (!has_feat(feat)) {
+            pen -= 6 * n;
+            continue;
+        }
+        int d;
+        if (layer_of(feat, d)) allowed |= 1u << d;
+    }
     pen -= 10 * popc(f.layers & ~allowed);
     if (blend3 && !(f.layers & 4)) pen -= 10;
     if (!blend3 && f.blendfactor) pen -= 10;
@@ -775,6 +847,7 @@ int v2_v23(const M3 &m, const FeatSet &f) {
         if (f.bad[i]) {
             bool skip = (m.dis3 && f.dist[i]) || (m.ov && has(f.feats[i], "OVERLAY"));
             for (const std::string &need : m.scr3) skip = skip || starts_with(f.feats[i], need);
+            for (const auto &cf : m.cfeat3) skip = skip || f.feats[i] == cf.first;
             if (!skip) pen -= f.bad[i];
         }
         if (f.incand[i] && !m.emissive) pen -= 15;
@@ -1421,12 +1494,52 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 }
                 m.nrm2 = nrms.size() >= 2;
             }
+            bool zw_grime_only = false;
+            if (!g_u2) {
+                for (const auto &[k, v] : p3) {   // the PS3 shading constants, per feature carrying them
+                    const std::string feat = shading_feature(k);
+                    if (feat.empty()) continue;
+                    auto it = std::find_if(m.cfeat3.begin(), m.cfeat3.end(), [&](const auto &x) { return x.first == feat; });
+                    if (it == m.cfeat3.end()) m.cfeat3.push_back({feat, 1});
+                    else it->second++;
+                }
+                // a '-detail' map (not a '-detail-normal': that is a normal) is a grime / streak overlay: the PS3 program
+                // reads one channel of it and multiplies the diffuse colour by it (ruins' plaster: the streaks, on
+                // f[TEX0].zw at g_uvScale2 0.2)
+                std::set<std::string> grime;
+                if (mi != m3.end()) {
+                    static const std::regex HT(R"(/[0-9A-F]{16}\.ndb(\.error)?$)");
+                    for (uint32_t i : mi->second->textures) {
+                        const std::string s = std::regex_replace(short_of(texs3.at(i).name), HT, "");
+                        if (tex_role_final(s) == "detail") grime.insert(s);
+                    }
+                }
+                m.grime3 = !grime.empty();
+                if (m.grime3) {
+                    auto scale = [&](const char *a, const char *b) {
+                        const std::vector<double> *v = bg::param(p3, a);
+                        if (!v && b) v = bg::param(p3, b);
+                        return v && !v->empty() ? (*v)[0] : 1.0;
+                    };
+                    const double s1 = scale("g_uvScale1", "g_uvScale"), s2 = scale("g_uvScale2", nullptr);
+                    static const std::regex HTU(R"(/[0-9A-F]{16}(\.ndb)?(\.error)?$)");
+                    bool zw_other = false;
+                    for (const auto &[full, cs] : fp::texture_coords(progs3, n)) {
+                        if (!cs.count("TEX0.zw")) continue;
+                        if (grime.count(std::regex_replace(short_of(full), HTU, ""))) m.grime_zw = true;
+                        else zw_other = true;
+                    }
+                    // (only the grime map on f[TEX0].zw: g_uvScale2 is its tiling, not a second layer's)
+                    zw_grime_only = m.grime_zw && !zw_other;
+                    m.grime_zw = m.grime_zw && std::fabs(s2 - s1) > 0.02 * std::max(std::fabs(s1), 1e-6);
+                }
+            }
             // (a moving material keeps its scroll first: a second colour layer is not asked of the scrolling templates)
             if (two_cols && m.scr3.empty()) m.two3 = true;
             if (!g_u2)   // U3: the far tilings of the layers the PS3 material draws (layer 1; layer 2 of a two-layer one)
                 for (const auto &[k, v] : p3) {
                     int d;
-                    if (!uvp(k, d) || v.empty() || d < 1 || d > 4 || (d >= 2 && !m.two3)) continue;
+                    if (!uvp(k, d) || v.empty() || d < 1 || d > 4 || (d >= 2 && !m.two3) || (d == 2 && zw_grime_only)) continue;
                     const double a = std::fabs(v[0]);
                     if (a >= 1.5 || a <= 1.0 / 1.5) m.uvfar |= 1u << d;
                 }
@@ -1491,7 +1604,15 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 const SMat &sm = *c.m;
                 // (U3: a PS3 spec map counts as the mask it becomes on PS4: ps4stage binds it to a template mask slot)
                 const unsigned r3 = !g_u2 && (m.r3 & R_SPEC) ? (m.r3 & ~R_SPEC) | R_MASK : m.r3;
-                int score = popc(r3 & sm.r4) * 2 - popc(sm.r4 & ~r3) - popc(r3 & ~sm.r4);
+                // (U3, a PS3 grime map: the template's detail role is its '-detail' mask layer, where ps4stage binds it; a
+                // Detail<k> slot is a detail normal and a mask role is a mask slot of another kind)
+                const unsigned r4 = !g_u2 && m.grime3 ? (sm.r4 & ~(R_DETAIL | R_MASK)) | (sm.dmask ? R_DETAIL : 0u) | (sm.mask_other ? R_MASK : 0u) : sm.r4;
+                int score = popc(r3 & r4) * 2 - popc(r4 & ~r3) - popc(r3 & ~r4);
+                // U3: a PS3 grime / streak map on a template without a '-detail' mask layer is lost: never bound into a
+                // detail-normal or height slot (ruins' plaster lost its streaks to a flat height map); a mask layer on a
+                // UV channel of its own scale carries the PS3 g_uvScale2 tiling of it (one shared with a colour layer tiles
+                // it like that layer)
+                if (!g_u2 && m.grime3 && m.scr3.empty()) score += !sm.dmask ? -12 : m.grime_zw && !sm.dmscale ? -6 : 0;
                 // U3: a PS3 '-blend' map is the factor its program blends the two layers by: a template without a blend-map
                 // slot blends by the vertex colour or a colour channel instead and the PS3 pattern is lost (Facility's
                 // concrete floors)
@@ -1537,12 +1658,14 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                     score += 60 + (m.two3 && sm.ovl == 3 ? 30 : 0) + (m.soft3 == sm.soft ? 10 : 0) + (m.attrs3.count(0x15) && sm.ovvmask ? 10 : 0);
                 else if (m.ov)
                     score -= sm.ovl ? 60 : 20;   // without a usable overlay the PS3 layer is lost
-                auto ci = m.cache.find(sm.fsid);
-                if (ci == m.cache.end()) ci = m.cache.emplace(sm.fsid, v2_v23(m, S->fsets[sm.fsid])).first;
+                const unsigned dl = !g_u2 && m.grime3 ? sm.dmask : 0u;
+                const size_t ck = sm.fsid << 16 | dl;
+                auto ci = m.cache.find(ck);
+                if (ci == m.cache.end()) ci = m.cache.emplace(ck, v2_v23(m, S->fsets[sm.fsid], dl)).first;
                 score += ci->second;
                 score += soft_blend_score(m, sm);
                 score += trans_map_score(m, sm, S->fsets[sm.fsid]);
-                score -= 2 * popc(sm.r4 & ~r3);
+                score -= 2 * popc(r4 & ~r3);
                 const int64_t score2 = int64_t(score) * 2 + (used[c.pak] > 0 ? 1 : 0);
                 if (!best || std::make_pair(score2, -int64_t(c.size)) > std::make_pair(best->score2, best->negsz)) best = Best{score2, -int64_t(c.size), &k, &c};
             }

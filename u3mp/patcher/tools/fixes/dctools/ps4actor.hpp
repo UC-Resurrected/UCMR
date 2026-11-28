@@ -5,8 +5,11 @@
 // compiled effects (copied as one span at the template's page offset) and the joint-name table come from a PS4 template
 // pak of the same skeleton. One material per template material in the template's order (then a copy of the template
 // material for every further PS3 material on a shared one), each re-bound to the converted PS3 textures (by texture
-// kind: -color, -normal, -spec-mask, -trans, ...; of two cooks of one texture the material's own, the larger; donor
-// paks for textures the PS3 pak lacks; else a neutral flat texture of the slot's kind, never the template's own). A
+// kind: -color, -normal, -spec-mask, -trans, ...; the textures named after the material, then those of its PS3 material
+// table and their siblings; of two cooks of one texture the material's own, the larger; a template slot's own path only
+// when that PS3 texture is the material's; donor paks for textures the PS3 pak lacks; else a neutral flat texture of the
+// slot's kind, never the template's own). PS4 first: a PS3 texture that a retail actor pak has under the same path is
+// bound as that retail texture (a streamed one always, one kept whole up to one size step larger). A
 // PS3 material with a cut-out map takes a template material with a cut-out map slot. PS3 textures keep every mip
 // unless a retail texture dictionary streams them. Props with their own skeleton get the PS3 JOINT_HIERARCHY, ANIMs
 // and COLLISION_DATA_FOREGROUND converted (own_skel) or the template's grafted (graft).
@@ -31,6 +34,9 @@ struct Options {   // the converter's PS4ACTOR_* settings
     std::vector<fs::path> donors;
     std::optional<fs::path> skel3;
     fs::path texdict;   // the retail TextureDictionaries.csv: only the textures it streams lose their top mips to max_tex
+    // the retail actor folder (actor33/ps4): a PS3 texture whose path (without the cook hash) a retail actor pak also
+    // has becomes that retail texture (its description and resident mips; the game streams the rest), not the PS3 cook
+    fs::path retail_textures;
     // the actor-materials rules
     bool am = false;
     std::map<std::string, std::string> mat_choice;                       // PS3 material -> part of a template material name
@@ -44,6 +50,22 @@ struct Kw {   // convert()'s keyword arguments
     std::optional<fs::path> skel_tmpl;
 };
 Bytes convert(const fs::path &ps3, const fs::path &tmpl, const Kw &kw, const Options &o);
+
+// PS4 first, texture by texture: a texture of the retail actor paks of a folder (actor33/ps4, actor27/ps4)
+struct RetailTexRef {
+    fs::path pak;
+    std::string path;
+    uint32_t flags = 0;   // VRAM_DESC +0x34: 2 = streamed from a texture dictionary, 3 = all mips in the pak
+    uint32_t w = 0, h = 0;
+};
+// a texture's path without its cook folder and cook hash, lower case: 'art/.../x-color.tga'
+std::string texture_key(const std::string &path);
+// whether a retail twin replaces a PS3 cook of w x h: a streamed one always (its pak keeps only small mips), one kept
+// whole in its pak when it has at most 4 times the pixels (one size step), so the pak does not grow much
+inline bool retail_twin_ok(const RetailTexRef &r, uint32_t w, uint32_t h) { return r.flags == 2 || uint64_t(r.w) * r.h <= 4 * uint64_t(w) * h; }
+// every texture of the retail actor paks of dir by texture_key (one pass over the folder, kept for the process; safe
+// from several threads): the description the game streams (+0x34 == 2) first, then the first in name order
+const std::map<std::string, RetailTexRef> &retail_texture_index(const fs::path &dir);
 
 // whether a retail PS4 texture dictionary (TextureDictionaries.csv) streams the texture of this full cook path (with or
 // without '.ndb'): such a texture gets its top mips from the dictionary, any other one is drawn only with what the pak holds

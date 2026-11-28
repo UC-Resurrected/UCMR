@@ -219,6 +219,7 @@ struct Ps3Tex {   // a PS3 texture whose VRAM_DESC is made the first time a mate
     uint32_t fmt4, w, h, mips;
     Bytes tiled;
     TexP real;
+    const actor::RetailTexRef *retail = nullptr;   // the same texture in a retail actor pak: used instead of this cook
 };
 
 // the GEOMETRY_1 texture entries and bindings name a texture by its full path without '.ndb'
@@ -392,11 +393,21 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
         return e;
     };
     std::vector<std::shared_ptr<Ps3Tex>> ps3tex;
+    // PS4 first: the retail actor paks of the template's folder (actor27/ps4) by texture path
+    const fs::path retail_dir = tmpl_path.parent_path();
+    const std::map<std::string, actor::RetailTexRef> *retail_index =
+        lower(S(retail_dir.parent_path().filename())) == "actor27" ? &actor::retail_texture_index(retail_dir) : nullptr;
     for (const PakTexture &t : src.textures()) {
         const size_t k3 = t.path.find(PS3_COOK_MARK);
         const std::string shrt = k3 == std::string::npos ? t.path : t.path.substr(k3 + PS3_COOK_MARK.size());
         const auto f3 = tc::ps3_format(t);
         if (!f3 || !f3->compressed) continue;
+        // the same texture (same path, the PS4 cook) in a retail actor pak: that one is bound instead of this cook, so
+        // the game draws the remastered texture at its full size (exact paths only). The PS3 cook is still converted: it
+        // is bound when the retail copy cannot be made
+        const actor::RetailTexRef *rref = nullptr;
+        if (retail_index)
+            if (auto r = retail_index->find(actor::texture_key(t.path)); r != retail_index->end() && actor::retail_twin_ok(r->second, t.width, t.height)) rref = &r->second;
         const Bytes texels = src.vram_bytes(t.vramOffset, t.vramSize);
         const Bytes tiled = tc::ps3_to_ps4_texels(texels, t.width, t.height, t.mips, f3->bpb);
         const auto k = tex_kind(shrt);
@@ -407,6 +418,7 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
         else if (f3->kind == "DXT3") fmt4 = color ? 0x4b : 0x4a;
         else throw Unsupported("NotImplementedError: " + f3->kind);
         ps3tex.push_back(std::make_shared<Ps3Tex>(Ps3Tex{shrt, cook_prefix() + shrt, t.hash, k, fmt4, t.width, t.height, t.mips, tiled, nullptr}));
+        ps3tex.back()->retail = rref;
     }
     std::map<std::string, std::vector<std::shared_ptr<Ps3Tex>>> mat_tex;
     {
@@ -434,9 +446,25 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
         std::shared_ptr<Ps3Tex> lazy;
         explicit operator bool() const { return made || lazy; }
     };
+    // a retail actor texture as its pak has it (description and resident mips), once per texture
+    std::map<std::string, std::unique_ptr<Pak>> retail_paks;
+    std::map<std::string, TexP> retail_made;
+    auto retail_copy = [&](const actor::RetailTexRef &r) -> TexP {
+        if (auto it = retail_made.find(r.path); it != retail_made.end()) return it->second;
+        std::unique_ptr<Pak> &p = retail_paks[S(r.pak)];
+        if (!p) p = std::make_unique<Pak>(r.pak);
+        for (const PakTexture &t : p->textures()) {
+            if (t.path != r.path) continue;
+            const size_t k = t.path.find(cook_prefix());
+            const std::string shrt = k == std::string::npos ? t.path : t.path.substr(k + cook_prefix().size());
+            return retail_made[r.path] = add_texture(shrt, t.hash, t.format, t.width, t.height, t.mips, p->vram_bytes(t.vramOffset, t.vramSize), t.unk34, t.unk20);
+        }
+        return nullptr;
+    };
     auto use = [&](const Ref_ &e) -> TexP {
         if (e.made) return e.made;
         if (!e.lazy) return nullptr;
+        if (!e.lazy->real && e.lazy->retail) e.lazy->real = retail_copy(*e.lazy->retail);
         if (!e.lazy->real) e.lazy->real = add_texture(e.lazy->shrt, e.lazy->hash, e.lazy->fmt4, e.lazy->w, e.lazy->h, e.lazy->mips, e.lazy->tiled, std::nullopt, std::nullopt);
         return e.lazy->real;
     };
@@ -730,8 +758,13 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
                 if (TexP t = tmpl_texture(b.full)) e.made = t;
                 else if (auto it = by_path.find(b.shrt); it != by_path.end()) e.lazy = it->second;
             }
+            // the template slot's own texture path in the PS3 pak only when it is this PS3 material's (its table and their
+            // siblings, else the textures found for it): another material's texture of that path drew on the wrong part
+            auto mine = [&](const std::shared_ptr<Ps3Tex> &x) {
+                return exact || own.empty() || std::any_of(own.begin(), own.end(), [&](const std::shared_ptr<Ps3Tex> &y) { return dir_of(y->shrt) == dir_of(x->shrt); });
+            };
             if (e) {
-            } else if (auto it = by_path.find(b.shrt); it != by_path.end())
+            } else if (auto it = by_path.find(b.shrt); it != by_path.end() && mine(it->second))
                 e.lazy = it->second;
             else if (!exact && !want.empty()) {
                 std::shared_ptr<Ps3Tex> c;

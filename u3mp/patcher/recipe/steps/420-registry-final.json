@@ -2,6 +2,7 @@
  "id": "registry-final",
  "title": "pak23_ps4.txt of the four overlays, final 2026-11-03 state, from line provenance recipes (u3fix.exe registry-final, pak23-registry/apply_registry.cpp)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "pak23-registry",
  "with_jobs": [
   "dctools"

@@ -104,6 +104,7 @@ extern "C" int u3fix_install(unsigned char *image, uint64_t size) {
     applied += u3fix::install_part_flag_guard(image, size) ? 1 : 0;
     applied += u3fix::install_improved_tonemap_curve(image, size) ? 1 : 0;
     applied += u3fix::exposure_filter_at_least_one(image, size) ? 1 : 0;
+    applied += u3fix::install_ps3_lut_grading(image, size) ? 1 : 0;
     applied += u3fix::install_hudnet_text_canvas(image, size) ? 1 : 0;
     applied += u3fix::install_split_pad(image, size) ? 1 : 0;
     applied += u3fix::install_pickup_log(image, size) ? 1 : 0;

@@ -2,6 +2,7 @@
  "id": "ps3-values",
  "title": "The helper's PS3-only values (taunt and civilian package names, multi-all actors, weapon panel origin, stat ids, the PS3 room cookies of the match and party sessions, the PS3 net game table paired with the PC net.bin) from the player's own PS3 1.19 files, SHA-256 checked, into work/ps3-values/u3-ps3-values.bin; the launcher copies it into the game's /data (u3import.exe --ps3-values, importer/ps3values.cpp)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "dctools",
  "family": "helper-data",
  "needs": [],

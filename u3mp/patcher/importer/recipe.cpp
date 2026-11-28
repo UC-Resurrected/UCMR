@@ -952,11 +952,36 @@ struct FpEnv {
 };
 struct Fp {
     std::string def, data, code, inputs;
+    // the DLC map packs the import found, for the steps that use them ("" for the others). Recorded next to the parts
+    // but not in all(): a record made before it was recorded is not a change (no step reruns for it); a record with
+    // other packs is (a pack the player added to RPCS3 since, or one that is gone)
+    std::string dlc;
     std::string all() const { return sha256_hex(def + "|" + data + "|" + code + "|" + inputs); }
-    Value value() const { return obj({{"def", str(def)}, {"data", str(data)}, {"code", str(code)}, {"inputs", str(inputs)}}); }
+    Value value() const {
+        Value v = obj({{"def", str(def)}, {"data", str(data)}, {"code", str(code)}, {"inputs", str(inputs)}});
+        if (!dlc.empty()) v.set("dlc", str(dlc));
+        return v;
+    }
 };
+
+// A step that reads the DLC map packs: "uses_dlc": true in its step file (a word for the runner, not part of its
+// definition), or a copy step whose list has rows from goty-dlc / dlc-map archives.
+bool step_uses_dlc(const Value &s) {
+    if (const Value *u = s.get("uses_dlc"); u && u->truthy()) return true;
+    const std::string list = val_s(s, "list");
+    if (list.empty()) return false;
+    static std::map<std::string, bool> lists;
+    auto it = lists.find(list);
+    if (it == lists.end()) {
+        const fs::path p = recipe_dir() / "lists" / P(list);
+        const std::string t = present(p) ? read_text(p) : "";
+        it = lists.emplace(list, t.find("goty-dlc") != std::string::npos || t.find("dlc-map") != std::string::npos).first;
+    }
+    return it->second;
+}
 Fp step_fp(const Value &s, const Inputs *inp, const FpEnv &env) {
-    static const std::set<std::string> words = {"title", "notes", "status", "applied", "family", "recipe_version_added", "recipe_version_changed"};
+    static const std::set<std::string> words = {"title", "notes", "status", "applied", "family", "recipe_version_added", "recipe_version_changed",
+                                                "uses_dlc"};
     Fp f;
     Value c = Value::object();
     for (const auto &[k, v] : s.fields)
@@ -984,6 +1009,7 @@ Fp step_fp(const Value &s, const Inputs *inp, const FpEnv &env) {
         inputs += declared_inputs(s, *inp);
         const auto needs = val_list(s, "needs");
         if (std::find(needs.begin(), needs.end(), "ps3_data2") != needs.end()) inputs += "data2=" + env.data2 + ";";
+        if (step_uses_dlc(s)) f.dlc = fmt("packs %02x%s", inp->dlc_packs, inp->dlc_goty ? " goty" : "");
     }
     f.data = sha256_hex(data);
     f.code = sha256_hex(code);
@@ -1805,6 +1831,12 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
                 pl.reason = "first run with the new fingerprints: the PS3 game data (DATA2) is newer than its last run";
             pl.carried = pl.reason.empty();
         }
+        // the DLC map packs found since its last run (an added RPCS3 install, a pack gone): only the steps that use them
+        if (pl.reason.empty() && rec && !pl.fp.dlc.empty())
+            if (const Value *pp = rec->get("parts"); pp && pp->get("dlc") && val_s(*pp, "dlc") != pl.fp.dlc) {
+                pl.reason = "the DLC map packs found changed (" + val_s(*pp, "dlc") + " -> " + pl.fp.dlc + ")";
+                pl.carried = false;
+            }
     }
     // A step that runs again works on fresh copies of the files it wrote: the first step that writes each of them runs
     // again too (and the steps in between, when they find the file changed). Unchanged steps rerun safely: each one
@@ -1871,6 +1903,13 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
                 rec->set("jobs", State::strings_of(step_jobs(s)));
                 jobs_added = true;
             }
+            // a record made before the DLC map packs were recorded: the packs it was made with are the ones found now
+            if (!a.dry_run && !pl.fp.dlc.empty())
+                if (Value *pp = rec->get("parts"); pp && pp->is_object() && !pp->get("dlc")) {
+                    pp->set("dlc", str(pl.fp.dlc));
+                    state.save();
+                    rec = state.done(sid);
+                }
             lg(head + ": already applied, unchanged since " + val_s(*rec, "when") + (pl.carried ? " (fingerprint carried over)" : ""));
             c_already++;
             continue;

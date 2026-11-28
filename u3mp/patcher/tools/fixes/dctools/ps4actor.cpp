@@ -735,7 +735,48 @@ struct Ps3Tex {   // a PS3 texture whose VRAM_DESC is made the first time a mate
     std::optional<std::string> kind;
     Bytes tiled;
     TexP real;
+    const RetailTexRef *retail = nullptr;   // the same texture in a retail actor pak: used instead of this cook
 };
+
+}  // namespace
+
+std::string texture_key(const std::string &path) {
+    std::string s = lower(path);
+    for (const char *mark : {"texture1/", "texture2/"})
+        if (const size_t k = s.find(mark); k != std::string::npos) s = s.substr(k + std::strlen(mark));
+    if (ends_with(s, ".ndb"))
+        if (const size_t slash = s.rfind('/'); slash != std::string::npos) s.resize(slash);
+    return s;
+}
+
+// every texture of the retail actor paks of dir by texture_key (one pass over the folder, kept for the process): the
+// description the game streams (+0x34 == 2) is preferred, then the first in name order
+const std::map<std::string, RetailTexRef> &retail_texture_index(const fs::path &dir) {
+    static std::mutex lock;
+    static std::map<std::string, std::map<std::string, RetailTexRef>> cache;
+    std::lock_guard<std::mutex> g(lock);
+    auto [it, fresh] = cache.try_emplace(utf8(dir));
+    if (!fresh) return it->second;
+    std::vector<std::string> names;
+    for (const auto &e : u3::ps4_dir(utf8(dir)))
+        if (ends_with(utf8(e.path().filename()), ".pak")) names.push_back(utf8(e.path().filename()));
+    std::sort(names.begin(), names.end());
+    for (const std::string &fn : names) {
+        try {
+            const Pak q(dir / upath(fn));
+            for (const PakTexture &t : q.textures()) {
+                const std::string k = texture_key(t.path);
+                auto [r, added] = it->second.try_emplace(k, RetailTexRef{dir / upath(fn), t.path, t.unk34, t.width, t.height});
+                if (!added && r->second.flags != 2 && t.unk34 == 2) r->second = RetailTexRef{dir / upath(fn), t.path, t.unk34, t.width, t.height};
+            }
+        } catch (const std::exception &) {
+        }
+    }
+    return it->second;
+}
+
+namespace {
+
 // a binding's texture: a made texture, a lazy PS3 one, or none
 struct BindTex {
     TexP e;
@@ -922,7 +963,10 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
         // the first face as a 2D texture (env reflections of hero-london, every actor without the 'cubefix' post pass)
         db->u32(unk20 && (*unk20 >> 24) == 6 ? 2 : 1).u32(fmt4);
         db->u32(unk20 ? *unk20 : ((fmt4 == 0x48 || fmt4 == 0x4b || fmt4 == 0x4e) ? 0x010f0000 : 0x01000000));
-        db->u32(mips).u32(w_).u32(h_).u32(0).u32(flags ? *flags : uint32_t(kw.stream_flags));
+        // +0x34: 2 tells the game to stream the top mips from a texture dictionary, which only a retail description can
+        // (copied with its own flags); a PS3 cook or a generated texture holds all its mips: 3 (retail writes 3 on every
+        // texture no dictionary has), also in the job modes that ask for 2
+        db->u32(mips).u32(w_).u32(h_).u32(0).u32(flags ? *flags : uint32_t(kw.stream_flags == 2 ? 3 : kw.stream_flags));
         db->ptr(db, 0x40);
         db->cstr(u8(full4));
         e->desc = p0.item("VRAM_DESC", db);
@@ -936,12 +980,24 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
     };
     std::vector<Ps3Tex> ps3tex;
     ps3tex.reserve(texs.size());
+    // PS4 first: the retail actor textures by path, when the job gives the retail folder
+    const std::map<std::string, RetailTexRef> *retail_index =
+        opt.retail_textures.empty() || !u3::ps4_exists(utf8(opt.retail_textures)) ? nullptr : &retail_texture_index(opt.retail_textures);
     for (const PakTexture &t : texs) {
         const std::string &full3 = t.path;
         const size_t mk = full3.find(PS3_COOK_MARK);
         const std::string shrt = mk != std::string::npos ? full3.substr(mk + PS3_COOK_MARK.size()) : full3;
         const auto f3 = tc::ps3_format(t);
         if (!f3 || !f3->compressed) continue;
+        // the same texture (same path, the PS4 cook) in a retail actor pak that the game streams from a texture dictionary:
+        // that one is bound instead of this cook (its small resident mips in the pak, the full size streamed), so the game
+        // draws the PS4 texture at its full size. Exact paths only (a PS3 print shirt keeps its own print). A retail texture
+        // kept whole in its pak only when it is at most one size step larger (retail_twin_ok: the treasures 256 -> 512 maps,
+        // not a 512 -> 2048 one that made a pak half again as large). The PS3 cook is still converted: it is bound when
+        // the retail copy cannot be made
+        const RetailTexRef *rref = nullptr;
+        if (retail_index)
+            if (auto r = retail_index->find(texture_key(full3)); r != retail_index->end() && retail_twin_ok(r->second, t.width, t.height)) rref = &r->second;
         Bytes texels = src.vram_bytes(t.vramOffset, t.vramSize);
         uint32_t tw = t.width, th = t.height, tm = t.mips;
         // PS4 kit parts keep only small resident mips and stream the top ones from a texture dictionary, so a texture a
@@ -970,11 +1026,15 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
         x.w = tw;
         x.h = th;
         x.mips = tm;
+        x.retail = rref;
         ps3tex.push_back(std::move(x));
     }
+    std::map<std::string, std::unique_ptr<Pak>> retail_paks;   // the retail actor paks a bound retail texture comes from
+    std::function<TexP(const RetailTexRef &)> retail_copy;     // set after tmpl_texture (below)
     auto use = [&](const BindTex &b) -> TexP {   // a PS3 texture's VRAM_DESC is made the first time a material binds it
         if (b.e) return b.e;
         if (!b.lazy) return nullptr;
+        if (!b.lazy->real && b.lazy->retail) b.lazy->real = retail_copy(*b.lazy->retail);
         if (!b.lazy->real) b.lazy->real = add_texture(b.lazy->shrt, b.lazy->hash, b.lazy->fmt4, b.lazy->w, b.lazy->h, b.lazy->mips, b.lazy->tiled, std::nullopt, std::nullopt);
         return b.lazy->real;
     };
@@ -1042,6 +1102,23 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
         tcache_none.erase(tfull);
         return e;
     };
+    // a retail actor texture as the retail pak has it: description (PS4 path and hash, format, size, flags) and the
+    // resident mips; the game streams the top mips of a streamed one from its dictionary
+    retail_copy = [&](const RetailTexRef &r) -> TexP {
+        if (auto it = tcache.find(r.path); it != tcache.end()) return it->second;
+        std::unique_ptr<Pak> &p = retail_paks[utf8(r.pak)];
+        if (!p) p = std::make_unique<Pak>(r.pak);
+        for (const PakTexture &t : p->textures())
+            if (t.path == r.path) {
+                const size_t k = t.path.find(cook_prefix());
+                const std::string shrt = k != std::string::npos ? t.path.substr(k + cook_prefix().size()) : t.path;
+                TexP e = add_texture(shrt, t.hash, t.format, t.width, t.height, t.mips, p->vram_bytes(t.vramOffset, t.vramSize), t.unk34, t.unk20);
+                e->full = t.path;
+                tcache[t.path] = e;
+                return e;
+            }
+        return nullptr;
+    };
     auto donor_texture = [&](const std::string &short_noext) -> TexP {
         for (const auto &[D, idx] : donors)
             if (auto it = idx.find(short_noext); it != idx.end()) return tmpl_texture(it->second.path, D.get(), &it->second, false);
@@ -1053,14 +1130,16 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
     // am: the PS3 material table's own textures per material (by hash)
     const std::map<std::string, std::set<uint32_t>> mattex = opt.am ? am_material_textures(src) : std::map<std::string, std::set<uint32_t>>{};
     auto has_mattex = [&](const std::string &mn) { auto it = mattex.find(mn); return it != mattex.end() && !it->second.empty(); };
-    // PS3 props on their own skeleton: the same table, used when no texture carries the material's name (below)
+    // the same table, used when no texture carries the material's name (below): every material, not only props on their
+    // own skeleton (a skin's pants or a kit head took the first textures of the pak instead: the holster maps on the
+    // agent / Talbot / thug legs, agent hair on the spider head)
     std::map<std::string, std::vector<uint32_t>> own_tex;   // material -> texture hashes in table order
     std::map<std::string, std::set<uint32_t>> table_tex;    // material -> texture hashes (every material)
     try {
         const AmTable t = am_read_materials(src);
         for (const auto &[name, idx] : t.mats)
             for (uint32_t i : idx) {
-                if (!opt.am && kw.own_skel) own_tex[name].push_back(t.texs.at(i).first);
+                if (!opt.am) own_tex[name].push_back(t.texs.at(i).first);
                 table_tex[name].insert(t.texs.at(i).first);
             }
     } catch (const std::exception &) {
@@ -1160,14 +1239,23 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
         const std::string stem = rsplit1_last(rsplit1_head(mname));
         for (Ps3Tex &e : ps3tex)
             if (has(e.shrt, stem)) own.push_back(&e);
-        // no texture named after the material: the PS3 material table's own textures (in table order). The word-score
-        // guess below took the first PS3 textures of the pak instead: Warzone's Fiat body ('fiat-main-noblend') got the
-        // glass colour and the grey flat map, a flat white car
-        if (own.empty())
-            if (auto mt = own_tex.find(mname); mt != own_tex.end())
-                for (uint32_t h : mt->second)
-                    for (Ps3Tex &e : ps3tex)
-                        if (e.hash == h && std::find(own.begin(), own.end(), &e) == own.end()) own.push_back(&e);
+        // then the PS3 material table's own textures (in table order) after the named ones (a slot takes a named texture
+        // of its kind first). Without a named texture the word-score guess below took the first PS3 textures of the pak:
+        // Warzone's Fiat body ('fiat-main-noblend') got the glass colour and the grey flat map, a flat white car; the agent
+        // pants 'agent-legs-pants-a-mp' found only their colour map by name (the table has their '-00-normal')
+        if (auto mt = own_tex.find(mname); mt != own_tex.end()) {
+            for (uint32_t h : mt->second)
+                for (Ps3Tex &e : ps3tex)
+                    if (e.hash == h && std::find(own.begin(), own.end(), &e) == own.end()) own.push_back(&e);
+            // plus their siblings (x-normal -> x-color, x-spec-mask, x-trans): the table of Sully's hair lists only
+            // 'hair-normal', and its colour slot became a flat although the pak holds 'hair-color'
+            auto base_of = [](const Ps3Tex &e) { return before(before(e.shrt, ".tga"), *e.kind); };
+            std::set<std::string> bases;
+            for (const Ps3Tex *e : own)
+                if (e->kind) bases.insert(base_of(*e));
+            for (Ps3Tex &e : ps3tex)
+                if (e.kind && bases.count(base_of(e)) && std::find(own.begin(), own.end(), &e) == own.end()) own.push_back(&e);
+        }
         if (own.empty()) {
             auto toks_of = [](const std::string &s, const char *seps) {
                 std::set<std::string> t;
@@ -1258,8 +1346,17 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
                 e.e = tmpl_texture(b.full, nullptr, nullptr, false);
                 if (!e.e) e.lazy = by_path(b.shrt, mn);
             }
+            // the template slot's own texture path in the PS3 pak, when it is the PS3 material's: by its material table
+            // (else by the textures found for it). Another PS3 material's texture of that path is not taken: the PS3
+            // pants and shoes on the holster's template slot drew the holster maps (agent / Talbot / thug / pirate legs)
+            auto mine = [&](const Ps3Tex *x) {
+                if (exact) return true;
+                if (auto t = table_tex.find(*mn); t != table_tex.end() && !t->second.empty())   // (any cook of the path)
+                    return std::any_of(ps3tex.begin(), ps3tex.end(), [&](const Ps3Tex &y) { return t->second.count(y.hash) && rsplit1_head(y.shrt) == rsplit1_head(x->shrt); });
+                return own.empty() || std::any_of(own.begin(), own.end(), [&](const Ps3Tex *y) { return rsplit1_head(y->shrt) == rsplit1_head(x->shrt); });
+            };
             if (!e.none()) {
-            } else if (Ps3Tex *x = by_path(b.shrt, mn))
+            } else if (Ps3Tex *x = by_path(b.shrt, mn); x && mine(x))
                 e.lazy = x;
             else if (!want.empty()) {
                 // the material's own map of the kind (named after it) before another one of its table: the Outdoor
@@ -1287,10 +1384,17 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
                 if (col && has(cstem, "-color")) {
                     const std::string base = cstem.substr(0, cstem.rfind("-color")) + want[0];
                     if (!donors.empty()) de = donor_texture(base);
+                    // the retail actor texture of that name first (streamed like retail: only its small resident mips
+                    // in the pak), then the dictionary copy below
+                    if (!de && retail_index)
+                        if (auto r = retail_index->find(lower(base + ".tga")); r != retail_index->end() && r->second.flags == 2) {
+                            if (auto it = tcache.find("retail:" + r->second.path); it != tcache.end()) own4 = it->second;
+                            else if ((own4 = retail_copy(r->second))) tcache["retail:" + r->second.path] = own4;
+                        }
                     // PS4 first: the material's own map of the kind from the PS4 texture dictionaries, named after its
                     // colour map, when the PS3 pak lacks it (the MP Talbot suit / head / hands spec masks: PS4 textures,
                     // flat on the PS3 parts), at most the colour map's size
-                    if (!de && !opt.texdict.empty() && !has(cstem, "art/general/textures/default/")) {
+                    if (!de && !own4 && !opt.texdict.empty() && !has(cstem, "art/general/textures/default/")) {
                         const std::string s4 = base + ".tga";
                         if (auto it = tcache.find("dict:" + s4); it != tcache.end()) own4 = it->second;
                         else if (auto t = stage::dict_texture_short(opt.texdict.parent_path(), s4, col->w, col->h)) {

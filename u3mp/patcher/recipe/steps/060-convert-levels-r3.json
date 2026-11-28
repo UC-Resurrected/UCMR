@@ -2,6 +2,7 @@
  "id": "convert-levels-r3",
  "title": "overlay-r3: cloud-converted level paks (third pass + h017 worlds, 2026-10-27..30) rebuilt per plan.tsv (u3fix.exe levels r3, pak23-levels/levels.cpp; the latest converter)",
  "kind": "script",
+ "uses_dlc": true,
  "job": "pak23-levels",
  "with_jobs": [
   "dctools"

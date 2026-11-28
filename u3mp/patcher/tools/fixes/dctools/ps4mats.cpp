@@ -438,7 +438,10 @@ Bytes wpnmods(const fs::path &ps4, const fs::path &ps3, const std::string &src_s
         const std::string full4 = cook_prefix() + n.shrt;
         db->u64(0).u64(voff).u32(n.tiled.size()).u32(n.hash);
         db->u32(1).u32(n.fmt).u32(n.fmt == 0x48 || n.fmt == 0x4b || n.fmt == 0x4e ? 0x010f0000 : 0x01000000);
-        db->u32(n.mips).u32(n.w).u32(n.h).u32(0).u32(uint32_t(stream_flags));
+        // +0x34 2 (streamed from a texture dictionary) only for a texture a retail dictionary has; any other one holds
+        // all its mips here: 3 (a weapon skin colour map with 2 and no dictionary entry was drawn without its top mips)
+        const bool dict = stream_flags == 2 && actor::texdict_streams(texdict, full4);
+        db->u32(n.mips).u32(n.w).u32(n.h).u32(0).u32(uint32_t(stream_flags == 2 && !dict ? 3 : stream_flags));
         db->ptr(db, 0x40);
         db->cstr(u8(full4));
         n.desc = pg2.item("VRAM_DESC", db);
