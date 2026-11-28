@@ -27,6 +27,13 @@
 #include <cstdint>
 
 #define U3VOICE_ABI __attribute__((sysv_abi))
+// The executable's export: a dllexport on Windows; on Linux a default-visibility symbol the runtime's link
+// (-rdynamic) puts in its dynamic symbol table.
+#ifdef _WIN32
+#define U3VOICE_EXPORT __declspec(dllexport)
+#else
+#define U3VOICE_EXPORT __attribute__((visibility("default")))
+#endif
 
 extern "C" {
 
@@ -53,6 +60,6 @@ struct U3VoiceApi {
 };
 
 // the API table (never null); exported from the executable for the helper
-__declspec(dllexport) const U3VoiceApi *uncharted_u3_voice(void);
+U3VOICE_EXPORT const U3VoiceApi *uncharted_u3_voice(void);
 
 }  // extern "C"

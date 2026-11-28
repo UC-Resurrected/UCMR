@@ -1782,41 +1782,46 @@ void register_all() {
             EXPECT((frames_of(kBegin0) == std::vector<int64_t>{t0 + 3001}));
         });
     }
-    // F1 step 4 (no decision while a reservation is open) and F6 (an odd count for a team playlist: the last of the
-    // slot list came alone -> removed, 5 s quiet, the gathering goes on)
-    N("mm_online_gather_pending_and_balance", [](const Api &a) {
+    // F1 step 4 (no decision while a reservation is open) and the owner's uneven-teams rule (replaces F6, PS3's team
+    // balance kick): 4 players for a team playlist start the vote as soon as the reservation is closed, nobody is
+    // removed
+    N("mm_online_gather_pending_uneven", [](const Api &a) {
         std_setup(a, true, 4);
         games_table({1, 2, 3});
         s.mm_online = true;
         s.mm_step = 2;
-        s.balance_slot = 2;
         s.mm_pending = 1;
         host_lan_start(a, 2000);   // reference 4400; N = 3: 15 s -> 8900
         frame(2001);
         EXPECT(lines("log matchmaking: 3 other player(s) connected: Game starting in 22 seconds") == 1);
         frame(8900);
-        EXPECT(lines_from("log matchmaking: vote between") == 0 && lines_from("send slot 2 [18]") == 0);
+        EXPECT(lines_from("log matchmaking: vote between") == 0);
         s.mm_pending = 0;
         frame(8901);
-        EXPECT(lines("log matchmaking: 4 players for a team playlist: slot 2 came alone, removed to balance the teams") == 1);
-        EXPECT(lines("send slot 2 [18] except -1") == 1 && lines_from("log matchmaking: vote between") == 0);
-        s.members = 3;   // the kicked player went
-        s.balance_slot = -1;
-        frame(10400);   // N = 2 (wait passed), but still quiet
-        EXPECT(lines("log matchmaking: 2 other player(s) connected: Game starting in 0 seconds") == 1);
-        EXPECT(lines_from("log matchmaking: vote between") == 0);
-        frame(10401);
-        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{10401}));
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{8901}));
         EXPECT(get<int32_t>(NETSM) == 20 && lines("voice::unmute_strangers") == 1);
+        EXPECT(lines_from("send slot 2 [18]") == 0 && lines_from("log matchmaking: 4 players for a team playlist") == 0);
     });
-    N("mm_online_gather_coop_no_balance", [](const Api &a) {   // F6: co-op playlists have an odd maximum
+    N("mm_online_gather_uneven_three", [](const Api &a) {   // 3 players (2 v 1) in a team playlist: the vote starts
+        std_setup(a, true, 3);
+        games_table({1, 2, 3});
+        s.mm_online = true;
+        s.mm_step = 2;
+        host_lan_start(a, 2000);   // reference 4400; N = 2: 8 s -> 6800
+        frame(6799);
+        EXPECT(lines_from("log matchmaking: vote between") == 0);
+        frame(6800);
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{6800}));
+        EXPECT(lines("log matchmaking: vote between net games 1 and 2 (3 players)") == 1);
+        EXPECT(lines_from("send slot 1 [18]") == 0 && lines_from("send slot 2 [18]") == 0);   // nobody removed
+    });
+    N("mm_online_gather_coop_odd", [](const Api &a) {   // co-op playlists (odd maximum): the vote starts as before
         std_setup(a, true, 4);
         games_table({4, 8, 1});
         s.playlist = true;
         s.types = {4, 8};
         s.mm_online = true;
         s.mm_step = 2;
-        s.balance_slot = 2;
         host_lan_start(a, 2000);
         frame(8899);
         frame(8900);

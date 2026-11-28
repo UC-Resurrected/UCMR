@@ -7892,7 +7892,7 @@ __attribute__((section(".text.ext"),noinline)) static void vox_req_out119(uint64
 __attribute__((section(".text.entry")))
 int u3_profile_event(uintptr_t base,int32_t *event,int kind,ProfileState *s,uintptr_t a5){
  if(!s||!event)return 0;
- if(kind==44){if(base){plat_init(base);natives_link(base);u3x_sincos_bind(base);}return 1;}   /* v5.13 script natives: before load(), this runs during early engine init; r2 G56: sin / cos coefficients */
+ if(kind==44){if(base){PLAT_BIND(s);plat_init(base);natives_link(base);u3x_sincos_bind(base);}return 1;}   /* v5.13 script natives: before load(), this runs during early engine init; r2 G56: sin / cos coefficients */
  load(s);
  if(kind==40){if(base)mp_page_event(base,s,event);return 1;}   /* page event catch-all 0x672460 entry */
  if(kind==41){if(base)mp_match_saved(base,s);return 1;}         /* post-match state enter 0x67cb40 */

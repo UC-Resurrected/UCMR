@@ -1,4 +1,9 @@
-/* Red-zone safety for guest leaf functions (gow3 25 Oct 2026; Windows).
+/* Red-zone safety for guest leaf functions (gow3 25 Oct 2026; Windows), and the old-CPU instruction pass (both).
+ *
+ * Linux (27 Nov 2026): the kernel builds a signal frame 128 bytes below rsp, so the red zone needs no protection
+ * there: only the part of this pass that runtime_isa.cpp needs runs (on a CPU that lacks MOVBE / BMI1 / LZCNT / F16C,
+ * or in its test mode): the functions are found the same way and LZCNT / TZCNT get their faulting form (and the
+ * short-site stubs), as on Windows with GOW3_RED_ZONE=0.
  *
  * The games follow the System V x86-64 ABI: a leaf function may keep data in the 128 bytes below
  * rsp (the red zone). The GPU page tracker resolves its access faults on the faulting guest thread,
@@ -28,19 +33,29 @@
 #include <string.h>
 #include <inttypes.h>
 
+#include <atomic>
+#include <chrono>
+#include <new>
+
+extern "C" {
 uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count);
 void runtime_redzone_after_fault(void *context);
-/* runtime_isa.c (instructions older CPUs lack): see there. */
+/* runtime_isa.cpp (instructions older CPUs lack): see there. */
 int runtime_isa_active(void);
 int runtime_isa_traps(const void *instruction);
 void runtime_isa_fix_moved(unsigned char *code, unsigned length);
 unsigned runtime_isa_relocated(unsigned char *code, unsigned length);   /* may grow it: up to ISA_ROOM more */
-#define ISA_ROOM 112u
 void runtime_isa_convert_function(unsigned char *image, uint64_t begin, uint64_t end);
 void runtime_isa_finish(void);
+}
+#define ISA_ROOM 112u
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include "host_linux.h"
+#endif
 #include <Zydis/Zydis.h>
 
 typedef struct { uint64_t begin, end; uint8_t red, hooked, bad, indirect; } RzFunction;
@@ -62,7 +77,7 @@ static int rz_no_space;
 static unsigned char *allocate_near(size_t bytes);
 /* Faulting accesses in red-zone functions that stayed in place (sorted image offsets). */
 static uint32_t *rz_skipped;
-static volatile LONG *rz_warned;
+static std::atomic<int32_t> *rz_warned;
 static size_t rz_skipped_count, rz_skipped_cap;
 static int rz_scribble, rz_ready, rz_protecting;
 /* Test mode (GOW3_RED_ZONE_SCRIBBLE=1) diagnostics: the red-zone functions (sorted ranges), each
@@ -73,9 +88,21 @@ static size_t rz_red_count;
 typedef struct { uintptr_t stub; uint32_t site; } RzStub;
 static RzStub *rz_stubs;
 static size_t rz_stub_count, rz_stub_cap;
-static volatile LONG *rz_red_seen, *rz_stub_seen;
-static volatile LONG rz_scribbles, rz_in_red, rz_in_stub, rz_prints;
-static volatile LONG64 rz_last_report;
+static std::atomic<int32_t> *rz_red_seen, *rz_stub_seen;
+static std::atomic<int32_t> rz_scribbles, rz_in_red, rz_in_stub, rz_prints;
+static std::atomic<int64_t> rz_last_report;
+/* a zeroed array of n flags (the first-fault marks) */
+static std::atomic<int32_t> *new_flags(size_t n) { return new (std::nothrow) std::atomic<int32_t>[n](); }
+/* the stub chunks become executable */
+static void make_executable(unsigned char *p, size_t n) {
+#ifdef _WIN32
+    DWORD old;
+    VirtualProtect(p, n, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, n);
+#else
+    mprotect(p, n, PROT_READ | PROT_EXEC);   /* x86: coherent instruction cache */
+#endif
+}
 
 static void bit_set(uint8_t *map, uint64_t at) { if (at < rz_code_end) map[at >> 3] |= (uint8_t)(1u << (at & 7)); }
 static int bit_get(const uint8_t *map, uint64_t at) { return at < rz_code_end && ((map[at >> 3] >> (at & 7)) & 1); }
@@ -313,10 +340,10 @@ static int emit_group(const RzFunction *f, RzOp *ops, size_t k, size_t j) {
     if (rz_scribble) {
         if (rz_stub_count == rz_stub_cap) {
             const size_t cap = rz_stub_cap ? rz_stub_cap * 2 : 4096;
-            RzStub *grown = realloc(rz_stubs, cap * sizeof(*grown));
+            RzStub *grown = (RzStub *)realloc(rz_stubs, cap * sizeof(*grown));
             if (grown) { rz_stubs = grown; rz_stub_cap = cap; }
         }
-        if (rz_stub_count < rz_stub_cap) rz_stubs[rz_stub_count++] = (RzStub){(uintptr_t)stub, (uint32_t)site};
+        if (rz_stub_count < rz_stub_cap) rz_stubs[rz_stub_count++] = RzStub{(uintptr_t)stub, (uint32_t)site};
     }
     const size_t used = (size_t)(p - base + 15) & ~(size_t)15;
     rz_stub_bytes += used - rz_chunk_used;
@@ -327,7 +354,7 @@ static int emit_group(const RzFunction *f, RzOp *ops, size_t k, size_t j) {
 static void note_skipped(uint64_t at) {
     if (rz_skipped_count == rz_skipped_cap) {
         const size_t cap = rz_skipped_cap ? rz_skipped_cap * 2 : 256;
-        uint32_t *grown = realloc(rz_skipped, cap * sizeof(*grown));
+        uint32_t *grown = (uint32_t *)realloc(rz_skipped, cap * sizeof(*grown));
         if (!grown) return;
         rz_skipped = grown;
         rz_skipped_cap = cap;
@@ -338,7 +365,7 @@ static void note_skipped(uint64_t at) {
  * least 5 bytes, no branch target inside (its first instruction may be one), moved to stubs. */
 static void protect_function(const RzFunction *f, int list, uint64_t *moved, uint64_t *skipped, uint64_t *groups) {
     size_t cap = (size_t)(f->end - f->begin), n = 0;
-    RzOp *ops = calloc(cap ? cap : 1, sizeof(*ops));
+    RzOp *ops = (RzOp *)calloc(cap ? cap : 1, sizeof(*ops));
     if (!ops) return;
     for (uint64_t at = f->begin; at < f->end && n < cap;) {
         ZydisDecodedInstruction in;
@@ -418,7 +445,7 @@ static void isa_left(uint64_t at, const char *why) {
 static uint64_t isa_short_function(const RzFunction *f) {
     if (f->bad) return 0;
     size_t cap = (size_t)(f->end - f->begin), n = 0;
-    RzOp *ops = calloc(cap ? cap : 1, sizeof(*ops));
+    RzOp *ops = (RzOp *)calloc(cap ? cap : 1, sizeof(*ops));
     if (!ops) return 0;
     /* outside: a direct branch out of the image (a hook's stub, which may come back anywhere in
      * the function). A branch or call into the middle of another function (f->hooked: a code
@@ -495,6 +522,9 @@ static unsigned char *allocate_near(size_t bytes) {
     const uintptr_t base = (uintptr_t)rz_image;
     const uintptr_t lo = base > UINT64_C(0x60000000) ? base - UINT64_C(0x60000000) : 0x10000;
     const uintptr_t hi = base + (uintptr_t)rz_size + UINT64_C(0x60000000);
+#ifndef _WIN32
+    return host_linux_alloc_between(lo, hi, bytes, PROT_READ | PROT_WRITE);
+#else
     MEMORY_BASIC_INFORMATION info;
     for (uintptr_t address = lo; address < hi && VirtualQuery((void *)address, &info, sizeof(info));
          address = (uintptr_t)info.BaseAddress + info.RegionSize) {
@@ -502,19 +532,20 @@ static unsigned char *allocate_near(size_t bytes) {
         const uintptr_t start = ((uintptr_t)info.BaseAddress + 0xffff) & ~(uintptr_t)0xffff;
         if (start + bytes > (uintptr_t)info.BaseAddress + info.RegionSize) continue;
         void *p = VirtualAlloc((void *)start, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (p) return p;
+        if (p) return (unsigned char *)p;
     }
     return NULL;
+#endif
 }
 static int compare_functions(const void *a, const void *b) {
-    const RzFunction *x = a, *y = b;
+    const RzFunction *x = (const RzFunction *)a, *y = (const RzFunction *)b;
     return x->begin < y->begin ? -1 : x->begin > y->begin;
 }
 static int compare_stubs(const void *a, const void *b) {
-    const RzStub *x = a, *y = b;
+    const RzStub *x = (const RzStub *)a, *y = (const RzStub *)b;
     return x->stub < y->stub ? -1 : x->stub > y->stub;
 }
-static int in_stubs(uintptr_t rip) {
+[[maybe_unused]] static int in_stubs(uintptr_t rip) {   /* used by the Windows fault hook */
     for (size_t i = 0; i < rz_chunks; ++i)
         if (rip - (uintptr_t)rz_chunk[i] < RZ_CHUNK) return 1;
     return 0;
@@ -534,10 +565,15 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
     rz_ready = 1;
     /* Off: nothing changes; the test mode still lists the red-zone functions (for its counts). */
     rz_protecting = !(env && env[0] == '0');
+#ifndef _WIN32
+    /* Linux: signal frames start 128 bytes below rsp; the test mode is about Windows exception frames */
+    rz_protecting = 0;
+    rz_scribble = 0;
+    if (!runtime_isa_active()) return 0;
+#endif
     if (!rz_protecting && !rz_scribble && !runtime_isa_active()) { puts("Red zone: protection off (GOW3_RED_ZONE=0)"); return 0; }
     const int list = env && !strcmp(env, "list");
-    LARGE_INTEGER t0, t1, hz;
-    QueryPerformanceCounter(&t0);
+    const auto t0 = std::chrono::steady_clock::now();
     if (ZYAN_FAILED(ZydisDecoderInit(&rz_decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
         puts("Red zone: protection unavailable (decoder)");
         return 0;
@@ -562,11 +598,11 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
                 if (range <= 0 || pc + (uint64_t)range > segment_end) continue;
                 if (count == cap) {
                     cap = cap ? cap * 2 : 65536;
-                    RzFunction *grown = realloc(functions, cap * sizeof(*grown));
+                    RzFunction *grown = (RzFunction *)realloc(functions, cap * sizeof(*grown));
                     if (!grown) { free(functions); puts("Red zone: protection unavailable (memory)"); return 0; }
                     functions = grown;
                 }
-                functions[count++] = (RzFunction){pc, pc + (uint64_t)range, 0, 0, 0, 0};
+                functions[count++] = RzFunction{pc, pc + (uint64_t)range, 0, 0, 0, 0};
             }
             at += 12 + (uint64_t)entries * 8 - 4;
         }
@@ -575,8 +611,8 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
     qsort(functions, count, sizeof(*functions), compare_functions);
     rz_code_end = 0;
     for (size_t i = 0; i < count; ++i) if (functions[i].end > rz_code_end) rz_code_end = functions[i].end;
-    rz_targets = calloc((size_t)(rz_code_end / 8 + 1), 1);
-    rz_starts = calloc((size_t)(rz_code_end / 8 + 1), 1);
+    rz_targets = (uint8_t *)calloc((size_t)(rz_code_end / 8 + 1), 1);
+    rz_starts = (uint8_t *)calloc((size_t)(rz_code_end / 8 + 1), 1);
     if (!rz_targets || !rz_starts) { free(functions); free(rz_targets); free(rz_starts); puts("Red zone: protection unavailable (memory)"); return 0; }
     for (size_t i = 0; i < count; ++i) bit_set(rz_starts, functions[i].begin);
     for (size_t i = 0; i < count; ++i) scan_function(&functions[i]);
@@ -589,21 +625,21 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
         else if (functions[i].indirect) ++indirect;
     }
     if (rz_scribble && red) {
-        rz_red = calloc((size_t)red, sizeof(*rz_red));
-        rz_red_seen = calloc((size_t)red, sizeof(*rz_red_seen));
+        rz_red = (RzRange *)calloc((size_t)red, sizeof(*rz_red));
+        rz_red_seen = new_flags((size_t)red);
         for (size_t i = 0; rz_red && rz_red_seen && i < count; ++i)
-            if (functions[i].red) rz_red[rz_red_count++] = (RzRange){(uint32_t)functions[i].begin, (uint32_t)functions[i].end};
+            if (functions[i].red) rz_red[rz_red_count++] = RzRange{(uint32_t)functions[i].begin, (uint32_t)functions[i].end};
     }
     if (!rz_protecting) {
+#ifdef _WIN32
         printf("Red zone: protection off (GOW3_RED_ZONE=0); %" PRIu64 " of %zu functions keep data below rsp (test counts)\n", red, count);
+#else
+        printf("CPU emulation: %zu functions in %u tables prepared (no red-zone pass on Linux)\n", count, tables);
+#endif
         isa_short_sites(functions, count);
         for (size_t i = 0; i < count; ++i) runtime_isa_convert_function(image, functions[i].begin, functions[i].end);
         runtime_isa_finish();
-        for (size_t i = 0; i < rz_chunks; ++i) {
-            DWORD old;
-            VirtualProtect(rz_chunk[i], RZ_CHUNK, PAGE_EXECUTE_READ, &old);
-            FlushInstructionCache(GetCurrentProcess(), rz_chunk[i], RZ_CHUNK);
-        }
+        for (size_t i = 0; i < rz_chunks; ++i) make_executable(rz_chunk[i], RZ_CHUNK);
         free(rz_targets); free(rz_starts); rz_targets = rz_starts = NULL;
         free(functions);
         return 0;
@@ -625,36 +661,35 @@ uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint
     isa_short_sites(functions, count);
     for (size_t i = 0; i < count; ++i) runtime_isa_convert_function(image, functions[i].begin, functions[i].end);
     runtime_isa_finish();
-    for (size_t i = 0; i < rz_chunks; ++i) {
-        DWORD old;
-        VirtualProtect(rz_chunk[i], RZ_CHUNK, PAGE_EXECUTE_READ, &old);
-        FlushInstructionCache(GetCurrentProcess(), rz_chunk[i], RZ_CHUNK);
-    }
+    for (size_t i = 0; i < rz_chunks; ++i) make_executable(rz_chunk[i], RZ_CHUNK);
     if (rz_no_space) puts("Red zone: stub space within jump range of the image ran out (the rest stays in place)");
     if (rz_skipped_count) {
         qsort(rz_skipped, rz_skipped_count, sizeof(*rz_skipped), compare_u32);
-        rz_warned = calloc(rz_skipped_count, sizeof(*rz_warned));
+        rz_warned = new_flags(rz_skipped_count);
     }
     if (rz_stub_count) {
         qsort(rz_stubs, rz_stub_count, sizeof(*rz_stubs), compare_stubs);
-        rz_stub_seen = calloc(rz_stub_count, sizeof(*rz_stub_seen));
+        rz_stub_seen = new_flags(rz_stub_count);
     }
     free(rz_targets); free(rz_starts); rz_targets = rz_starts = NULL;
     free(functions);
-    QueryPerformanceCounter(&t1);
-    QueryPerformanceFrequency(&hz);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     printf("Red zone: %u tables, %zu functions scanned, %" PRIu64 " keep data below rsp, %" PRIu64 " protected "
            "(left alone: %" PRIu64 " hooked, %" PRIu64 " with an indirect jump, %" PRIu64 " undecodable); %" PRIu64
            " accesses moved in %" PRIu64 " stubs (%zu KiB in %zu blocks), %" PRIu64 " left in place; %.0f ms\n",
            tables, count, red, protected_functions, hooked, indirect, bad, moved, groups, rz_stub_bytes / 1024, rz_chunks, skipped,
-           (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
+           ms);
     return moved;
 }
 
-/* Called by the fault handler after a GPU-tracking fault was handled, before the thread resumes. */
+/* Called by the fault handler after a GPU-tracking fault was handled, before the thread resumes (Windows: probe.c's
+ * vectored handler; Linux has no red-zone pass, see the top). */
 void runtime_redzone_after_fault(void *context) {
+#ifndef _WIN32
+    (void)context;
+#else
     if (!rz_ready) return;
-    CONTEXT *c = context;
+    CONTEXT *c = (CONTEXT *)context;
     const uintptr_t rip = (uintptr_t)c->Rip;
     const int guest = rip - (uintptr_t)rz_image < rz_size;
     const int stub = !guest && in_stubs(rip);
@@ -665,7 +700,7 @@ void runtime_redzone_after_fault(void *context) {
             const size_t mid = lo + (hi - lo) / 2;
             if (rz_skipped[mid] < offset) lo = mid + 1; else hi = mid;
         }
-        if (lo < rz_skipped_count && rz_skipped[lo] == offset && !InterlockedExchange(&rz_warned[lo], 1)) {
+        if (lo < rz_skipped_count && rz_skipped[lo] == offset && !rz_warned[lo].exchange(1)) {
             char line[128];
             const int n = snprintf(line, sizeof(line), "Red zone: fault at an access left in place, guest offset %#llx\n",
                                    (unsigned long long)offset);
@@ -679,17 +714,17 @@ void runtime_redzone_after_fault(void *context) {
         /* (Not over the exception's own context, should it lie there.) */
         if (frame + sizeof(*c) <= (uintptr_t)below || frame >= (uintptr_t)below + 128) memset(below, 0xcc, 128);
         /* Counts, and the first fault in each stub / red-zone function (at most 100 lines). */
-        const LONG total = InterlockedIncrement(&rz_scribbles);
+        const int32_t total = rz_scribbles.fetch_add(1) + 1;
         char line[192];
         int n = 0;
         if (stub) {
-            InterlockedIncrement(&rz_in_stub);
+            rz_in_stub.fetch_add(1);
             size_t lo = 0, hi = rz_stub_count;
             while (lo < hi) {
                 const size_t mid = lo + (hi - lo) / 2;
                 if (rz_stubs[mid].stub <= rip) lo = mid + 1; else hi = mid;
             }
-            if (lo && rz_stub_seen && !InterlockedExchange(&rz_stub_seen[lo - 1], 1) && InterlockedIncrement(&rz_prints) <= 100)
+            if (lo && rz_stub_seen && !rz_stub_seen[lo - 1].exchange(1) && rz_prints.fetch_add(1) + 1 <= 100)
                 n = snprintf(line, sizeof(line), "Red zone test: fault in the stub for guest offset %#x (access moved, red zone kept)\n",
                              (unsigned)rz_stubs[lo - 1].site);
         } else if (rz_red_count) {
@@ -700,27 +735,21 @@ void runtime_redzone_after_fault(void *context) {
                 if (rz_red[mid].begin <= at) lo = mid + 1; else hi = mid;
             }
             if (lo && at < rz_red[lo - 1].end) {
-                InterlockedIncrement(&rz_in_red);
-                if (!InterlockedExchange(&rz_red_seen[lo - 1], 1) && InterlockedIncrement(&rz_prints) <= 100)
+                rz_in_red.fetch_add(1);
+                if (!rz_red_seen[lo - 1].exchange(1) && rz_prints.fetch_add(1) + 1 <= 100)
                     n = snprintf(line, sizeof(line), "Red zone test: fault inside red-zone function %#x at guest offset %#x (%s)\n",
                                  (unsigned)rz_red[lo - 1].begin, (unsigned)at, rz_protecting ? "access not moved" : "protection off");
             }
         }
         DWORD written;
         if (n > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)n, &written, NULL);
-        const LONG64 now = (LONG64)GetTickCount64(), last = rz_last_report;
-        if (now - last >= 30000 && InterlockedCompareExchange64(&rz_last_report, now, last) == last) {
+        const int64_t now = (int64_t)GetTickCount64();
+        int64_t last = rz_last_report.load();
+        if (now - last >= 30000 && rz_last_report.compare_exchange_strong(last, now)) {
             n = snprintf(line, sizeof(line), "Red zone test: %ld faults scribbled, %ld in red-zone functions, %ld in stubs\n",
-                         (long)total, (long)rz_in_red, (long)rz_in_stub);
+                         (long)total, (long)rz_in_red.load(), (long)rz_in_stub.load());
             if (n > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)n, &written, NULL);
         }
     }
-}
-#else
-uint64_t runtime_redzone_install(unsigned char *image, uint64_t size, const uint64_t *segments, uint64_t count) {
-    /* Signal frames skip the 128-byte red zone on Linux: nothing to do. */
-    (void)image; (void)size; (void)segments; (void)count;
-    return 0;
-}
-void runtime_redzone_after_fault(void *context) { (void)context; }
 #endif
+}

@@ -9,7 +9,7 @@ extern "C" {
 #include <array>
 #include "test_environment.h" // SetTestEnv
 using namespace Libraries::Videodec2;
-int main() {
+int main(int argc, char** argv) {
     SetTestEnv("GOW3_MOVIE_SIZE", nullptr);  // no display size: frames are not rescaled
     OrbisVideodec2ComputeMemoryInfo compute{};
     compute.this_size=sizeof(compute);
@@ -24,7 +24,7 @@ int main() {
     OrbisVideodec2Decoder decoder=nullptr;
     assert(!sceVideodec2CreateDecoder(&config,&memory,&decoder));
     std::array<u8,65536> pixels{},stream{};
-    FILE* file=fopen("tests/data/tiny.h264","rb"); assert(file);
+    FILE* file=fopen(argc>1 ? argv[1] : "tests/data/tiny.h264","rb"); assert(file);
     const int size=(int)fread(stream.data(),1,stream.size(),file); fclose(file);
     OrbisVideodec2FrameBuffer buffer{};
     buffer.this_size=sizeof(buffer); buffer.frame_buffer=pixels.data(); buffer.frame_buffer_size=pixels.size();

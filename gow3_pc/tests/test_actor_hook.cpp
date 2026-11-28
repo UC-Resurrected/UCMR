@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <windows.h>
+#include "test_memory.h"
 #include "../src/actor_hook.h"
 #include "gow3_actors.h"
 
@@ -33,8 +33,7 @@ int main() {
     assert(!gow3_actor_signature_match(other, sizeof(other)));
     assert(!gow3_actor_signature_match(gow3_actor_original, GOW3_ACTOR_HOOK_LENGTH - 1));
 
-    auto* stub = static_cast<unsigned char*>(
-        VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    auto* stub = TestCodeMemory(4096);
     assert(stub);
     const unsigned n = gow3_actor_build_stub(stub, reinterpret_cast<uintptr_t>(slots),
                                              reinterpret_cast<uintptr_t>(&actor_hook_return));
@@ -57,5 +56,5 @@ int main() {
     assert(!Gow3Actors::Valid(NAN, 100.0f) && !Gow3Actors::Valid(10.0f, 0.0f));
     assert(!Gow3Actors::Valid(-1.0f, 100.0f) && !Gow3Actors::Valid(200.0f, 100.0f));
     assert(!Gow3Actors::Valid(1.0f, 1e9f) && Gow3Actors::Fraction(NAN, 1.0f) == 0.0f);
-    VirtualFree(stub, 0, MEM_RELEASE);
+    TestCodeFree(stub, 4096);
 }

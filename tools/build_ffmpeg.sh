@@ -11,7 +11,8 @@
 #
 # Run from an MSYS2 CLANG64 shell (needs make and nasm); a finished build is kept. Prints the pkg-config folder.
 # On Linux (make, nasm, a C compiler: CC, default cc; zlib's headers) it builds the same FFmpeg as one ffmpeg program
-# with the libraries linked in, into downloads/ffmpeg-8.1.1-min-linux (tools/package_linux.sh ships bin/ffmpeg).
+# with the libraries linked in, into downloads/ffmpeg-8.1.1-min-linux (tools/package_linux.sh ships bin/ffmpeg; the
+# game runtime links its static libraries, lib/pkgconfig).
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 version=8.1.1
@@ -41,9 +42,10 @@ if [[ $(uname -s) == Linux ]]; then
     unpack
     mkdir -p tmp
     export TMPDIR=$PWD/tmp
-    # the same parts as the Windows build below; static libraries, so ffmpeg needs only the C library and zlib
+    # the same parts as the Windows build below; static libraries, so ffmpeg needs only the C library and zlib; the
+    # game runtime links them in too (position-independent code, so the runtime's unit tests can link them as well)
     ./configure --prefix="$prefix" --cc="${CC:-cc}" \
-        --disable-shared --enable-static --disable-debug --disable-doc --disable-autodetect --disable-network \
+        --disable-shared --enable-static --enable-pic --disable-debug --disable-doc --disable-autodetect --disable-network \
         --enable-pthreads --enable-zlib --disable-everything --disable-programs --enable-ffmpeg --disable-avdevice \
         --enable-decoder=h264,hevc,aac,aac_latm,mp3,mp3float,png,mjpeg \
         --enable-parser=h264,hevc,aac,aac_latm,mpegaudio,png,mjpeg \

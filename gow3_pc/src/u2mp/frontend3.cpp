@@ -91,7 +91,6 @@ constexpr uint32_t kRetryAfterFailure = 900;
 // restarted; then the wait in whole seconds by the number N of other connected players (index N).
 constexpr uint32_t kGatherReference = 2400;
 constexpr uint8_t kGatherWait[11] = {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0};
-constexpr uint32_t kBalanceQuiet = 1500;      // after a balance kick: 5 s for the kicked player to go
 constexpr uint32_t kPartyBackWait = 3000;     // a leader waits up to 10 s for its party to come back before searching
 constexpr uint32_t kLeaveDelay = 90;          // a leader in a stranger's room leaves 0.3 s after telling its party
 constexpr int kCriteriaPasses = 3;            // PS3 criteria rows b25ab071 (status text, ping limit)
@@ -107,7 +106,8 @@ enum : uint8_t {
     kMsgLeave = 0x15,
     kMsgLeaderBack = 0x16,
     // 0x17 is frontend6's "starting"
-    kMsgBalanceKick = 0x18,   // host -> a stranger: removed to balance the teams (PS3 KickoutRoomMember)
+    kMsgBalanceKick = 0x18,   // host -> a stranger: removed to balance the teams (PS3 KickoutRoomMember); sent only
+                              // by older hosts (0.10.173 and earlier), still obeyed
     kMsgPartyLeave = 0x19,    // {u64 party room id}: that party's leader left matchmaking (PS3 0x108); the host relays it
 };
 
@@ -181,7 +181,6 @@ struct Machine {
     uint32_t retry_at = 0;
     int criteria = 0;            // the search pass (PS3 criteria index 0xf22630)
     uint32_t party_wait = 0;     // leader: since when it waits for its party to come back (0 none)
-    uint32_t quiet_until = 0;    // no gather decision before (a balance kick runs)
     uint32_t leave_at = 0;       // leader in a stranger's room: leave then (0 none)
     bool follow_leader_out = false;   // our party's leader left matchmaking: go back to it
 };
@@ -541,18 +540,8 @@ void host_start_matchmaking_step() {
     }
 }
 
-// Team playlists: the PS3 room size is the playlist's maximum player count, even for every competitive playlist
-// (10) and odd for co-op (3).
-bool playlist_max_even() {
-    std::vector<int32_t> types;
-    if (!playlist_game_types(types) || types.empty()) return true;
-    for (const int32_t t : types)
-        if (t != 4 && t != 8 && t != 9 && t != 12) return true;
-    return false;
-}
-
 // Online gather (PS3 0x4b0a58 state 16): wait by the number N of other connected players from the fixed reference,
-// then enough players -> team balance and the vote; too few -> "time out", leave the room, search from criteria 1.
+// then enough players -> the vote (no team balance kick); too few -> "time out", leave the room, search from criteria 1.
 void host_gather_online() {
     const uint32_t now = clock_now();
     const int others = session::member_count() - 1;
@@ -563,18 +552,13 @@ void host_gather_online() {
         const int32_t left = int32_t(at - now);
         log("matchmaking: %d other player(s) connected: Game starting in %d seconds", n, left > 0 ? left / 300 : 0);
     }
-    if (int32_t(now - at) < 0 || int32_t(now - m.quiet_until) < 0) return;
+    if (int32_t(now - at) < 0) return;
     if (online::mm_pending_members() > 0) return;   // an open reservation: wait for it
-    if (n + 1 >= matchmaking_min_players()) {   // KEPT: our minimum (issue 104), PS3 timing
-        if (n % 2 == 1 && playlist_max_even()) {   // tunable +0x7f "balance teams" is on
-            const int slot = session::mm_balance_slot();
-            if (slot > 0) {
-                log("matchmaking: %d players for a team playlist: slot %d came alone, removed to balance the teams", n + 1, slot);
-                session::send_message(slot, {kMsgBalanceKick});
-                m.quiet_until = now + kBalanceQuiet;
-                return;
-            }
-        }
+    // KEPT: our minimum (issue 104), PS3 timing. Owner's rule: the minimum is 2, but every player who joined plays,
+    // an odd number included (3 players in Team Deathmatch: 2 v 1). PS3's team balance (tunable +0x7f) removed the
+    // last player who came alone, which with few players kept friends from playing together, so the host never kicks
+    // to balance; a member still obeys message 0x18 from an older host.
+    if (n + 1 >= matchmaking_min_players()) {
         start_vote();
         return;
     }

@@ -14,6 +14,7 @@ overlay-r3	dc1/ps4/render-settings/game/shambhala-multi.bin	patch18	47c69f94303f
 overlay-r3	dc1/ps4/render-settings/game/temple-multi.bin	patch18	77759356a3f8bddafdc9715a876fe26c296763be22a61b6e7077ed2c675fcea3	identical
 overlay-r3	dc1/ps4/render-settings/game/warzone-multi.bin	patch18	bbd446a482677bc156e01b0d8e1681da4053a7c57a00ba497a22721537475ca8	identical
 overlay-r3	dc1/ps4/render-settings/game/yemen-multi.bin	patch18	0c3a61c04e017eef9980de896a099471fd9621d108ab18a2e3f5ed43a2debf05	identical
+overlay-r3	dc1/ps4/water-parameters.bin	patch18	1ca56e17f9ddc18eacae40b639cbe9570455e01546054362c6bebcb1c7658081	identical
 overlay-r3	dc1/ps4/ss-multiplayer/ss-airport-bomb-drop.bin	patch18	c69731cab3ffc105562ea3d71ac33cba373eb079ae65d781645efae5c10ba324	different
 overlay-r3	dc1/ps4/ss-multiplayer/ss-arm-bomb.bin	disc	79a6108b2b8865ba0efbd4e2c0852bc2cbbd8b6830d74d2d8825d426f90e36a3	different
 overlay-r3	dc1/ps4/ss-multiplayer/ss-cha-events.bin	disc	948b5d17991f7b8dda13db3ad11dbe7aa24f2d8fe92a1f4bbe33f11676b726aa	different

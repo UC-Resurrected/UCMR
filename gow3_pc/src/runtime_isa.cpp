@@ -1,4 +1,4 @@
-/* Instructions older CPUs lack (gow3 1 Nov 2026; Windows; GitHub #154, #299).
+/* Instructions older CPUs lack (gow3 1 Nov 2026; GitHub #154, #299; Windows and Linux since 27 Nov 2026).
  *
  * The games' code was built for the PS4's Jaguar CPU and uses MOVBE, BMI1 (ANDN, BEXTR, BLSI,
  * BLSMSK, BLSR, TZCNT), LZCNT and F16C (VCVTPH2PS). Intel CPUs before Haswell and AMD FX lack some
@@ -10,7 +10,7 @@
  * LZCNT and TZCNT do not fault there: the CPU ignores their F3 prefix and runs BSR / BSF, which
  * give other results. At load time their F3 prefix becomes F0 (LOCK, same length): LOCK BSR / BSF
  * raise #UD on every CPU, and the handler runs them as LZCNT / TZCNT (real code never holds a
- * LOCK BSR / BSF). runtime_redzone.c applies this to the game's functions after its own pass
+ * LOCK BSR / BSF). runtime_redzone.cpp applies this to the game's functions after its own pass
  * (runtime_isa_convert_function) and to the copies it moves into its stubs (runtime_isa_fix_moved),
  * and in functions that keep data below rsp it moves these instructions into its stubs as it does
  * faulting accesses: the exception frame of the #UD then lands below the red zone.
@@ -18,13 +18,20 @@
  * GOW3_ISA_COMPAT=0: off (the CPU check then stops the game, as before). =trap (tests, on a CPU
  * that has them all): every such instruction is made to fault (LZCNT/TZCNT as above, the others
  * replaced by ud2, their bytes kept in a table) so the handler runs each one. Every 30 s a line
- * gives the counts per kind and the busiest sites. */
+ * gives the counts per kind and the busiest sites.
+ *
+ * The emulation is the same on both systems; the thread's registers come from one small view (IsaContext below):
+ * a Windows CONTEXT (probe.c's vectored handler) or a Linux ucontext_t (host_linux.cpp's SIGILL handler, whose
+ * XSAVE area holds the upper halves of the YMM registers). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 
+#include <atomic>
+
+extern "C" {
 int runtime_isa_active(void);
 int runtime_isa_traps(const void *instruction);
 void runtime_isa_fix_moved(unsigned char *code, unsigned length);
@@ -32,10 +39,126 @@ void runtime_isa_convert_function(unsigned char *image, uint64_t begin, uint64_t
 void runtime_isa_finish(void);
 int runtime_isa_emulate(void *context);
 int runtime_isa_configure(uint32_t leaf1_ecx, uint32_t leaf7_ebx, uint32_t ext1_ecx, char *missing, size_t size);
+unsigned char *runtime_near_image_alloc(size_t bytes, int executable);   /* probe.c */
+unsigned runtime_isa_emit_count(unsigned char *out, const unsigned char *instruction, unsigned length, uintptr_t at);
+unsigned runtime_isa_relocated(unsigned char *code, unsigned length);
+}
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <time.h>
+#include <ucontext.h>
+#include <unistd.h>
+#endif
 #include <Zydis/Zydis.h>
+
+/* ---- the system's part: the thread's registers, memory checks, output, time -------------------------------------- */
+namespace {
+#ifdef _WIN32
+typedef CONTEXT IsaContext;
+/* the 16 general registers in Zydis's order (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8 .. r15) */
+uint64_t *isa_gpr_slot(IsaContext *c, unsigned n) {
+    DWORD64 *const slots[16] = {&c->Rax, &c->Rcx, &c->Rdx, &c->Rbx, &c->Rsp, &c->Rbp, &c->Rsi, &c->Rdi,
+                                &c->R8,  &c->R9,  &c->R10, &c->R11, &c->R12, &c->R13, &c->R14, &c->R15};
+    return (uint64_t *)slots[n];
+}
+uint64_t isa_rip(const IsaContext *c) { return c->Rip; }
+void isa_set_rip(IsaContext *c, uint64_t rip) { c->Rip = rip; }
+uint32_t isa_flags(const IsaContext *c) { return c->EFlags; }
+void isa_set_flags(IsaContext *c, uint32_t flags) { c->EFlags = flags; }
+unsigned char *isa_xmm(IsaContext *c, unsigned n) { return (unsigned char *)&(&c->Xmm0)[n]; }
+/* The upper halves of YMM0..15 (16 x 16 bytes), made present in the context (zeros when they were in their initial
+ * state, vzeroupper before: the context restores them only when AVX is marked present); NULL when not there. */
+unsigned char *isa_ymm_upper(IsaContext *c) {
+    DWORD length = 0;
+    M128A *upper = (M128A *)LocateXStateFeature(c, XSTATE_AVX, &length);
+    if (!upper || length < 16u * 16u) return NULL;
+    DWORD64 features = 0;
+    if (!GetXStateFeaturesMask(c, &features)) return NULL;
+    if (!(features & XSTATE_MASK_AVX)) {
+        memset(upper, 0, 16u * 16u);
+        if (!SetXStateFeaturesMask(c, features | XSTATE_MASK_AVX)) return NULL;
+    }
+    return (unsigned char *)upper;
+}
+/* 1 when the page at `address` can be read (the instruction's bytes may run into it) */
+int isa_readable(uintptr_t address) {
+    MEMORY_BASIC_INFORMATION info;
+    return VirtualQuery((const void *)address, &info, sizeof(info)) && info.State == MEM_COMMIT &&
+           (info.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
+void isa_write_line(const char *line, size_t n) {
+    DWORD written;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)n, &written, NULL);
+}
+int64_t isa_now_ms(void) { return (int64_t)GetTickCount64(); }
+void isa_make_executable(unsigned char *p, size_t n) {
+    DWORD old;
+    VirtualProtect(p, n, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, n);
+}
+#else
+typedef ucontext_t IsaContext;
+uint64_t *isa_gpr_slot(IsaContext *c, unsigned n) {
+    static const int slots[16] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                  REG_R8,  REG_R9,  REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15};
+    return (uint64_t *)&c->uc_mcontext.gregs[slots[n]];
+}
+uint64_t isa_rip(const IsaContext *c) { return (uint64_t)c->uc_mcontext.gregs[REG_RIP]; }
+void isa_set_rip(IsaContext *c, uint64_t rip) { c->uc_mcontext.gregs[REG_RIP] = (greg_t)rip; }
+uint32_t isa_flags(const IsaContext *c) { return (uint32_t)c->uc_mcontext.gregs[REG_EFL]; }
+void isa_set_flags(IsaContext *c, uint32_t flags) {
+    c->uc_mcontext.gregs[REG_EFL] = (greg_t)(((uint64_t)c->uc_mcontext.gregs[REG_EFL] & ~UINT64_C(0xffffffff)) | flags);
+}
+unsigned char *isa_xmm(IsaContext *c, unsigned n) {
+    return c->uc_mcontext.fpregs ? (unsigned char *)c->uc_mcontext.fpregs->_xmm[n].element : NULL;
+}
+/* The signal frame's FPU state is the XSAVE area (standard format) when its software bytes (the last 48 of the legacy
+ * 512) carry FP_XSTATE_MAGIC1: header at 512 (XSTATE_BV first), YMM upper halves at 576. sigreturn restores them only
+ * when XSTATE_BV marks AVX: as on Windows, zeros when they were in their initial state, and the bit set. */
+unsigned char *isa_ymm_upper(IsaContext *c) {
+    unsigned char *const area = (unsigned char *)c->uc_mcontext.fpregs;
+    if (!area) return NULL;
+    uint32_t magic1, xstate_size;
+    uint64_t xfeatures, xstate_bv;
+    memcpy(&magic1, area + 464, 4);
+    memcpy(&xfeatures, area + 472, 8);
+    memcpy(&xstate_size, area + 480, 4);
+    if (magic1 != 0x46505853u || !(xfeatures & 4) || xstate_size < 576u + 16u * 16u) return NULL;
+    memcpy(&xstate_bv, area + 512, 8);
+    if (!(xstate_bv & 4)) {
+        memset(area + 576, 0, 16u * 16u);
+        xstate_bv |= 4;
+        memcpy(area + 512, &xstate_bv, 8);
+    }
+    return area + 576;
+}
+/* process_vm_readv on this process: fails, instead of faulting, when the page cannot be read */
+int isa_readable(uintptr_t address) {
+    unsigned char byte;
+    struct iovec local = {&byte, 1}, remote = {(void *)address, 1};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == 1;
+}
+void isa_write_line(const char *line, size_t n) {
+    while (n) {
+        const ssize_t put = write(1, line, n);
+        if (put <= 0) return;
+        line += put;
+        n -= (size_t)put;
+    }
+}
+int64_t isa_now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+void isa_make_executable(unsigned char *p, size_t n) { mprotect(p, n, PROT_READ | PROT_EXEC); }   /* x86: coherent caches */
+#endif
+}  // namespace
 
 enum { K_LZCNT, K_TZCNT, K_MOVBE, K_ANDN, K_BEXTR, K_BLS, K_F16C, K_COUNT };
 static const char *const kind_names[K_COUNT] = {"lzcnt", "tzcnt", "movbe", "andn", "bextr", "blsi/blsmsk/blsr", "vcvtph2ps"};
@@ -43,9 +166,9 @@ static const char *const kind_names[K_COUNT] = {"lzcnt", "tzcnt", "movbe", "andn
 static int isa_mode;                 /* 0 off, 1 the CPU lacks some, 2 trap (test) */
 static int need[K_COUNT];            /* which kinds this CPU lacks (all of them in trap mode) */
 static ZydisDecoder isa_decoder;
-static volatile LONG isa_hits[K_COUNT];
-static volatile LONG isa_exception_hits;   /* the part of isa_hits that came through the exception handler */
-static volatile LONG64 isa_last_report;
+static std::atomic<int32_t> isa_hits[K_COUNT];
+static std::atomic<int32_t> isa_exception_hits;   /* the part of isa_hits that came through the exception handler */
+static std::atomic<int64_t> isa_last_report;
 static uint64_t isa_converted[K_COUNT];
 
 /* Trap mode: the original bytes of each instruction replaced by ud2, by address (sorted). */
@@ -56,8 +179,8 @@ static int isa_traps_sorted;
 
 /* Busiest sites (a small lock-free table: address -> count). */
 #define ISA_SITES 4096
-static volatile LONG64 isa_site_key[ISA_SITES];
-static volatile LONG isa_site_hits[ISA_SITES];
+static std::atomic<int64_t> isa_site_key[ISA_SITES];
+static std::atomic<int32_t> isa_site_hits[ISA_SITES];
 
 static int kind_of(const ZydisDecodedInstruction *in) {
     switch (in->mnemonic) {
@@ -134,7 +257,7 @@ int runtime_isa_traps(const void *instruction) {
 static void add_trap(uintptr_t address, const unsigned char *bytes, unsigned length) {
     if (isa_trap_count == isa_trap_cap) {
         const size_t cap = isa_trap_cap ? isa_trap_cap * 2 : 4096;
-        IsaTrap *grown = realloc(isa_traps, cap * sizeof(*grown));
+        IsaTrap *grown = (IsaTrap *)realloc(isa_traps, cap * sizeof(*grown));
         if (!grown) return;
         isa_traps = grown;
         isa_trap_cap = cap;
@@ -147,8 +270,6 @@ static void add_trap(uintptr_t address, const unsigned char *bytes, unsigned len
 }
 /* LZCNT / TZCNT of 5 bytes or more become a jmp to their native sequence (runtime_isa_emit_count)
  * in stub space next to the image, which jumps back: no exception. GOW3_ISA_FAST=0: traps only. */
-unsigned char *runtime_near_image_alloc(size_t bytes, int executable);   /* probe.c */
-unsigned runtime_isa_emit_count(unsigned char *out, const unsigned char *instruction, unsigned length, uintptr_t at);
 #define ISA_FAST_CHUNK ((size_t)64 << 10)
 static unsigned char *isa_fast_chunks[16];
 static size_t isa_fast_chunk_count, isa_fast_used;
@@ -515,45 +636,45 @@ static int make_native(unsigned char *code, const ZydisDecodedInstruction *in, c
 }
 
 /* MOVBE / BMI1 sites of 5 bytes or more jump to a stub that keeps the red zone (rsp - 128), saves
- * the flags, the general registers and xmm0-5 (the handler is ordinary Windows x64 code), and calls
- * runtime_isa_site, which runs the same emulation as the exception handler (run) on them: no
- * exception (~1 us each). Then it restores them and jumps back. */
+ * the flags, the general registers and xmm0-5, and calls runtime_isa_site, which runs the same emulation as the
+ * exception handler (run) on them: no exception (~1 us each). Then it restores them and jumps back. The stubs call
+ * with the Microsoft x64 convention (rcx, rdx, r8; 32 bytes of shadow space; xmm6-15 kept by the callee) on both
+ * systems: ISA_STUB_ABI gives the two helpers that convention on Linux too, so the stub bytes are the same. */
+#define ISA_STUB_ABI __attribute__((ms_abi))
 typedef struct {
     ZydisDecodedInstruction in;
     ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
     uintptr_t rip;
     int kind;
 } IsaSite;
-static volatile LONG isa_site_failures;
-static int run(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *ops, uintptr_t rip);
+static std::atomic<int32_t> isa_site_failures;
+static int run(IsaContext *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *ops, uintptr_t rip);
 static void note_site(uintptr_t rip);
 static void report(void);
-/* saved: r15 r14 r13 r12 r11 r10 r9 r8 rdi rsi rbp rbx rdx rcx rax rflags (the stub's pushes). */
-void runtime_isa_site(uint64_t *saved, const IsaSite *site) {
-    CONTEXT c;
-    c.R15 = saved[0]; c.R14 = saved[1]; c.R13 = saved[2]; c.R12 = saved[3];
-    c.R11 = saved[4]; c.R10 = saved[5]; c.R9 = saved[6];  c.R8 = saved[7];
-    c.Rdi = saved[8]; c.Rsi = saved[9]; c.Rbp = saved[10]; c.Rbx = saved[11];
-    c.Rdx = saved[12]; c.Rcx = saved[13]; c.Rax = saved[14];
-    c.EFlags = (DWORD)saved[15];
-    c.Rsp = (DWORD64)(uintptr_t)(saved + 16) + 128;   /* the guest's rsp at the instruction */
-    c.Rip = site->rip;
+/* saved: r15 r14 r13 r12 r11 r10 r9 r8 rdi rsi rbp rbx rdx rcx rax rflags (the stub's pushes); as register numbers
+ * (isa_gpr_slot's order) */
+static const unsigned char saved_slot[15] = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 3, 2, 1, 0};
+static void load_saved(IsaContext *c, const uint64_t *saved) {
+    for (unsigned i = 0; i < 15; ++i) *isa_gpr_slot(c, saved_slot[i]) = saved[i];
+    *isa_gpr_slot(c, 4) = (uint64_t)(uintptr_t)(saved + 16) + 128;   /* rsp: the guest's rsp at the instruction */
+}
+extern "C" ISA_STUB_ABI void runtime_isa_site(uint64_t *saved, const IsaSite *site) {
+    IsaContext c;
+    load_saved(&c, saved);
+    isa_set_flags(&c, (uint32_t)saved[15]);
+    isa_set_rip(&c, site->rip);
     if (!run(&c, &site->in, site->ops, site->rip)) {
-        if (InterlockedIncrement(&isa_site_failures) <= 4) {
+        if (isa_site_failures.fetch_add(1) + 1 <= 4) {
             char line[96];
             const int n = snprintf(line, sizeof(line), "CPU emulation: instruction at %#llx not carried out\n",
                                    (unsigned long long)site->rip);
-            DWORD written;
-            WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)n, &written, NULL);
+            isa_write_line(line, (size_t)n);
         }
         return;
     }
-    saved[0] = c.R15; saved[1] = c.R14; saved[2] = c.R13; saved[3] = c.R12;
-    saved[4] = c.R11; saved[5] = c.R10; saved[6] = c.R9;  saved[7] = c.R8;
-    saved[8] = c.Rdi; saved[9] = c.Rsi; saved[10] = c.Rbp; saved[11] = c.Rbx;
-    saved[12] = c.Rdx; saved[13] = c.Rcx; saved[14] = c.Rax;
-    saved[15] = (saved[15] & ~UINT64_C(0xffffffff)) | c.EFlags;
-    InterlockedIncrement(&isa_hits[site->kind]);
+    for (unsigned i = 0; i < 15; ++i) saved[i] = *isa_gpr_slot(&c, saved_slot[i]);
+    saved[15] = (saved[15] & ~UINT64_C(0xffffffff)) | isa_flags(&c);
+    isa_hits[site->kind].fetch_add(1);
     note_site(site->rip);
     report();
 }
@@ -601,7 +722,7 @@ static int make_fast_call(unsigned char *code, const ZydisDecodedInstruction *in
         isa_fast_chunks[isa_fast_chunk_count++] = chunk;
         isa_fast_used = 0;
     }
-    IsaSite *site = malloc(sizeof(*site));
+    IsaSite *site = (IsaSite *)malloc(sizeof(*site));
     if (!site) return 0;
     site->in = *in;
     memcpy(site->ops, ops, sizeof(site->ops));
@@ -630,14 +751,10 @@ static int make_fast_call(unsigned char *code, const ZydisDecodedInstruction *in
  * also saves ymm0-15 (Sandy Bridge has AVX), and runtime_isa_site_vector converts into the saved
  * copy of the destination, which the stub then loads back with the rest. */
 static float half_to_float(uint16_t h);
-static uintptr_t operand_address(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip);
-void runtime_isa_site_vector(uint64_t *saved, const IsaSite *site, unsigned char *ymm) {
-    CONTEXT c;
-    c.R15 = saved[0]; c.R14 = saved[1]; c.R13 = saved[2]; c.R12 = saved[3];
-    c.R11 = saved[4]; c.R10 = saved[5]; c.R9 = saved[6];  c.R8 = saved[7];
-    c.Rdi = saved[8]; c.Rsi = saved[9]; c.Rbp = saved[10]; c.Rbx = saved[11];
-    c.Rdx = saved[12]; c.Rcx = saved[13]; c.Rax = saved[14];
-    c.Rsp = (DWORD64)(uintptr_t)(saved + 16) + 128;
+static uintptr_t operand_address(IsaContext *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip);
+extern "C" ISA_STUB_ABI void runtime_isa_site_vector(uint64_t *saved, const IsaSite *site, unsigned char *ymm) {
+    IsaContext c;
+    load_saved(&c, saved);
     const ZydisDecodedOperand *ops = site->ops;
     const unsigned count = ops[0].size / 32u;
     uint16_t halves[8] = {0};
@@ -652,7 +769,7 @@ void runtime_isa_site_vector(uint64_t *saved, const IsaSite *site, unsigned char
     float floats[8] = {0};
     for (unsigned i = 0; i < count; ++i) floats[i] = half_to_float(halves[i]);
     memcpy(ymm + 32u * dest, floats, 32);              /* the xmm form clears the upper half */
-    InterlockedIncrement(&isa_hits[K_F16C]);
+    isa_hits[K_F16C].fetch_add(1);
     note_site(site->rip);
     report();
 }
@@ -695,7 +812,7 @@ static int make_fast_vector(unsigned char *code, const ZydisDecodedInstruction *
         isa_fast_chunks[isa_fast_chunk_count++] = chunk;
         isa_fast_used = 0;
     }
-    IsaSite *site = malloc(sizeof(*site));
+    IsaSite *site = (IsaSite *)malloc(sizeof(*site));
     if (!site) return 0;
     site->in = *in;
     memcpy(site->ops, ops, sizeof(site->ops));
@@ -891,18 +1008,14 @@ unsigned runtime_isa_emit_count(unsigned char *out, const unsigned char *instruc
 }
 
 static int compare_traps(const void *a, const void *b) {
-    const IsaTrap *x = a, *y = b;
+    const IsaTrap *x = (const IsaTrap *)a, *y = (const IsaTrap *)b;
     return x->address < y->address ? -1 : x->address > y->address;
 }
 void runtime_isa_finish(void) {
     if (!isa_mode) return;
     if (isa_trap_count) qsort(isa_traps, isa_trap_count, sizeof(*isa_traps), compare_traps);
     isa_traps_sorted = 1;
-    for (size_t i = 0; i < isa_fast_chunk_count; ++i) {
-        DWORD old;
-        VirtualProtect(isa_fast_chunks[i], ISA_FAST_CHUNK, PAGE_EXECUTE_READ, &old);
-        FlushInstructionCache(GetCurrentProcess(), isa_fast_chunks[i], ISA_FAST_CHUNK);
-    }
+    for (size_t i = 0; i < isa_fast_chunk_count; ++i) isa_make_executable(isa_fast_chunks[i], ISA_FAST_CHUNK);
     printf("CPU emulation: %s; made to fault:", isa_mode == 2 ? "test mode (GOW3_ISA_COMPAT=trap)" : "instructions this CPU lacks run in the exception handler (GOW3_ISA_COMPAT=0: off)");
     for (int k = 0; k < K_COUNT; ++k)
         if (need[k]) printf(" %s %" PRIu64, kind_names[k], isa_converted[k]);
@@ -924,36 +1037,36 @@ static const IsaTrap *find_trap(uintptr_t address) {
     return lo < isa_trap_count && isa_traps[lo].address == address ? &isa_traps[lo] : NULL;
 }
 
-/* The CONTEXT slot of a general register, and its width in bits; NULL for others. */
-static DWORD64 *gpr(CONTEXT *c, ZydisRegister r, unsigned *bits) {
+/* The context's slot of a general register, and its width in bits; NULL for others. */
+static uint64_t *gpr(IsaContext *c, ZydisRegister r, unsigned *bits) {
     *bits = ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, r);
     switch (ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r)) {
-    case ZYDIS_REGISTER_RAX: return &c->Rax; case ZYDIS_REGISTER_RCX: return &c->Rcx;
-    case ZYDIS_REGISTER_RDX: return &c->Rdx; case ZYDIS_REGISTER_RBX: return &c->Rbx;
-    case ZYDIS_REGISTER_RSP: return &c->Rsp; case ZYDIS_REGISTER_RBP: return &c->Rbp;
-    case ZYDIS_REGISTER_RSI: return &c->Rsi; case ZYDIS_REGISTER_RDI: return &c->Rdi;
-    case ZYDIS_REGISTER_R8: return &c->R8;   case ZYDIS_REGISTER_R9: return &c->R9;
-    case ZYDIS_REGISTER_R10: return &c->R10; case ZYDIS_REGISTER_R11: return &c->R11;
-    case ZYDIS_REGISTER_R12: return &c->R12; case ZYDIS_REGISTER_R13: return &c->R13;
-    case ZYDIS_REGISTER_R14: return &c->R14; case ZYDIS_REGISTER_R15: return &c->R15;
+    case ZYDIS_REGISTER_RAX: return isa_gpr_slot(c, 0);  case ZYDIS_REGISTER_RCX: return isa_gpr_slot(c, 1);
+    case ZYDIS_REGISTER_RDX: return isa_gpr_slot(c, 2);  case ZYDIS_REGISTER_RBX: return isa_gpr_slot(c, 3);
+    case ZYDIS_REGISTER_RSP: return isa_gpr_slot(c, 4);  case ZYDIS_REGISTER_RBP: return isa_gpr_slot(c, 5);
+    case ZYDIS_REGISTER_RSI: return isa_gpr_slot(c, 6);  case ZYDIS_REGISTER_RDI: return isa_gpr_slot(c, 7);
+    case ZYDIS_REGISTER_R8: return isa_gpr_slot(c, 8);   case ZYDIS_REGISTER_R9: return isa_gpr_slot(c, 9);
+    case ZYDIS_REGISTER_R10: return isa_gpr_slot(c, 10); case ZYDIS_REGISTER_R11: return isa_gpr_slot(c, 11);
+    case ZYDIS_REGISTER_R12: return isa_gpr_slot(c, 12); case ZYDIS_REGISTER_R13: return isa_gpr_slot(c, 13);
+    case ZYDIS_REGISTER_R14: return isa_gpr_slot(c, 14); case ZYDIS_REGISTER_R15: return isa_gpr_slot(c, 15);
     default: return NULL;
     }
 }
 static uint64_t mask_of(unsigned bits) { return bits >= 64 ? ~UINT64_C(0) : (UINT64_C(1) << bits) - 1; }
 
 /* The address of a memory operand; 0 if it cannot be formed here (fs/gs, vector index). */
-static uintptr_t operand_address(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip) {
+static uintptr_t operand_address(IsaContext *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip) {
     if (o->mem.segment == ZYDIS_REGISTER_FS || o->mem.segment == ZYDIS_REGISTER_GS) return 0;
     uint64_t address = (uint64_t)o->mem.disp.value;
     unsigned bits;
     if (o->mem.base == ZYDIS_REGISTER_RIP) address += rip + in->length;
     else if (o->mem.base != ZYDIS_REGISTER_NONE) {
-        DWORD64 *base = gpr(c, o->mem.base, &bits);
+        uint64_t *base = gpr(c, o->mem.base, &bits);
         if (!base) return 0;
         address += *base & mask_of(bits);
     }
     if (o->mem.index != ZYDIS_REGISTER_NONE) {
-        DWORD64 *index = gpr(c, o->mem.index, &bits);
+        uint64_t *index = gpr(c, o->mem.index, &bits);
         if (!index) return 0;
         address += (*index & mask_of(bits)) * o->mem.scale;
     }
@@ -961,10 +1074,10 @@ static uintptr_t operand_address(CONTEXT *c, const ZydisDecodedInstruction *in, 
     return (uintptr_t)address;
 }
 /* Reads a register or memory source operand (zero-extended); 0 if it cannot. */
-static int read_source(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip, uint64_t *value) {
+static int read_source(IsaContext *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *o, uintptr_t rip, uint64_t *value) {
     unsigned bits;
     if (o->type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        DWORD64 *r = gpr(c, o->reg.value, &bits);
+        uint64_t *r = gpr(c, o->reg.value, &bits);
         if (!r) return 0;
         *value = *r & mask_of(bits);
         return 1;
@@ -977,16 +1090,16 @@ static int read_source(CONTEXT *c, const ZydisDecodedInstruction *in, const Zydi
     *value = v;
     return 1;
 }
-static int write_register(CONTEXT *c, ZydisRegister reg, uint64_t value) {
+static int write_register(IsaContext *c, ZydisRegister reg, uint64_t value) {
     unsigned bits;
-    DWORD64 *r = gpr(c, reg, &bits);
+    uint64_t *r = gpr(c, reg, &bits);
     if (!r) return 0;
     if (bits == 32 || bits == 64) *r = value & mask_of(bits);          /* 32-bit writes clear the upper half */
     else *r = (*r & ~mask_of(bits)) | (value & mask_of(bits));        /* 16-bit writes keep the rest */
     return 1;
 }
 enum { F_CF = 1u << 0, F_PF = 1u << 2, F_AF = 1u << 4, F_ZF = 1u << 6, F_SF = 1u << 7, F_OF = 1u << 11 };
-static void set_flags(CONTEXT *c, DWORD changed, DWORD values) { c->EFlags = (c->EFlags & ~changed) | (values & changed); }
+static void set_flags(IsaContext *c, uint32_t changed, uint32_t values) { isa_set_flags(c, (isa_flags(c) & ~changed) | (values & changed)); }
 static uint64_t bswap(uint64_t v, unsigned bits) {
     uint64_t r = 0;
     for (unsigned i = 0; i < bits / 8; ++i) r = (r << 8) | ((v >> (8 * i)) & 0xff);
@@ -1010,7 +1123,7 @@ static float half_to_float(uint16_t h) {
 }
 
 /* One instruction; 1 if done (registers, flags and memory updated; rip not yet moved). */
-static int run(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *ops, uintptr_t rip) {
+static int run(IsaContext *c, const ZydisDecodedInstruction *in, const ZydisDecodedOperand *ops, uintptr_t rip) {
     const int k = kind_of(in);
     if (k < 0) return 0;
     const unsigned width = ops[0].size;
@@ -1058,7 +1171,7 @@ static int run(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecoded
         if (!read_source(c, in, &ops[1], rip, &a)) return 0;
         const uint64_t m = mask_of(width);
         uint64_t r;
-        DWORD flags;
+        uint32_t flags;
         if (in->mnemonic == ZYDIS_MNEMONIC_BLSI) {
             r = (0 - a) & a & m;
             flags = (a != 0 ? F_CF : 0) | (r == 0 ? F_ZF : 0);
@@ -1084,25 +1197,20 @@ static int run(CONTEXT *c, const ZydisDecodedInstruction *in, const ZydisDecoded
         } else {
             const int source = ops[1].reg.value - ZYDIS_REGISTER_XMM0;
             if (source < 0 || source > 15) return 0;
-            memcpy(halves, &(&c->Xmm0)[source], count * 2u);
+            const unsigned char *from = isa_xmm(c, (unsigned)source);
+            if (!from) return 0;
+            memcpy(halves, from, count * 2u);
         }
         const int dest = (int)(ops[0].reg.value - (count == 8 ? ZYDIS_REGISTER_YMM0 : ZYDIS_REGISTER_XMM0));
         if (dest < 0 || dest > 15) return 0;
-        DWORD length = 0;
-        M128A *upper = (M128A *)LocateXStateFeature(c, XSTATE_AVX, &length);
-        if (!upper || length < 16u * 16u) return 0;        /* the upper halves must be written (zeroed or set) */
-        /* Upper halves in their initial state (vzeroupper before) are not restored from the
-         * context unless AVX is marked present: make them explicit zeros and mark it. */
-        DWORD64 features = 0;
-        if (!GetXStateFeaturesMask(c, &features)) return 0;
-        if (!(features & XSTATE_MASK_AVX)) {
-            memset(upper, 0, 16u * 16u);
-            if (!SetXStateFeaturesMask(c, features | XSTATE_MASK_AVX)) return 0;
-        }
+        /* the upper halves must be written (zeroed or set); isa_ymm_upper makes them present in the context */
+        unsigned char *upper = isa_ymm_upper(c), *to = isa_xmm(c, (unsigned)dest);
+        if (!upper || !to) return 0;
         float floats[8] = {0};
         for (unsigned i = 0; i < count; ++i) floats[i] = half_to_float(halves[i]);
-        memcpy(&(&c->Xmm0)[dest], floats, 16);
-        memcpy(&upper[dest], count == 8 ? floats + 4 : (float[4]){0, 0, 0, 0}, 16);
+        static const float zeros[4] = {0, 0, 0, 0};
+        memcpy(to, floats, 16);
+        memcpy(upper + 16u * (unsigned)dest, count == 8 ? floats + 4 : zeros, 16);
         return 1;
     }
     }
@@ -1114,48 +1222,50 @@ static void note_site(uintptr_t rip) {
     const uint64_t h = ((uint64_t)rip * UINT64_C(0x9e3779b97f4a7c15)) >> 52;
     for (unsigned probe = 0; probe < 16; ++probe) {
         const size_t i = (size_t)((h + probe) & (ISA_SITES - 1));
-        const LONG64 key = isa_site_key[i];
-        if (key == (LONG64)rip || (!key && InterlockedCompareExchange64(&isa_site_key[i], (LONG64)rip, 0) == 0) ||
-            isa_site_key[i] == (LONG64)rip) {
-            InterlockedIncrement(&isa_site_hits[i]);
+        int64_t key = isa_site_key[i].load(std::memory_order_relaxed);
+        if (key == (int64_t)rip || (!key && isa_site_key[i].compare_exchange_strong(key, (int64_t)rip)) ||
+            isa_site_key[i].load(std::memory_order_relaxed) == (int64_t)rip) {
+            isa_site_hits[i].fetch_add(1);
             return;
         }
     }
 }
 static void report(void) {
-    const LONG64 now = (LONG64)GetTickCount64(), last = isa_last_report;
-    if (now - last < 30000 || InterlockedCompareExchange64(&isa_last_report, now, last) != last) return;
+    const int64_t now = isa_now_ms();
+    int64_t last = isa_last_report.load(std::memory_order_relaxed);
+    if (now - last < 30000 || !isa_last_report.compare_exchange_strong(last, now)) return;
     char line[512];
     int n = snprintf(line, sizeof(line), "CPU emulation (30 s):");
     for (int k = 0; k < K_COUNT && n < (int)sizeof(line) - 40; ++k) {
-        const LONG hits = InterlockedExchange(&isa_hits[k], 0);
+        const int32_t hits = isa_hits[k].exchange(0);
         if (hits) n += snprintf(line + n, sizeof(line) - (size_t)n, " %s %ld", kind_names[k], (long)hits);
     }
     n += snprintf(line + n, sizeof(line) - (size_t)n, " (%ld through the exception handler)",
-                  (long)InterlockedExchange(&isa_exception_hits, 0));
+                  (long)isa_exception_hits.exchange(0));
     /* The three busiest sites since the last line, and the three busiest through the exception
      * handler (their keys carry ISA_EXCEPTION_SITE). */
     for (int pass = 0; pass < 2; ++pass)
         for (int top = 0; top < 3 && n < (int)sizeof(line) - 64; ++top) {
             size_t best = ISA_SITES;
-            LONG most = 0;
-            for (size_t i = 0; i < ISA_SITES; ++i)
-                if (isa_site_hits[i] > most && !(isa_site_key[i] & ISA_EXCEPTION_SITE) == !pass) { most = isa_site_hits[i]; best = i; }
+            int32_t most = 0;
+            for (size_t i = 0; i < ISA_SITES; ++i) {
+                const int32_t hits = isa_site_hits[i].load(std::memory_order_relaxed);
+                if (hits > most && !(isa_site_key[i].load(std::memory_order_relaxed) & ISA_EXCEPTION_SITE) == !pass) { most = hits; best = i; }
+            }
             if (best == ISA_SITES) break;
             n += snprintf(line + n, sizeof(line) - (size_t)n, "%s %#llx x%ld", top ? "," : pass ? "; by exception" : "; busiest",
-                          (unsigned long long)(isa_site_key[best] & ~ISA_EXCEPTION_SITE), (long)most);
-            isa_site_hits[best] = 0;
+                          (unsigned long long)(isa_site_key[best].load(std::memory_order_relaxed) & ~ISA_EXCEPTION_SITE), (long)most);
+            isa_site_hits[best].store(0, std::memory_order_relaxed);
         }
-    for (size_t i = 0; i < ISA_SITES; ++i) isa_site_hits[i] = 0;
+    for (size_t i = 0; i < ISA_SITES; ++i) isa_site_hits[i].store(0, std::memory_order_relaxed);
     line[n++] = '\n';
-    DWORD written;
-    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, (DWORD)n, &written, NULL);
+    isa_write_line(line, (size_t)n);
 }
 
 int runtime_isa_emulate(void *context) {
     if (!isa_mode) return 0;
-    CONTEXT *c = context;
-    const uintptr_t rip = (uintptr_t)c->Rip;
+    IsaContext *c = (IsaContext *)context;
+    const uintptr_t rip = (uintptr_t)isa_rip(c);
     unsigned char bytes[16];
     unsigned length;
     const IsaTrap *trap = isa_mode == 2 ? find_trap(rip) : NULL;
@@ -1164,12 +1274,9 @@ int runtime_isa_emulate(void *context) {
         length = trap->length;
     } else {
         /* Up to 15 bytes, not past the end of the readable pages. */
-        MEMORY_BASIC_INFORMATION info;
         const uintptr_t page_end = (rip | 0xfff) + 1;
         length = page_end - rip >= 15 ? 15u : (unsigned)(page_end - rip);
-        if (length < 15 && VirtualQuery((const void *)page_end, &info, sizeof(info)) && info.State == MEM_COMMIT &&
-            (info.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            length = 15;
+        if (length < 15 && isa_readable(page_end)) length = 15;
         memcpy(bytes, (const void *)rip, length);
         swap_count_prefix(bytes, length, 0xf0, 0xf3);     /* a converted LZCNT / TZCNT */
     }
@@ -1178,23 +1285,10 @@ int runtime_isa_emulate(void *context) {
     if (!decode_bytes(bytes, length, &in, ops)) return 0;
     const int k = kind_of(&in);
     if (k < 0 || !run(c, &in, ops, rip)) return 0;
-    c->Rip = rip + in.length;
-    InterlockedIncrement(&isa_hits[k]);
-    InterlockedIncrement(&isa_exception_hits);
+    isa_set_rip(c, rip + in.length);
+    isa_hits[k].fetch_add(1);
+    isa_exception_hits.fetch_add(1);
     note_site(rip | (uintptr_t)ISA_EXCEPTION_SITE);
     report();
     return 1;
 }
-#else
-int runtime_isa_active(void) { return 0; }
-int runtime_isa_traps(const void *instruction) { (void)instruction; return 0; }
-void runtime_isa_fix_moved(unsigned char *code, unsigned length) { (void)code; (void)length; }
-void runtime_isa_convert_function(unsigned char *image, uint64_t begin, uint64_t end) { (void)image; (void)begin; (void)end; }
-void runtime_isa_finish(void) {}
-int runtime_isa_emulate(void *context) { (void)context; return 0; }
-int runtime_isa_configure(uint32_t leaf1_ecx, uint32_t leaf7_ebx, uint32_t ext1_ecx, char *missing, size_t size) {
-    (void)leaf1_ecx; (void)leaf7_ebx; (void)ext1_ecx;
-    if (missing && size) missing[0] = 0;
-    return 0;
-}
-#endif

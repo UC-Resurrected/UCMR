@@ -1,18 +1,30 @@
 /* runtime_isa.c against the CPU (gow3 1 Nov 2026): each emulated instruction form runs natively
  * and through the handler (GOW3_ISA_COMPAT=trap: LZCNT/TZCNT in their LOCK form, the others as
  * ud2 sites), with the same inputs; results and the flags each instruction defines must match.
- * Needs a CPU with MOVBE, BMI1, LZCNT and F16C (the native side). Windows only. */
+ * Needs a CPU with MOVBE, BMI1, LZCNT and F16C (the native side). Windows (a vectored handler on the CONTEXT) and
+ * Linux (a SIGILL handler on the ucontext_t), as the runtime's own handlers. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
 
+#include <chrono>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <signal.h>
+#include <sys/mman.h>
+#endif
+
+extern "C" {
 int runtime_isa_configure(uint32_t leaf1_ecx, uint32_t leaf7_ebx, uint32_t ext1_ecx, char *missing, size_t size);
 void runtime_isa_fix_moved(unsigned char *code, unsigned length);
 void runtime_isa_finish(void);
 int runtime_isa_emulate(void *context);
 unsigned runtime_isa_emit_count(unsigned char *out, const unsigned char *instruction, unsigned length, uintptr_t at);
+unsigned char *runtime_near_image_alloc(size_t bytes, int executable);
+}
 
 /* probe.c's stub space next to the game image: here the upper half of the test's code page (within
  * jump range of the test bodies). "isa-test fast" lets the sites use it (stubs, no exception);
@@ -27,20 +39,46 @@ unsigned char *runtime_near_image_alloc(size_t bytes, int executable) {
     return p;
 }
 
+#ifdef _WIN32
 static LONG CALLBACK handler(EXCEPTION_POINTERS *info) {
     if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION && runtime_isa_emulate(info->ContextRecord))
         return EXCEPTION_CONTINUE_EXECUTION;
     return EXCEPTION_CONTINUE_SEARCH;
 }
+static void set_env(const char *name, const char *value) { _putenv_s(name, value); }
+static unsigned char *executable_page(size_t bytes) {
+    return (unsigned char *)VirtualAlloc(NULL, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+}
+static void install_handler(void) { AddVectoredExceptionHandler(1, handler); }
+static void code_written(void *p, size_t n) { FlushInstructionCache(GetCurrentProcess(), p, n); }
+#else
+static void handler(int sig, siginfo_t *, void *context) {
+    if (runtime_isa_emulate(context)) return;
+    signal(sig, SIG_DFL);   /* not one of ours: the default action when the instruction runs again */
+}
+static void set_env(const char *name, const char *value) { setenv(name, value, 1); }
+static unsigned char *executable_page(size_t bytes) {
+    void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : (unsigned char *)p;
+}
+static void install_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGILL, &sa, NULL);
+}
+static void code_written(void *, size_t) {}   /* x86: the instruction cache follows the writes */
+#endif
 
 /* One test body: rax = input a, rcx = input b, rdx = memory pointer; runs the instruction under
  * test, then returns rax (result) with rflags in rdx (by an out pointer). Built at run time:
  *   mov rax, [rdi]; mov rcx, [rdi+8]; mov rdx, [rdi+16]; mov r8, [rdi+24]
  *   <instruction>
  *   mov [rdi], rax; mov [rdi+8], rcx; mov [rdi+24], r8; pushfq; pop rax; mov [rdi+32], rax; ret
- * (rdi = the state, Microsoft x64: rcx holds it on entry, moved to rdi). */
+ * (rdi = the state, Microsoft x64: rcx holds it on entry, moved to rdi; the same convention on Linux, ms_abi). */
 typedef struct { uint64_t rax, rcx, rdx, r8, flags; } State;
-typedef void (*Body)(State *);
+typedef void(__attribute__((ms_abi)) *Body)(State *);
 
 static size_t code_used;
 
@@ -162,13 +200,13 @@ static uint64_t next(uint64_t *s) {   /* xorshift64*, with values biased to edge
 
 int main(int argc, char **argv) {
     const int fast_mode = argc > 1 && !strcmp(argv[1], "fast");
-    _putenv("GOW3_ISA_COMPAT=trap");
-    _putenv(fast_mode ? "GOW3_ISA_FAST=1" : "GOW3_ISA_FAST=0");
+    set_env("GOW3_ISA_COMPAT", "trap");
+    set_env("GOW3_ISA_FAST", fast_mode ? "1" : "0");
     printf("mode: %s\n", fast_mode ? "stubs where possible (fast)" : "every site an exception");
     if (!runtime_isa_configure(0, 0, 0, NULL, 0)) { puts("configure failed"); return 1; }
-    code_page = VirtualAlloc(NULL, 1 << 20, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    code_page = executable_page(1 << 20);
     if (!code_page) return 1;
-    AddVectoredExceptionHandler(1, handler);
+    install_handler();
     const size_t n = sizeof cases / sizeof *cases;
     Body native[64], emulated[64];
     for (size_t i = 0; i < n; ++i) {
@@ -187,7 +225,7 @@ int main(int argc, char **argv) {
     const Body f16c_native[4] = {build_f16c(0, 0, 0), build_f16c(1, 0, 0), build_f16c(0, 0, 1), build_f16c(1, 0, 1)};
     const Body f16c_emulated[4] = {build_f16c(0, 1, 0), build_f16c(1, 1, 0), build_f16c(0, 1, 1), build_f16c(1, 1, 1)};
     runtime_isa_finish();
-    FlushInstructionCache(GetCurrentProcess(), code_page, 1 << 20);
+    code_written(code_page, 1 << 20);
     uint64_t seed = 0x9e3779b97f4a7c15ull;
     int failures = 0;
     for (int variant = 0; variant < 4; ++variant) {
@@ -259,16 +297,16 @@ int main(int argc, char **argv) {
     /* Cost of one emulated instruction (exception + handler + resume). */
     {
         State s = {5, 7, (uint64_t)(uintptr_t)&seed, 9, 0};
-        LARGE_INTEGER t0, t1, hz;
-        QueryPerformanceFrequency(&hz);
-        QueryPerformanceCounter(&t0);
+        using clock = std::chrono::steady_clock;
+        auto per_ns = [](clock::time_point a, clock::time_point b) {
+            return std::chrono::duration<double, std::nano>(b - a).count() / 200000;
+        };
+        clock::time_point t0 = clock::now();
         for (int i = 0; i < 200000; ++i) native[13](&s);
-        QueryPerformanceCounter(&t1);
-        const double native_ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)hz.QuadPart / 200000;
-        QueryPerformanceCounter(&t0);
+        const double native_ns = per_ns(t0, clock::now());
+        t0 = clock::now();
         for (int i = 0; i < 200000; ++i) emulated[13](&s);
-        QueryPerformanceCounter(&t1);
-        const double emulated_ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)hz.QuadPart / 200000;
+        const double emulated_ns = per_ns(t0, clock::now());
         printf("andn: native %.1f ns, emulated %.0f ns per instruction (with the test body)\n", native_ns, emulated_ns);
     }
     printf("%d of %zu forms failed\n", failures, n + 4);

@@ -142,14 +142,9 @@ set(COMMON
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
-# Windows: a DLL cannot leave the runtime_* symbols for gow3-probe.exe to resolve, so the
-# library is static there and linked into the executable.
-if (WIN32)
-    set(GOW3GPU_KIND STATIC)
-else()
-    set(GOW3GPU_KIND SHARED)
-endif()
-add_library(gow3gpu ${GOW3GPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
+# The GPU library is static on both systems and linked into gow3-probe (one link model): a Windows DLL cannot leave
+# the runtime_* symbols for the executable to resolve, and on Linux nothing has to be found at run time.
+add_library(gow3gpu STATIC ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
     shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
@@ -168,10 +163,6 @@ set_source_files_properties(shim/gow3_overlay.cpp PROPERTIES
 target_include_directories(gow3gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(gow3gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against gow3-probe.
-if (NOT WIN32)
-    target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
-endif()
 target_link_libraries(gow3gpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 target_link_libraries(gow3gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
@@ -183,187 +174,232 @@ if (WIN32)
     target_compile_options(gow3gpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/gow3_win_compat.h)
     target_link_libraries(gow3gpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm pdh)
 else()
-    target_link_libraries(gow3gpu PUBLIC PkgConfig::X11)
+    # z and m: what the small static FFmpeg of tools/build_ffmpeg.sh needs in turn (harmless with shared FFmpeg)
+    target_link_libraries(gow3gpu PUBLIC Vulkan::Vulkan PkgConfig::X11 z m ${CMAKE_DL_LIBS} -pthread)
 endif()
 
-# gow3 (Windows): gow3gpu is a static library there, so the loader and the HLE runtime are
-# linked here, where CMake knows its dependencies (build.sh builds them with ninja).
+# gow3: the loader and the HLE runtime (gow3-probe) and their unit tests, on both systems; build.sh builds them with
+# ninja. The few OS calls without a portable form sit in one file per system: compat_win.c (Windows: the POSIX calls
+# the runtime makes, timers, fault recovery) and host_linux.cpp (Linux: signal handlers, restart, near-image memory,
+# case-insensitive game folder lookups). The tests that use them get the same file and libraries.
+file(GLOB GOW3_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c ../src/runtime*.cpp)
+# u2mp: Uncharted 2 multiplayer restoration, C++ (u2mp/README.md)
+file(GLOB GOW3_U2MP CONFIGURE_DEPENDS ../src/u2mp/*.cpp)
+# u3fix: Uncharted 3 fixes, C++ (src/u3fix/u3fix.h)
+file(GLOB GOW3_U3FIX CONFIGURE_DEPENDS ../src/u3fix/*.cpp)
+# u3voice: Uncharted 3 voice chat, C++ (src/u3voice/u3voice.h; the codec of src/u2mp/voice.cpp)
+file(GLOB GOW3_U3VOICE CONFIGURE_DEPENDS ../src/u3voice/*.cpp)
 if (WIN32)
     enable_language(RC)
-    file(GLOB GOW3_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c ../src/runtime*.cpp)
-    # u2mp: Uncharted 2 multiplayer restoration, C++ (u2mp/README.md)
-    file(GLOB GOW3_U2MP CONFIGURE_DEPENDS ../src/u2mp/*.cpp)
-    # u3fix: Uncharted 3 fixes, C++ (src/u3fix/u3fix.h)
-    file(GLOB GOW3_U3FIX CONFIGURE_DEPENDS ../src/u3fix/*.cpp)
-    # u3voice: Uncharted 3 voice chat, C++ (src/u3voice/u3voice.h; the codec of src/u2mp/voice.cpp)
-    file(GLOB GOW3_U3VOICE CONFIGURE_DEPENDS ../src/u3voice/*.cpp)
-    file(GLOB GOW3_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
-    add_library(atrac9 STATIC ${GOW3_ATRAC9})
-    target_compile_options(atrac9 PRIVATE -w)
-    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
-    add_executable(gow3-probe ../src/probe.c ${GOW3_RUNTIME} ${GOW3_U2MP} ${GOW3_U3FIX} ${GOW3_U3VOICE} ../src/pokes.cpp ../src/debug_menus.cpp ../src/sid_names.cpp ../src/name_dictionary.cpp ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c)
+    set(GOW3_HOST ../src/compat_win.c)
+    set(GOW3_TEST_HOST ../src/compat_win.c)
+    set(GOW3_TEST_LIBS onecore bcrypt winmm)
+    set(GOW3_LIBM)
+else()
+    set(GOW3_HOST ../src/host_linux.cpp ../src/host_linux_shared.cpp)
+    set(GOW3_TEST_HOST ../src/host_linux_shared.cpp)
+    set(GOW3_TEST_LIBS m)
+    set(GOW3_LIBM m)
+    # C11 without extensions hides POSIX in glibc's headers: the runtime's C files get it the way most of them ask
+    # for it themselves (#define _GNU_SOURCE, empty, so the two definitions agree).
+    add_compile_definitions($<$<COMPILE_LANGUAGE:C>:_GNU_SOURCE=>)
+endif()
+file(GLOB GOW3_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
+add_library(atrac9 STATIC ${GOW3_ATRAC9})
+target_compile_options(atrac9 PRIVATE -w)
+set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
+add_executable(gow3-probe ../src/probe.c ${GOW3_RUNTIME} ${GOW3_U2MP} ${GOW3_U3FIX} ${GOW3_U3VOICE} ../src/pokes.cpp ../src/debug_menus.cpp ../src/sid_names.cpp ../src/name_dictionary.cpp ${GOW3_HOST} ../src/cpu_check.c ../src/vulkan_smoke.c)
+if (WIN32)
     # version information (tools/VERSION), the runtime's own manifest and its icon (tools/winres)
     include(../../tools/winres/ucmr.cmake)
     ucmr_winres(gow3-probe "UCMR game runtime" ICON 1 ../packaging/windows/UCMR.ico
         MANIFEST ../packaging/windows/gow3-probe.manifest)
-    set_target_properties(gow3-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(gow3-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
-    target_include_directories(gow3-probe PRIVATE .. ../src)
-    # u2mp voice chat (src/u2mp/voice.cpp): libopus, linked statically (no extra DLL to ship).
-    find_library(OPUS_STATIC NAMES libopus.a REQUIRED)
-    find_path(OPUS_INCLUDE opus/opus.h REQUIRED)
-    target_include_directories(gow3-probe PRIVATE ${OPUS_INCLUDE})
+endif()
+set_target_properties(gow3-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(gow3-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
+target_include_directories(gow3-probe PRIVATE .. ../src)
+# u2mp voice chat (src/u2mp/voice.cpp): libopus, linked statically (no extra DLL to ship).
+find_library(OPUS_STATIC NAMES libopus.a REQUIRED)
+find_path(OPUS_INCLUDE opus/opus.h REQUIRED)
+target_include_directories(gow3-probe PRIVATE ${OPUS_INCLUDE})
+if (WIN32)
     target_link_libraries(gow3-probe PRIVATE gow3gpu atrac9 ${OPUS_STATIC} onecore bcrypt ws2_32 -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
-    # u2mp network core test (no game needed): ninja -C out/gpu u2mp-net-test
-    add_executable(u2mp-net-test EXCLUDE_FROM_ALL ../tests/test_u2mp_net.cpp ../src/u2mp/net.cpp)
-    target_compile_options(u2mp-net-test PRIVATE -Wall -Wextra -Werror)
-    target_link_libraries(u2mp-net-test PRIVATE ws2_32)
-    # u2mp voice codec / jitter buffer test (no game, no audio device): ninja -C out/gpu u2mp-voice-test
-    add_executable(u2mp-voice-test EXCLUDE_FROM_ALL ../tests/test_u2mp_voice.cpp ../src/u2mp/voice.cpp)
-    target_compile_definitions(u2mp-voice-test PRIVATE U2MP_VOICE_CORE_ONLY)
-    target_compile_options(u2mp-voice-test PRIVATE -Wall -Wextra -Werror)
-    target_include_directories(u2mp-voice-test PRIVATE ${OPUS_INCLUDE})
-    target_link_libraries(u2mp-voice-test PRIVATE ${OPUS_STATIC})
-    # u2mp progression store test (no game needed): ninja -C out/gpu u2mp-progression-test
-    add_executable(u2mp-progression-test EXCLUDE_FROM_ALL ../tests/test_u2mp_progression.cpp ../src/u2mp/progression_store.cpp)
-    target_compile_options(u2mp-progression-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp net-event serializer test (no game needed): ninja -C out/gpu u2mp-events-test
-    add_executable(u2mp-events-test EXCLUDE_FROM_ALL ../tests/test_u2mp_events.cpp ../src/u2mp/events.cpp)
-    target_compile_options(u2mp-events-test PRIVATE -Wall -Wextra -Werror)
-    # name ids back to names (no game needed): ninja -C out/gpu name-dictionary-test
-    add_executable(name-dictionary-test EXCLUDE_FROM_ALL ../tests/test_name_dictionary.cpp ../src/name_dictionary.cpp)
-    target_compile_options(name-dictionary-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(name-dictionary-test PRIVATE ../src)
-    # GOW3_POKE parser test (no game needed): ninja -C out/gpu pokes-test
-    add_executable(pokes-test EXCLUDE_FROM_ALL ../tests/test_pokes.cpp ../src/pokes.cpp)
-    target_compile_options(pokes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(pokes-test PRIVATE ../src)
-    # Debug mode menu combos on a stand-in Uncharted 1 image (no game needed): ninja -C out/gpu debug-menus-test
-    add_executable(debug-menus-test EXCLUDE_FROM_ALL ../tests/test_debug_menus.cpp ../src/debug_menus.cpp ${GOW3_U3FIX})
-    target_compile_options(debug-menus-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(debug-menus-test PRIVATE ../src)
-    # u2mp party roster wire test (no game needed): ninja -C out/gpu u2mp-roster-test
-    add_executable(u2mp-roster-test EXCLUDE_FROM_ALL ../tests/test_u2mp_roster.cpp)
-    target_compile_options(u2mp-roster-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp game transport window / cadence / snapshot expiry rules (no game needed): ninja -C out/gpu u2mp-gamenet-test
-    add_executable(u2mp-gamenet-test EXCLUDE_FROM_ALL ../tests/test_u2mp_gamenet.cpp)
-    target_compile_options(u2mp-gamenet-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp cinema file store test (no game needed): ninja -C out/gpu u2mp-cinema-test
-    add_executable(u2mp-cinema-test EXCLUDE_FROM_ALL ../tests/test_u2mp_cinema.cpp ../src/u2mp/cinema_store.cpp)
-    target_compile_options(u2mp-cinema-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp peer rules test (unreachable list, bar colours; no game needed): ninja -C out/gpu u2mp-peer-rules-test
-    add_executable(u2mp-peer-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_peer_rules.cpp)
-    target_compile_options(u2mp-peer-rules-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp presence block test (PS3 88-byte block, old PC data, join hint; no game needed): ninja -C out/gpu u2mp-presence-test
-    add_executable(u2mp-presence-test EXCLUDE_FROM_ALL ../tests/test_u2mp_presence.cpp)
-    target_compile_options(u2mp-presence-test PRIVATE -Wall -Wextra -Werror)
-
-    # u2mp scoreboard overlay / voice column / ticker rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
-    add_executable(u2mp-overlay-test EXCLUDE_FROM_ALL ../tests/test_u2mp_overlay.cpp ../src/u2mp/overlay_rules.cpp)
-    target_compile_options(u2mp-overlay-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp clan tag check rules test (no game needed): ninja -C out/gpu u2mp-clantag-test
-    add_executable(u2mp-clantag-test EXCLUDE_FROM_ALL ../tests/test_u2mp_clantag.cpp)
-    target_compile_options(u2mp-clantag-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp start rules test (custom solo, matchmaking minimum; no game needed): ninja -C out/gpu u2mp-start-rules-test
-    add_executable(u2mp-start-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_start_rules.cpp)
-    target_compile_options(u2mp-start-rules-test PRIVATE -Wall -Wextra -Werror)
-    # u2mp co-op character rules test (preset character per co-op rank; no game needed): ninja -C out/gpu u2mp-coop-rules-test
-    add_executable(u2mp-coop-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_coop_rules.cpp)
-    target_compile_options(u2mp-coop-rules-test PRIVATE -Wall -Wextra -Werror)
     target_link_options(gow3-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
-    # gow3: runtime unit tests (ninja -C out/gpu mp3-test videodec-test services-test).
-    add_executable(mp3-test EXCLUDE_FROM_ALL ../tests/test_mp3.c ../src/runtime_mp3.c ../src/compat_win.c)
-    add_executable(videodec-test EXCLUDE_FROM_ALL ../tests/test_videodec.c ../src/compat_win.c)
-    add_executable(services-test EXCLUDE_FROM_ALL ../tests/test_services.c ../src/compat_win.c)
-    add_executable(clocks-test EXCLUDE_FROM_ALL ../tests/test_clocks.c ../src/compat_win.c)
-    set_target_properties(clocks-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(clocks-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(clocks-test PRIVATE .. ../src)
-    target_link_libraries(clocks-test PRIVATE onecore bcrypt -pthread)
-    # gow3 1 Nov 2026: runtime_isa.c (old-CPU instruction emulation) against the CPU.
-    add_executable(isa-test EXCLUDE_FROM_ALL ../tests/test_isa.c ../src/runtime_isa.c)
-    set_target_properties(isa-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(isa-test PRIVATE -Wall -Wextra -Werror)
-    target_link_libraries(isa-test PRIVATE Zydis::Zydis)
-    # gow3 1 Nov 2026 (#311): save data backup at unmount and repair at mount.
-    add_executable(savedata-test EXCLUDE_FROM_ALL ../tests/test_savedata.c ../src/runtime_savedata.c ../src/compat_win.c)
-    set_target_properties(savedata-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(savedata-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(savedata-test PRIVATE .. ../src)
-    target_link_libraries(savedata-test PRIVATE onecore bcrypt winmm -pthread)
-    add_executable(range-names-test EXCLUDE_FROM_ALL ../tests/test_range_names.c ../src/compat_win.c)
-    set_target_properties(range-names-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(range-names-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(range-names-test PRIVATE .. ../src)
-    target_link_libraries(range-names-test PRIVATE onecore bcrypt -pthread)
-    add_executable(fiber-test EXCLUDE_FROM_ALL ../tests/test_fiber.cpp shim/gow3_fiber.cpp shim/gow3_fiber_context.cpp)
-    target_compile_options(fiber-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_link_libraries(fiber-test PRIVATE -pthread)
-    add_executable(content-test EXCLUDE_FROM_ALL ../tests/test_content.c ../src/runtime_content.c)
-    set_target_properties(content-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(content-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(content-test PRIVATE .. ../src)
-    # Movie decoder test: the real videodec2 shim on host buffers, guest hooks stubbed out.
-    add_executable(videodec2-test EXCLUDE_FROM_ALL
-        ../tests/test_videodec2.cpp ../tests/test_videodec2_stubs.cpp
-        shim/gow3_movie.cpp shim/videodec2/videodec2.cpp shim/videodec2/videodec2_impl.cpp)
-    target_compile_options(videodec2-test PRIVATE -UNDEBUG)
-    target_compile_definitions(videodec2-test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_include_directories(videodec2-test PRIVATE shim shadps4)  # shim headers ahead of shadPS4's
-    target_link_libraries(videodec2-test PRIVATE PkgConfig::FFMPEG Boost::headers)  # FFmpeg decodes the frames
-    # u3fix: the PS3 improved tonemap curve (src/u3fix/tonemap_curve.cpp)
-    add_executable(u3-tonemap-test EXCLUDE_FROM_ALL ../tests/test_u3_tonemap_curve.cpp ${GOW3_U3FIX})
-    target_compile_options(u3-tonemap-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    # u3fix: the job counter history's stubs and counts on a stand-in image (src/u3fix/job_trace.cpp)
-    add_executable(u3-job-trace-test EXCLUDE_FROM_ALL ../tests/test_u3_job_trace.cpp ${GOW3_U3FIX})
-    target_compile_options(u3-job-trace-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(u3-job-trace-test PRIVATE ../src)
-    add_executable(shared-handles-test EXCLUDE_FROM_ALL ../tests/test_shared_handles.cpp)
-    target_compile_options(shared-handles-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_link_libraries(shared-handles-test PRIVATE -pthread)
-    add_executable(pad-buffer-test EXCLUDE_FROM_ALL ../tests/test_pad_buffer.c ../src/runtime_split.cpp ../src/compat_win.c)
-    target_compile_options(pad-buffer-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(pad-buffer-test PRIVATE .. ../src)
-    target_link_libraries(pad-buffer-test PRIVATE PkgConfig::SDL3 bcrypt winmm -pthread)
-    foreach(test mp3-test videodec-test services-test)
-        set_target_properties(${test} PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-        target_compile_options(${test} PRIVATE -Wall -Wextra -Werror)
-        target_include_directories(${test} PRIVATE .. ../src)
-        target_link_libraries(${test} PRIVATE atrac9 PkgConfig::FFMPEG bcrypt -pthread)
-    endforeach()
-    add_executable(pad-map-test EXCLUDE_FROM_ALL ../tests/test_pad_map.c ../src/runtime_split.cpp ../src/compat_win.c)
-    set_target_properties(pad-map-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(pad-map-test PRIVATE .. ../src)
-    target_link_libraries(pad-map-test PRIVATE PkgConfig::SDL3 bcrypt winmm -pthread)
-    # the second player's pad devices (src/runtime_split.cpp, issue 31): ninja -C out/gpu split-pad-test
-    add_executable(split-pad-test EXCLUDE_FROM_ALL ../tests/test_split_pad.cpp ../src/runtime_split.cpp ${GOW3_U3FIX})
-    target_compile_options(split-pad-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(split-pad-test PRIVATE ../src)
-    target_link_libraries(split-pad-test PRIVATE PkgConfig::SDL3)
-    add_executable(audio-downmix-test EXCLUDE_FROM_ALL ../tests/test_audio_downmix.c ../src/compat_win.c)
-    set_target_properties(audio-downmix-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(audio-downmix-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(audio-downmix-test PRIVATE .. ../src)
-    target_link_libraries(audio-downmix-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
-    add_executable(cpu-check-test EXCLUDE_FROM_ALL ../tests/test_cpu_check.c)
-    set_target_properties(cpu-check-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(cpu-check-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(cpu-check-test PRIVATE .. ../src)
-    add_executable(tsc-clock-test EXCLUDE_FROM_ALL ../tests/test_tsc_clock.c ../src/compat_win.c)
-    set_target_properties(tsc-clock-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(tsc-clock-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(tsc-clock-test PRIVATE .. ../src)
-    target_link_libraries(tsc-clock-test PRIVATE bcrypt -pthread)
+else()
+    # Linux: the Windows spellings shared C++ sources use (src/linux_compat.h); a fixed-address executable, so the
+    # brk heap with the host objects handed to the guest stays below 1 TiB (probe.c main; the guest packs pointers
+    # into 40 bits); -rdynamic exports uncharted_u3_voice for the helper (src/u3voice/u3voice.h); the C++ library is
+    # linked in and the libraries the package brings (SDL3, ...) are found beside the program ($ORIGIN).
+    target_compile_options(gow3-probe PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-include ${CMAKE_CURRENT_SOURCE_DIR}/../src/linux_compat.h>)
+    set_target_properties(gow3-probe PROPERTIES POSITION_INDEPENDENT_CODE OFF BUILD_RPATH "$ORIGIN")
+    target_link_options(gow3-probe PRIVATE -no-pie -rdynamic -static-libstdc++)
+    target_link_libraries(gow3-probe PRIVATE gow3gpu atrac9 ${OPUS_STATIC} m -pthread)
+endif()
+# u2mp network core test (no game needed): ninja -C out/gpu u2mp-net-test
+add_executable(u2mp-net-test EXCLUDE_FROM_ALL ../tests/test_u2mp_net.cpp ../src/u2mp/net.cpp)
+target_compile_options(u2mp-net-test PRIVATE -Wall -Wextra -Werror)
+if (WIN32)
+    target_link_libraries(u2mp-net-test PRIVATE ws2_32)
+endif()
+# u2mp voice codec / jitter buffer test (no game, no audio device): ninja -C out/gpu u2mp-voice-test
+add_executable(u2mp-voice-test EXCLUDE_FROM_ALL ../tests/test_u2mp_voice.cpp ../src/u2mp/voice.cpp)
+target_compile_definitions(u2mp-voice-test PRIVATE U2MP_VOICE_CORE_ONLY)
+target_compile_options(u2mp-voice-test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(u2mp-voice-test PRIVATE ${OPUS_INCLUDE})
+target_link_libraries(u2mp-voice-test PRIVATE ${OPUS_STATIC} ${GOW3_LIBM})
+# u2mp progression store test (no game needed): ninja -C out/gpu u2mp-progression-test
+add_executable(u2mp-progression-test EXCLUDE_FROM_ALL ../tests/test_u2mp_progression.cpp ../src/u2mp/progression_store.cpp)
+target_compile_options(u2mp-progression-test PRIVATE -Wall -Wextra -Werror)
+# u2mp net-event serializer test (no game needed): ninja -C out/gpu u2mp-events-test
+add_executable(u2mp-events-test EXCLUDE_FROM_ALL ../tests/test_u2mp_events.cpp ../src/u2mp/events.cpp)
+target_compile_options(u2mp-events-test PRIVATE -Wall -Wextra -Werror)
+# name ids back to names (no game needed): ninja -C out/gpu name-dictionary-test
+add_executable(name-dictionary-test EXCLUDE_FROM_ALL ../tests/test_name_dictionary.cpp ../src/name_dictionary.cpp)
+target_compile_options(name-dictionary-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(name-dictionary-test PRIVATE ../src)
+# GOW3_POKE parser test (no game needed): ninja -C out/gpu pokes-test
+add_executable(pokes-test EXCLUDE_FROM_ALL ../tests/test_pokes.cpp ../src/pokes.cpp)
+target_compile_options(pokes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(pokes-test PRIVATE ../src)
+target_link_libraries(pokes-test PRIVATE -pthread)
+# Debug mode menu combos on a stand-in Uncharted 1 image (no game needed): ninja -C out/gpu debug-menus-test
+add_executable(debug-menus-test EXCLUDE_FROM_ALL ../tests/test_debug_menus.cpp ../src/debug_menus.cpp ${GOW3_U3FIX})
+target_compile_options(debug-menus-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(debug-menus-test PRIVATE ../src)
+# u2mp party roster wire test (no game needed): ninja -C out/gpu u2mp-roster-test
+add_executable(u2mp-roster-test EXCLUDE_FROM_ALL ../tests/test_u2mp_roster.cpp)
+target_compile_options(u2mp-roster-test PRIVATE -Wall -Wextra -Werror)
+# u2mp game transport window / cadence / snapshot expiry rules (no game needed): ninja -C out/gpu u2mp-gamenet-test
+add_executable(u2mp-gamenet-test EXCLUDE_FROM_ALL ../tests/test_u2mp_gamenet.cpp)
+target_compile_options(u2mp-gamenet-test PRIVATE -Wall -Wextra -Werror)
+# u2mp cinema file store test (no game needed): ninja -C out/gpu u2mp-cinema-test
+add_executable(u2mp-cinema-test EXCLUDE_FROM_ALL ../tests/test_u2mp_cinema.cpp ../src/u2mp/cinema_store.cpp)
+target_compile_options(u2mp-cinema-test PRIVATE -Wall -Wextra -Werror)
+# u2mp peer rules test (unreachable list, bar colours; no game needed): ninja -C out/gpu u2mp-peer-rules-test
+add_executable(u2mp-peer-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_peer_rules.cpp)
+target_compile_options(u2mp-peer-rules-test PRIVATE -Wall -Wextra -Werror)
+# u2mp presence block test (PS3 88-byte block, old PC data, join hint; no game needed): ninja -C out/gpu u2mp-presence-test
+add_executable(u2mp-presence-test EXCLUDE_FROM_ALL ../tests/test_u2mp_presence.cpp)
+target_compile_options(u2mp-presence-test PRIVATE -Wall -Wextra -Werror)
+
+# u2mp scoreboard overlay / voice column / ticker rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
+add_executable(u2mp-overlay-test EXCLUDE_FROM_ALL ../tests/test_u2mp_overlay.cpp ../src/u2mp/overlay_rules.cpp)
+target_compile_options(u2mp-overlay-test PRIVATE -Wall -Wextra -Werror)
+# u2mp clan tag check rules test (no game needed): ninja -C out/gpu u2mp-clantag-test
+add_executable(u2mp-clantag-test EXCLUDE_FROM_ALL ../tests/test_u2mp_clantag.cpp)
+target_compile_options(u2mp-clantag-test PRIVATE -Wall -Wextra -Werror)
+# u2mp start rules test (custom solo, matchmaking minimum; no game needed): ninja -C out/gpu u2mp-start-rules-test
+add_executable(u2mp-start-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_start_rules.cpp)
+target_compile_options(u2mp-start-rules-test PRIVATE -Wall -Wextra -Werror)
+# u2mp co-op character rules test (preset character per co-op rank; no game needed): ninja -C out/gpu u2mp-coop-rules-test
+add_executable(u2mp-coop-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_coop_rules.cpp)
+target_compile_options(u2mp-coop-rules-test PRIVATE -Wall -Wextra -Werror)
+# the U3 helper's host function table (src/runtime_host_api.cpp), called as the helper calls it (no game needed)
+add_executable(host-api-test EXCLUDE_FROM_ALL ../tests/test_host_api.cpp ../src/runtime_host_api.cpp)
+target_compile_options(host-api-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(host-api-test PRIVATE ../src)
+if (WIN32)
+    target_link_libraries(host-api-test PRIVATE ws2_32)
+else()
+    target_link_libraries(host-api-test PRIVATE -pthread)
+endif()
+# gow3: runtime unit tests (ninja -C out/gpu mp3-test videodec-test services-test).
+add_executable(mp3-test EXCLUDE_FROM_ALL ../tests/test_mp3.c ../src/runtime_mp3.c ${GOW3_TEST_HOST})
+add_executable(videodec-test EXCLUDE_FROM_ALL ../tests/test_videodec.c ${GOW3_TEST_HOST})
+add_executable(services-test EXCLUDE_FROM_ALL ../tests/test_services.c ${GOW3_TEST_HOST})
+add_executable(clocks-test EXCLUDE_FROM_ALL ../tests/test_clocks.c ${GOW3_TEST_HOST})
+set_target_properties(clocks-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(clocks-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(clocks-test PRIVATE .. ../src)
+target_link_libraries(clocks-test PRIVATE ${GOW3_TEST_LIBS} -pthread)
+# gow3 1 Nov 2026: runtime_isa.cpp (old-CPU instruction emulation) against the CPU, on a Windows CONTEXT or a Linux
+# ucontext_t ("isa-test fast": the stubs too). Needs a CPU that has MOVBE, BMI1, LZCNT and F16C (the native side).
+add_executable(isa-test EXCLUDE_FROM_ALL ../tests/test_isa.cpp ../src/runtime_isa.cpp)
+target_compile_options(isa-test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(isa-test PRIVATE Zydis::Zydis)
+# gow3 1 Nov 2026 (#311): save data backup at unmount and repair at mount.
+add_executable(savedata-test EXCLUDE_FROM_ALL ../tests/test_savedata.c ../src/runtime_savedata.c ${GOW3_TEST_HOST})
+set_target_properties(savedata-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(savedata-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(savedata-test PRIVATE .. ../src)
+target_link_libraries(savedata-test PRIVATE ${GOW3_TEST_LIBS} -pthread)
+add_executable(range-names-test EXCLUDE_FROM_ALL ../tests/test_range_names.c ${GOW3_TEST_HOST})
+set_target_properties(range-names-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(range-names-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(range-names-test PRIVATE .. ../src)
+target_link_libraries(range-names-test PRIVATE ${GOW3_TEST_LIBS} -pthread)
+add_executable(fiber-test EXCLUDE_FROM_ALL ../tests/test_fiber.cpp shim/gow3_fiber.cpp shim/gow3_fiber_context.cpp)
+target_compile_options(fiber-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(fiber-test PRIVATE -pthread)
+add_executable(content-test EXCLUDE_FROM_ALL ../tests/test_content.c ../src/runtime_content.c)
+set_target_properties(content-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(content-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(content-test PRIVATE .. ../src)
+# Movie decoder test: the real videodec2 shim on host buffers, guest hooks stubbed out.
+add_executable(videodec2-test EXCLUDE_FROM_ALL
+    ../tests/test_videodec2.cpp ../tests/test_videodec2_stubs.cpp
+    shim/gow3_movie.cpp shim/videodec2/videodec2.cpp shim/videodec2/videodec2_impl.cpp)
+target_compile_options(videodec2-test PRIVATE -UNDEBUG)
+target_compile_definitions(videodec2-test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(videodec2-test PRIVATE shim shadps4)  # shim headers ahead of shadPS4's
+target_link_libraries(videodec2-test PRIVATE PkgConfig::FFMPEG Boost::headers -pthread)  # FFmpeg decodes the frames
+# u3fix: the PS3 improved tonemap curve (src/u3fix/tonemap_curve.cpp)
+add_executable(u3-tonemap-test EXCLUDE_FROM_ALL ../tests/test_u3_tonemap_curve.cpp ${GOW3_U3FIX})
+target_compile_options(u3-tonemap-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+# u3fix: the job counter history's stubs and counts on a stand-in image (src/u3fix/job_trace.cpp)
+add_executable(u3-job-trace-test EXCLUDE_FROM_ALL ../tests/test_u3_job_trace.cpp ${GOW3_U3FIX})
+target_compile_options(u3-job-trace-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(u3-job-trace-test PRIVATE ../src)
+add_executable(shared-handles-test EXCLUDE_FROM_ALL ../tests/test_shared_handles.cpp)
+target_compile_options(shared-handles-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(shared-handles-test PRIVATE -pthread)
+add_executable(pad-buffer-test EXCLUDE_FROM_ALL ../tests/test_pad_buffer.c ../src/runtime_split.cpp ${GOW3_TEST_HOST})
+target_compile_options(pad-buffer-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(pad-buffer-test PRIVATE .. ../src)
+target_link_libraries(pad-buffer-test PRIVATE PkgConfig::SDL3 ${GOW3_TEST_LIBS} -pthread)
+foreach(test mp3-test videodec-test services-test)
+    set_target_properties(${test} PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_options(${test} PRIVATE -Wall -Wextra -Werror)
+    target_include_directories(${test} PRIVATE .. ../src)
+    target_link_libraries(${test} PRIVATE atrac9 PkgConfig::FFMPEG ${GOW3_TEST_LIBS} -pthread)
+endforeach()
+add_executable(pad-map-test EXCLUDE_FROM_ALL ../tests/test_pad_map.c ../src/runtime_split.cpp ${GOW3_TEST_HOST})
+set_target_properties(pad-map-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(pad-map-test PRIVATE .. ../src)
+target_link_libraries(pad-map-test PRIVATE PkgConfig::SDL3 ${GOW3_TEST_LIBS} -pthread)
+# the second player's pad devices (src/runtime_split.cpp, issue 31): ninja -C out/gpu split-pad-test
+add_executable(split-pad-test EXCLUDE_FROM_ALL ../tests/test_split_pad.cpp ../src/runtime_split.cpp ${GOW3_U3FIX})
+target_compile_options(split-pad-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(split-pad-test PRIVATE ../src)
+target_link_libraries(split-pad-test PRIVATE PkgConfig::SDL3)
+add_executable(audio-downmix-test EXCLUDE_FROM_ALL ../tests/test_audio_downmix.c ${GOW3_TEST_HOST})
+set_target_properties(audio-downmix-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(audio-downmix-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(audio-downmix-test PRIVATE .. ../src)
+target_link_libraries(audio-downmix-test PRIVATE PkgConfig::SDL3 ${GOW3_TEST_LIBS} -pthread)
+add_executable(cpu-check-test EXCLUDE_FROM_ALL ../tests/test_cpu_check.c)
+set_target_properties(cpu-check-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(cpu-check-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(cpu-check-test PRIVATE .. ../src)
+add_executable(tsc-clock-test EXCLUDE_FROM_ALL ../tests/test_tsc_clock.c ${GOW3_TEST_HOST})
+set_target_properties(tsc-clock-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(tsc-clock-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(tsc-clock-test PRIVATE .. ../src)
+target_link_libraries(tsc-clock-test PRIVATE ${GOW3_TEST_LIBS} -pthread)
+if (WIN32)
     add_executable(gow3-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/gow3-gpu-capabilities.rc)
-    target_link_libraries(gow3-gpu-capabilities PRIVATE Vulkan::Vulkan)
     # "Play God of War III.exe": the game with the launcher's saved settings, no launcher window.
     add_executable(gow3-play WIN32 ../packaging/windows/play.c ../packaging/windows/play.rc)
     target_compile_options(gow3-play PRIVATE -municode)
     target_link_options(gow3-play PRIVATE -municode)
+else()
+    add_executable(gow3-gpu-capabilities ../tools/gpu_capabilities.c)
 endif()
+target_link_libraries(gow3-gpu-capabilities PRIVATE Vulkan::Vulkan)
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(pipeline-binary-cache-test EXCLUDE_FROM_ALL ../tests/test_pipeline_binary_cache.cpp
@@ -459,7 +495,7 @@ foreach(renderer_test IN ITEMS
         pipeline-binary-cache-test pipeline-binary-initialization-test motion-shader-test
         scene-resolution-test taa-shader-test camera-motion-test)
     target_compile_definitions(${renderer_test} PRIVATE NDEBUG)
-    if(WIN32)  # gow3gpu is linked statically there, so each test brings its own fault recovery
+    if(WIN32)  # each test brings the fault recovery gow3gpu calls there (compat_win.c); Linux has it in libc
         target_sources(${renderer_test} PRIVATE ../src/compat_win.c)
         target_link_libraries(${renderer_test} PRIVATE onecore)
     endif(WIN32)

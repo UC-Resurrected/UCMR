@@ -372,7 +372,7 @@ std::vector<std::string> voices(const std::wstring &game_dir) {
 // ------------------------------------------------------------------------------------------------ system
 
 #ifndef _WIN32
-// a native Linux build never runs under Wine: the Wine helpers answer "no" and the drive check is still to come
+// a native Linux build never runs under Wine: the Wine helpers answer "no"
 bool under_wine() { return false; }
 std::string wine_unix(const std::wstring &path) { return ""; }
 std::wstring wine_windows(const std::string &path) { return L""; }
@@ -381,10 +381,10 @@ std::wstring env(const wchar_t *name) {
     return port::env(utf8(name).c_str(), v) ? port::wide(v) : std::wstring();
 }
 std::wstring shared_config() { return L""; }
-std::string slow_drive(const std::wstring &path) {
-    port::not_yet("slow drive check");   // /sys/block/<dev>/queue/rotational and removable, later
-    return "";
-}
+// The warning's cause is Windows' own (no write caching on USB, SD and FAT/exFAT volumes, so each write of the shader
+// cache, a log or a save waits for the drive); Linux keeps its page cache for those drives and the stall was only
+// ever seen on Windows, so the warning (and its Windows advice) is not given here.
+std::string slow_drive(const std::wstring &path) { return ""; }
 #else
 bool under_wine() {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -513,9 +513,38 @@ std::string first_line_text(const std::wstring &path) {
 
 std::wstring desktop() {
 #ifndef _WIN32
-    // XDG_DESKTOP_DIR from user-dirs.dirs comes with the .desktop shortcuts (later); ~/Desktop until then
-    std::wstring home = env(L"HOME");
-    return join(home.empty() ? L"." : home, L"Desktop");
+    // The desktop folder of the freedesktop user directories: XDG_DESKTOP_DIR from the environment, else from
+    // $XDG_CONFIG_HOME/user-dirs.dirs (~/.config/user-dirs.dirs), whose value is "$HOME/<folder>" or an absolute path
+    // in double quotes; ~/Desktop when neither names one (as on Windows, the folder is not created here).
+    const std::wstring home = env(L"HOME").empty() ? L"." : env(L"HOME");
+    auto expand = [&](std::string v) -> std::wstring {
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        std::string plain;
+        for (size_t i = 0; i < v.size(); ++i) plain += (v[i] == '\\' && i + 1 < v.size()) ? v[++i] : v[i];
+        if (plain.rfind("$HOME", 0) == 0) return home + port::wide(plain.substr(5));
+        return plain.empty() || plain[0] != '/' ? L"" : port::wide(plain);
+    };
+    if (const std::wstring direct = env(L"XDG_DESKTOP_DIR"); !direct.empty()) {
+        const std::wstring d = expand(utf8(direct));
+        if (!d.empty()) return d;
+    }
+    const std::wstring config = env(L"XDG_CONFIG_HOME").empty() ? join(home, L".config") : env(L"XDG_CONFIG_HOME");
+    std::string text;
+    if (read_all(join(config, L"user-dirs.dirs"), text, 1 << 16)) {
+        size_t at = 0;
+        while (at < text.size()) {
+            size_t end = text.find('\n', at);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(at, end - at);
+            at = end + 1;
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+            const size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos || line.compare(start, 16, "XDG_DESKTOP_DIR=") != 0) continue;
+            const std::wstring d = expand(line.substr(start + 16));
+            if (!d.empty()) return d;
+        }
+    }
+    return join(home, L"Desktop");
 #else
     PWSTR p = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &p)) && p) {

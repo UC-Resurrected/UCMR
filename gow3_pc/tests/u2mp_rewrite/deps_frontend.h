@@ -31,7 +31,6 @@ struct State {
     uint64_t match_room = 0;
     int party_missing = 0;
     int mm_pending = 0;                  // online::mm_pending_members()
-    int balance_slot = -1;               // session::mm_balance_slot(): -1 none
     // record the pure queries too (is_host, member_count, mm_online)
     bool rec_queries = true;
 };

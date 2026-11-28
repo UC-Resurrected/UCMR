@@ -50731,7 +50731,7 @@ CG_FN uint32_t u3x_cg_mask(uintptr_t base, int match, uint32_t *n) {
 //  * R8 + the "likely bug": a guest restarts its time sync when the owner's settings event #2 arrives at 0x30 (the owner
 //    zeroed its net time before sending it); sub 29 (LoadLevels guest gate) holds the guest's ReadyToStart {start}
 //    until 8 samples since that restart. PS3 path: no limit; v7.252 path (mixed party, Custom Game only): samples
-//    count only after #2, at most 10 s; matchmaking guests pass as x023 did.
+//    count only after #2, at most 10 s; v7.267: matchmaking guests too (before: they passed as x023 did).
 extern "C" int u3x_jip2_ll_gate(uintptr_t base);   // v7.254 jip block (A7 R7): sub 29 for a late joiner
 #define ST_FN [[gnu::section(".text.ext"), gnu::noinline, clang::minsize]]
 #define ST_RO [[gnu::section(".rodata.ext")]]
@@ -51055,7 +51055,12 @@ ST_FN int loadlevels_gate(uintptr_t base) {   // H2, sub 29 (replaces the owner 
     if ((ext_eb()[0] & 8u) || at<uint32_t>(base + v7252::JIP_STATUS) == 6) return 0;   // no sync / a late joiner: as x023
     const uint32_t t = v7252::now(base);
     const bool on = member_on(room);
-    if (!on && at<uint32_t>(base + MODE) != 2) return 0;   // v7.252 path: the hold is for the Custom Game start only
+    // v7.252 path: the hold is for the Custom Game start (mode 2). v7.267: and the matchmaking start (mode 1): a guest
+    // that left LoadLevels on an unsynced net clock (no samples since the owner zeroed its time at settings #2) played
+    // ~2 minutes with every remote character on its newest snapshot only (frozen on both PCs, the owner invisible to
+    // the guest) until its time sync caught up (2026-11-27 test, 99.5% newest-only picks until then, 0 after)
+    const uint32_t mode = at<uint32_t>(base + MODE);
+    if (!on && mode != 2 && mode != 1) return 0;
     if (!st.hold.seen || t - st.hold.seen > 2 * TICKS) {   // entering: no restart for this match yet = restart here
         Line l;
         if (st.restart_room != room) {
@@ -52356,6 +52361,10 @@ constexpr uint32_t PAGE_MM = 0xe35f0f1a, SYM_PLAYLISTS = 0xc1b0be0d, SYM_NET_GAM
 constexpr uint32_t CAP2 = 0x2b, OFF_BIT = 0x400, CONNECT_T = 10 * TPS, RESERVE_T = 10 * TPS, RESV_LIFE = 10 * TPS,
                    JOIN_T = 30 * TPS, SEARCH_T = 30 * TPS, LINES = 400;
 constexpr uint8_t CAP2_MARK = 0xa0, CAP2_MM = 0x01;
+// member data +0x24 (not set in the game's own block): the room owner's playlist, a 16-bit fold of the playlist id
+// (low half) under the mark 0x5aa5 (high half), sent in every outgoing block (u3x_mm_md_mark)
+constexpr uintptr_t MD_PLAYLIST = 0x24;
+constexpr uint32_t PLAYLIST_MARK = 0x5aa5;
 enum : int { E_CREATE = 4, E_SEARCH = 5, E_JOIN = 6, E_LEAVE = 7, E_ATTR = 8, E_KICK = 9 };
 
 MM_RO const char t_pre[] = "mm: ", t_state[] = "state ", t_arrow[] = " -> ", t_after[] = " after ms ";
@@ -52395,6 +52404,8 @@ MM_RO const char t_103[] = "0x103 in for room 0x", t_103f[] = " (forwarded to th
 MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's 0x113", t_118[] = "0x118 out to the party: searching again from room 0x";
 MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
 MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
+MM_RO const char t_other_pl[] = "mode check: owner on another playlist, leaving";
+MM_RO const char t_late_nv[] = "late join: no vote, 0x27";
 MM_RO const char t_left_room[] = "the match room is gone: 0x26";
 // v7.264 (not PS3 rules: PS3 had many players, two lone PCs could not stay in step; PS3 guests have no time limit)
 constexpr uint32_t STAGGER_T = 8 * TPS, GUEST_T = 90 * TPS;
@@ -52503,6 +52514,8 @@ MM_FN bool v2(const uint8_t *m) {
     const uint8_t c = m[M_DATA + CAP2];
     return rd<uint32_t>(m, M_DLEN) == 0x40 && !m[M_DATA + 0x19] && (c & 0xf0) == CAP2_MARK && (c & CAP2_MM);
 }
+// the 16-bit fold of a playlist id that the playlist tag carries (member data +0x24)
+MM_FN uint32_t playlist_fold(uint32_t id) { return (id ^ (id >> 16)) & 0xffffu; }
 // own member slot: the party session's, else the match session's
 MM_FN const uint8_t *own_in(uint8_t *ss) {
     if (!rd<uint64_t>(ss, S_ROOM)) return nullptr;
@@ -53048,8 +53061,26 @@ MM_FN void begin(uintptr_t base, void *s, bool member) {
     show(base, 1, 0);
 }
 
+MM_FN void join_failed(uintptr_t base);
+// The search result does not tell the modes apart (a Co-op Adventure search got a Team Deathmatch room): true when the
+// owner of the joined room carries the playlist tag of another playlist. No tag (an older helper, a PS3 owner): false.
+MM_FN bool other_playlist(uintptr_t base) {
+    uint8_t *ms = sess(base, MS);
+    const uint8_t *o = u3x_find_member(ms, rd<uint32_t>(ms, S_OWNER));
+    if (!o || rd<uint32_t>(o, M_DLEN) != 0x40) return false;
+    const uint32_t tag = rd<uint32_t>(o, M_DATA + MD_PLAYLIST);
+    return (tag >> 16) == PLAYLIST_MARK && (tag & 0xffffu) != playlist_fold(mm.playlist);
+}
+
 // a joined room: 0x113 from a leader, then the lobby or the late join
 MM_FN void joined(uintptr_t base) {
+    // a search guest in a room of another playlist leaves it as a failed join (kept 30 s on the failed list, 0x103,
+    // state 0x26: leave, then decide again)
+    if (!mm.member && mm.playlist && other_playlist(base)) {
+        say(t_other_pl);
+        join_failed(base);
+        return;
+    }
     Line l;
     put(l.s(t_joined).x(mm.target, 8));
     if (!mm.member) tell_party(base, false);
@@ -53087,7 +53118,11 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
         return;
     }
     if (static_cast<int32_t>(t - mm.kick_t) < static_cast<int32_t>(2 * TPS)) return;   // kicks under way
-    const int b = balance_now(base, s, count);
+    // No team-balance kick: a match starts with uneven teams (3 players in TDM: 2 v 1). The kicked player
+    // found the room again in its next search and rejoined within a second, so it flickered in and out of the lobby
+    // list until the countdown let it stay; three friends could not play together otherwise.
+    (void)balance_now;
+    const int b = 0;
     if (b > 0) {
         mm.kick_t = t;
         return;
@@ -53121,6 +53156,20 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
 // s = the menu state, for the loading page the fallback has to show itself (u3x_guest_load_pages)
 MM_FN void guest_start(uintptr_t base, void *s) {
     uint8_t *ms = sess(base, MS);
+    // A search guest alone at 0x12 whose owner's start-load (its settings event) comes before any vote: the match is
+    // already being played. The search result showed the room without the in-progress flag, so joined() took the lobby,
+    // and the forced load below then waited at 0x2f for a start that never comes. Take the late join instead (0x27),
+    // as joined() does for the flag; the LoadLevel is already in, so the flag goes up again for the wait to take.
+    if (mm.st == 0x12 && !mm.member && ps4_state(base) == 0x12 && ms[S_START_LOAD] && party_size(base) == 1) {
+        say(t_late_nv);
+        show(base, 5, LATE_WAIT);
+        mm.in_progress = 1;
+        u3x_jip_wait(base, room_of(base), 1, nullptr);
+        ms[S_START_LOAD] = 1;
+        mm.late_first = 0;
+        go(base, 0x27);
+        return;
+    }
     const uint32_t t = now(base);
     if (ps4_state(base) != 0x12 || !ms[S_START_LOAD]) {
         mm.lobby_t = 0;
@@ -53526,10 +53575,13 @@ MM_FN int u3x_mm_msg(uintptr_t base, uint32_t type) {
     return type == 0x118 ? 1 : 0;   // 0x118 has no PS3 reader
 }
 
-// u3x_xp_md_out: the matchmaking v2 bit into an outgoing member data block (capability byte 2, the other bits kept)
+// u3x_xp_md_out: the matchmaking v2 bit into an outgoing member data block (capability byte 2, the other bits kept),
+// and the playlist tag of this PC's matchmaking playlist (none before the first matchmaking start)
 MM_FN void u3x_mm_md_mark(uint8_t *md) {
     const uint8_t old = md[mm254::CAP2];
     md[mm254::CAP2] = static_cast<uint8_t>(mm254::CAP2_MARK | ((old & 0xf0) == mm254::CAP2_MARK ? old & 0x0e : 0) | mm254::CAP2_MM);
+    if (const uint32_t pl = mm254::mm.playlist)
+        *reinterpret_cast<uint32_t *>(md + mm254::MD_PLAYLIST) = mm254::PLAYLIST_MARK << 16 | mm254::playlist_fold(pl);
 }
 
 // u3x_hs_frame: 1 = this driver runs the lobby of the match room (its migration is its own, not 0x12 -> 0x11)
@@ -55481,8 +55533,11 @@ FAM_FN void u3x_mm_focus(uintptr_t base, int32_t *ev, void *s) {
     if ((ev[0] != 6 && ev[0] != 21) || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
     const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
     if (!source || rd<uint32_t>(source, 0x1c) != 0x4c414eadu) return;   // the party box
-    const uint8_t *top = u3h_active_page_object(base);
-    if (!top || rd<uint32_t>(top, 0x10) != 0xe35f0f1au) return;     // PAGE_MULTIPLAYER_MATCHMAKING
+    // While the search runs (net status > 0, the rule of the matchmaking player lists), on every page, not
+    // only PAGE_MULTIPLAYER_MATCHMAKING: the PROFILE page opened from its Profile row (Customization / Records) shows
+    // the same list, op 21 stayed unanswered there, so the game put the focus on the own row and took it back after
+    // each Left. The keeper reads the active page itself.
+    if (at<int32_t>(base + 0x17d5c58 + 0x40) <= 0) return;
     // v7.260: op 21 "may the box take the focus": the helper's party list answers yes only while the player is in the
     // box; the matchmaking player list left it unanswered (the game's default: yes), so the game kept moving the
     // focus into the box and the keeper kept moving it back (the highlight jumped left and right without input)
@@ -55522,3 +55577,31 @@ FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
 }  // extern "C"
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
 // ===== v7.254 fam end =====
+// ===== v7.267 host table (docs/WINDOWS-DEPENDENCIES.md §4.10, phase 5) =====
+// The runtime's host function table (gow3_pc/src/uncharted_host.h) for the PC platform layer (plat_pc.inc), the same on
+// Windows and Linux. Its address is read at kind 44 (PLAT_BIND in plat.h) through the runtime's own sceKernelOpen /
+// sceKernelRead / sceKernelClose of /dev/uncharted_host: 8 bytes. Version 1, at least 208 bytes; an older runtime has no
+// such file, and the PC layer then finds no host functions (no network, as without Winsock).
+namespace {
+U3X_RO const char host_path[] = "/dev/uncharted_host";
+constexpr uint32_t HOST_VERSION = 1, HOST_SIZE = 208;
+U3X_BSS const void *g_host;
+}  // namespace
+extern "C" {
+U3X_FN int u3x_host_bind(uintptr_t open, uintptr_t read, uintptr_t close) {
+    if (g_host) return 1;
+    if (!open || !read || !close) return 0;
+    const int64_t fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(open)(host_path, 0, 0);
+    if (fd < 0) return 0;
+    uint64_t address = 0;
+    const int64_t n = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(read)(static_cast<int>(fd), &address, 8);
+    reinterpret_cast<int64_t (*)(int)>(close)(static_cast<int>(fd));
+    if (n != 8 || !ptr_ok(reinterpret_cast<const void *>(address))) return 0;
+    const uint32_t *table = reinterpret_cast<const uint32_t *>(address);
+    if (table[0] != HOST_VERSION || table[1] < HOST_SIZE) return 0;
+    g_host = table;
+    return 1;
+}
+U3X_FN const void *u3x_host(void) { return g_host; }
+}  // extern "C"
+// ===== v7.267 host table end =====

@@ -17,18 +17,42 @@
 //   5. Launch "UCMR_Launcher.exe"; that new launcher deletes update\ on startup.
 // usage: apply_update.exe --root <package folder> --wait-pid <launcher pid> [--no-restart] [--quiet]
 // The exe is statically linked, so it does not depend on anything in the folder it is about to replace.
+//
+// Linux (tools/apply_update in the Linux package, docs/WINDOWS-DEPENDENCIES.md §7.6): the same stages from the same
+// code. The few file-system and process calls sit in the small functions below, each with its Windows body as before
+// and a Linux one beside it; Linux has no progress window (the status lines go to the output, which the launcher
+// writes to analysis/update-apply.log) and starts ./UCMR_Launcher at the end.
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "port.h"
+
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+#include <thread>
+
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace {
 
+#ifdef _WIN32
 const wchar_t *const TITLE = L"UCMR";
+#endif
 const wchar_t *const DEFAULTS[] = {L"analysis/uncharted-user/disabled-optimizations.txt"};
 // Written at the end of every update: one line per file the package shipped, relative to the root with "/" between
 // folders. When the following update runs, files listed here that its package lacks are left behind, and all other
@@ -37,6 +61,9 @@ const wchar_t *const MANIFEST = L"installed-files.txt";
 
 struct Error { std::wstring message; };
 
+// ------------------------------------------------------------------------------------------------ the platform functions
+
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -59,6 +86,10 @@ void write_std(DWORD which, const std::wstring &text) {
     if (h && h != INVALID_HANDLE_VALUE) WriteFile(h, o.data(), (DWORD)o.size(), &put, nullptr);
 }
 void print(const std::wstring &text) { write_std(STD_OUTPUT_HANDLE, text); }
+void print_error(const std::wstring &text) { write_std(STD_ERROR_HANDLE, text); }
+
+using ErrorCode = DWORD;
+ErrorCode last_error() { return GetLastError(); }
 
 // Formats a system error the way Python prints an OSError: "[WinError n] text: 'a' -> 'b'"
 std::wstring os_error(DWORD code, const std::wstring &a = L"", const std::wstring &b = L"") {
@@ -73,8 +104,6 @@ std::wstring os_error(DWORD code, const std::wstring &a = L"", const std::wstrin
     if (!b.empty()) o += L" -> '" + b + L"'";
     return o;
 }
-
-// ------------------------------------------------------------------------------------------------ file system helpers
 
 std::wstring join(const std::wstring &a, const std::wstring &b) {
     if (a.empty()) return b;
@@ -131,20 +160,8 @@ std::wstring full_path(const std::wstring &p) {
     return f;
 }
 
-// Repeats `action` every half second until it works or `seconds` run out. Right after a process ends its files may
-// still be locked briefly, and a virus scanner can hold them as well.
-template <typename F> void retry(F action, int seconds = 15) {
-    const ULONGLONG deadline = GetTickCount64() + (ULONGLONG)seconds * 1000;
-    while (true) {
-        try {
-            action();
-            return;
-        } catch (const Error &) {
-            if (GetTickCount64() > deadline) throw;
-            Sleep(500);
-        }
-    }
-}
+unsigned long long now_ms() { return GetTickCount64(); }
+void sleep_ms(unsigned ms) { Sleep(ms); }
 
 void rename(const std::wstring &from, const std::wstring &to) {
     if (!MoveFileExW(from.c_str(), to.c_str(), 0)) throw Error{os_error(GetLastError(), from, to)};
@@ -156,16 +173,13 @@ void make_dirs(const std::wstring &p) {
     if (!CreateDirectoryW(p.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
         throw Error{os_error(GetLastError(), p)};
 }
-
-// Recursive copy that keeps file times, as shutil.copytree / copy2 do
-void copy_item(const std::wstring &source, const std::wstring &target) {
-    if (is_dir(source)) {
-        if (!CreateDirectoryW(target.c_str(), nullptr)) throw Error{os_error(GetLastError(), target)};
-        for (const std::wstring &n : entries(source)) copy_item(join(source, n), join(target, n));
-    } else if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) {
-        throw Error{os_error(GetLastError(), source, target)};
-    }
-}
+// one new folder: false (the reason in last_error()) when it could not be made, also when it is there already
+bool create_dir(const std::wstring &p) { return CreateDirectoryW(p.c_str(), nullptr) != FALSE; }
+bool already_exists(ErrorCode code) { return code == ERROR_ALREADY_EXISTS; }
+// deletes an empty folder; false when it could not go
+bool remove_dir(const std::wstring &p) { return RemoveDirectoryW(p.c_str()) != FALSE; }
+// copies one file over whatever is at `to`, with its times; false (the reason in last_error()) on failure
+bool copy_file(const std::wstring &from, const std::wstring &to) { return CopyFileW(from.c_str(), to.c_str(), FALSE) != FALSE; }
 
 // Deletes a file or a whole tree (shutil.rmtree / unlink); a link is removed without touching what it points to
 void remove_item(const std::wstring &path) {
@@ -178,9 +192,218 @@ void remove_item(const std::wstring &path) {
     if (!ok) throw Error{os_error(GetLastError(), path)};
 }
 
+// the whole file as bytes; false when it cannot be opened
+bool read_text(const std::wstring &path, std::string &data) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[1 << 16];
+    DWORD got = 0;
+    while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got) data.append(buf, got);
+    CloseHandle(h);
+    return true;
+}
+const char *const NEWLINE = "\r\n";
+// writes the bytes as the whole file; false (the reason in last_error()) on failure
+bool write_text(const std::wstring &path, const std::string &data) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD put = 0;
+    const bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, data.data(), (DWORD)data.size(), &put, nullptr);
+    const DWORD code = GetLastError();
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    SetLastError(code);
+    return ok;
+}
+
+// the folder part and the last name of a path
+std::wstring parent(const std::wstring &p) { return p.substr(0, p.find_last_of(L'\\')); }
+std::wstring leaf(const std::wstring &p) { return p.substr(p.find_last_of(L'\\') + 1); }
+
+bool same_name_ci(const std::wstring &a, const wchar_t *b) {
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b, -1, TRUE) == CSTR_EQUAL;
+}
+
+std::wstring timestamp() {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t b[32];
+    swprintf(b, 32, L"%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    return b;
+}
+#else   // Linux
+namespace fs = std::filesystem;
+
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }
+void write_fd(int fd, const std::wstring &text) {
+    const std::string o = utf8(text + L"\n");
+    if (::write(fd, o.data(), o.size()) < 0) {}
+}
+void print(const std::wstring &text) { write_fd(1, text); }
+void print_error(const std::wstring &text) { write_fd(2, text); }
+
+using ErrorCode = int;
+ErrorCode last_error() { return errno; }
+
+// a system error the way Python prints an OSError on Linux: "[Errno n] text: 'a' -> 'b'"
+std::wstring os_error(int code, const std::wstring &a = L"", const std::wstring &b = L"") {
+    std::wstring o = L"[Errno " + std::to_wstring(code) + L"] " + widen(std::strerror(code));
+    if (!a.empty()) o += L": '" + a + L"'";
+    if (!b.empty()) o += L" -> '" + b + L"'";
+    return o;
+}
+
+std::wstring join(const std::wstring &a, const std::wstring &b) {
+    if (a.empty()) return b;
+    return a.back() == L'/' ? a + b : a + L"/" + b;
+}
+std::wstring native_rel(std::wstring rel) { return rel; }
+fs::path P(const std::wstring &p) { return fs::path(utf8(p)); }
+bool exists(const std::wstring &p) {   // like Path.exists: a link counts only if its target is there
+    std::error_code ec;
+    return fs::exists(P(p), ec);
+}
+bool is_link(const std::wstring &p) {
+    std::error_code ec;
+    return fs::is_symlink(fs::symlink_status(P(p), ec));
+}
+bool is_dir(const std::wstring &p) {
+    std::error_code ec;
+    return fs::is_directory(P(p), ec);
+}
+bool is_file(const std::wstring &p) { return exists(p) && !is_dir(p); }
+
+// Names inside a folder in the order sorted(Path.iterdir()) gives on Linux (plain code point order)
+std::vector<std::wstring> entries(const std::wstring &folder) {
+    std::vector<std::wstring> names;
+    std::error_code ec;
+    fs::directory_iterator it(P(folder), ec);
+    if (ec) throw Error{os_error(ec.value(), folder)};
+    for (fs::directory_iterator end; it != end; it.increment(ec)) {
+        if (ec) throw Error{os_error(ec.value(), folder)};
+        names.push_back(widen(it->path().filename().string()));
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::wstring full_path(const std::wstring &p) {
+    std::error_code ec;
+    fs::path a = fs::absolute(P(p), ec);
+    if (ec) a = P(p);
+    std::wstring f = widen(a.lexically_normal().string());
+    while (f.size() > 1 && f.back() == L'/') f.pop_back();
+    return f;
+}
+
+unsigned long long now_ms() {
+    return (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+void sleep_ms(unsigned ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+
+// as MoveFileExW without flags: never over something that is there already
+void rename(const std::wstring &from, const std::wstring &to) {
+    std::error_code ec;
+    if (fs::symlink_status(P(to), ec).type() != fs::file_type::not_found) throw Error{os_error(EEXIST, from, to)};
+    if (::rename(utf8(from).c_str(), utf8(to).c_str()) != 0) throw Error{os_error(errno, from, to)};
+}
+void make_dirs(const std::wstring &p) {
+    if (is_dir(p)) return;
+    std::error_code ec;
+    fs::create_directories(P(p), ec);
+    if (ec) throw Error{os_error(ec.value(), p)};
+}
+bool create_dir(const std::wstring &p) { return ::mkdir(utf8(p).c_str(), 0755) == 0; }
+bool already_exists(ErrorCode code) { return code == EEXIST; }
+bool remove_dir(const std::wstring &p) { return ::rmdir(utf8(p).c_str()) == 0; }
+bool copy_file(const std::wstring &from, const std::wstring &to) {
+    std::error_code ec;
+    fs::copy_file(P(from), P(to), fs::copy_options::overwrite_existing, ec);   // with its mode bits
+    if (!ec) {
+        const auto time = fs::last_write_time(P(from), ec);
+        if (!ec) fs::last_write_time(P(to), time, ec);
+    }
+    if (ec) errno = ec.value();
+    return !ec;
+}
+
+void remove_item(const std::wstring &path) {
+    std::error_code ec;
+    const auto st = fs::symlink_status(P(path), ec);
+    if (st.type() == fs::file_type::not_found) return;
+    if (st.type() == fs::file_type::directory)
+        for (const std::wstring &n : entries(path)) remove_item(join(path, n));
+    if (!fs::remove(P(path), ec) || ec) throw Error{os_error(ec ? ec.value() : ENOENT, path)};
+}
+
+bool read_text(const std::wstring &path, std::string &data) {
+    std::ifstream f(P(path), std::ios::binary);
+    if (!f) return false;
+    char buf[1 << 16];
+    while (f.read(buf, sizeof buf) || f.gcount()) data.append(buf, (size_t)f.gcount());
+    return true;
+}
+const char *const NEWLINE = "\n";
+bool write_text(const std::wstring &path, const std::string &data) {
+    std::ofstream f(P(path), std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(data.data(), (std::streamsize)data.size());
+    f.close();
+    return !f.fail();
+}
+
+std::wstring parent(const std::wstring &p) { return p.substr(0, p.find_last_of(L'/')); }
+std::wstring leaf(const std::wstring &p) { return p.substr(p.find_last_of(L'/') + 1); }
+
+bool same_name_ci(const std::wstring &a, const wchar_t *b) {
+    std::wstring x = a, y = b;
+    for (wchar_t &c : x) c = (wchar_t)std::towlower((wint_t)c);
+    for (wchar_t &c : y) c = (wchar_t)std::towlower((wint_t)c);
+    return x == y;
+}
+
+std::wstring timestamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm t{};
+    localtime_r(&now, &t);
+    wchar_t b[32];
+    swprintf(b, 32, L"%04d%02d%02d-%02d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+    return b;
+}
+#endif
+
+// ------------------------------------------------------------------------------------------------ file system helpers
+
+// Repeats `action` every half second until it works or `seconds` run out. Right after a process ends its files may
+// still be locked briefly, and a virus scanner can hold them as well.
+template <typename F> void retry(F action, int seconds = 15) {
+    const unsigned long long deadline = now_ms() + (unsigned long long)seconds * 1000;
+    while (true) {
+        try {
+            action();
+            return;
+        } catch (const Error &) {
+            if (now_ms() > deadline) throw;
+            sleep_ms(500);
+        }
+    }
+}
+
+// Recursive copy that keeps file times, as shutil.copytree / copy2 do
+void copy_item(const std::wstring &source, const std::wstring &target) {
+    if (is_dir(source)) {
+        if (!create_dir(target)) throw Error{os_error(last_error(), target)};
+        for (const std::wstring &n : entries(source)) copy_item(join(source, n), join(target, n));
+    } else if (!copy_file(source, target)) {
+        throw Error{os_error(last_error(), source, target)};
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ installing
 
 std::wstring g_root, g_staged;
+
+#ifdef _WIN32
 HWND g_window = nullptr, g_label = nullptr;
 HFONT g_font = nullptr;
 HBRUSH g_brush = nullptr;
@@ -263,6 +486,27 @@ bool wait_for_exit(DWORD pid, int seconds) {
     CloseHandle(h);
     return gone;
 }
+#else   // Linux: no window; the status lines go to the output
+void status(const std::wstring &text) { print(text); }
+
+// the launcher has ended (gone, or a zombie its parent has not collected yet)
+bool ended(unsigned long pid) {
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat;
+    if (!std::getline(f, stat)) return true;
+    const size_t close = stat.rfind(')');
+    return close != std::string::npos && close + 2 < stat.size() && (stat[close + 2] == 'Z' || stat[close + 2] == 'X');
+}
+
+bool wait_for_exit(unsigned long pid, int seconds) {
+    const unsigned long long deadline = now_ms() + (unsigned long long)seconds * 1000;
+    while (!ended(pid)) {
+        if (now_ms() > deadline) return false;
+        sleep_ms(100);
+    }
+    return true;
+}
+#endif
 
 // Collects every program file the new package will put in the root, as root-relative paths with "/" separators.
 void package_files(const std::wstring &folder, const std::wstring &rel, std::vector<std::wstring> &out) {
@@ -276,13 +520,8 @@ void package_files(const std::wstring &folder, const std::wstring &rel, std::vec
 
 std::set<std::wstring> read_manifest() {
     std::set<std::wstring> lines;
-    HANDLE h = CreateFileW(join(g_root, MANIFEST).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return lines;   // versions up to 0.5.0 never wrote one: keep every file the package lacks
     std::string data;
-    char buf[1 << 16];
-    DWORD got = 0;
-    while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got) data.append(buf, got);
-    CloseHandle(h);
+    if (!read_text(join(g_root, MANIFEST), data)) return lines;   // versions up to 0.5.0 never wrote one: keep every file the package lacks
     const std::wstring text = widen(data);
     size_t a = 0;
     while (a <= text.size()) {
@@ -325,7 +564,7 @@ void strip_package(const std::wstring &dir, const std::wstring &rel, const std::
         try {
             if (is_dir(p)) {
                 strip_package(p, r, package);
-                if (entries(p).empty()) RemoveDirectoryW(p.c_str());
+                if (entries(p).empty()) remove_dir(p);
             } else if (package.count(r)) {
                 retry([&] { remove_item(p); }, 3);
             }
@@ -344,9 +583,7 @@ bool holds_dropped(const std::set<std::wstring> &dropped, const std::wstring &re
 
 // Detects a __pycache__ folder. Python creates these beside its scripts on its own; they are neither part of any
 // package nor something the player made, so they are not kept and end up in update\old instead.
-bool python_cache(const std::wstring &name) {
-    return CompareStringOrdinal(name.c_str(), (int)name.size(), L"__pycache__", -1, TRUE) == CSTR_EQUAL;
-}
+bool python_cache(const std::wstring &name) { return same_name_ci(name, L"__pycache__"); }
 
 // Brings into `fresh` everything that `old`, the set-aside copy of the same program folder, has and `fresh` lacks.
 // A subfolder that `fresh` lacks moves over in one rename (same drive, so it is instant even for a whole game folder)
@@ -370,7 +607,7 @@ void carry_over(const std::wstring &old, const std::wstring &fresh, const std::w
             // folder missing from the new package: recreate it for the player's files, without the dropped ones
             make_dirs(target);
             carry_over(item, target, rel, dropped, kept);
-            if (entries(target).empty()) RemoveDirectoryW(target.c_str());
+            if (entries(target).empty()) remove_dir(target);
         } else {
             rename(item, target);
             kept.push_back(rel);
@@ -388,7 +625,7 @@ bool prune(const std::wstring &path, const std::wstring &rel, const std::wstring
     if (is_dir(path) && python_cache(name)) {   // a __pycache__ folder is moved away in one piece
         try {
             const std::wstring target = join(old, native_rel(rel));
-            make_dirs(target.substr(0, target.find_last_of(L'\\')));
+            make_dirs(parent(target));
             retry([&] { rename(path, target); }, 5);
             return true;
         } catch (const Error &e) {
@@ -401,8 +638,8 @@ bool prune(const std::wstring &path, const std::wstring &rel, const std::wstring
         for (const std::wstring &n : entries(path)) {
             if (!prune(join(path, n), rel + L"/" + n, old, dropped, problems)) empty = false;
         }
-        if (empty && !RemoveDirectoryW(path.c_str())) {
-            problems.push_back(rel + L" (" + os_error(GetLastError(), path) + L")");
+        if (empty && !remove_dir(path)) {
+            problems.push_back(rel + L" (" + os_error(last_error(), path) + L")");
             return false;
         }
         return empty;
@@ -410,7 +647,7 @@ bool prune(const std::wstring &path, const std::wstring &rel, const std::wstring
     if (!dropped.count(rel)) return false;   // not from the previous package, so it belongs to the player
     try {
         const std::wstring target = join(old, native_rel(rel));
-        make_dirs(target.substr(0, target.find_last_of(L'\\')));
+        make_dirs(parent(target));
         retry([&] { rename(path, target); }, 5);
         return true;
     } catch (const Error &e) {
@@ -440,7 +677,7 @@ void merge_into(const std::wstring &source, const std::wstring &target, const st
         }
         if (exists(to) || is_link(to)) {
             const std::wstring aside = join(old, r);
-            make_dirs(aside.substr(0, aside.find_last_of(L'\\')));
+            make_dirs(parent(aside));
             retry([&] { rename(to, aside); }, 5);
             journal.push_back({r, true});
         } else {
@@ -461,14 +698,6 @@ void undo(const std::vector<Swap> &journal, const std::wstring &old, std::vector
             stuck.push_back(it->rel + L" (could not restore: " + e.message + L")");
         }
     }
-}
-
-std::wstring timestamp() {
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    wchar_t b[32];
-    swprintf(b, 32, L"%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
-    return b;
 }
 
 // The launcher wipes update\ when it starts, so this moves update\old up into the root under a dated name. Returns
@@ -527,12 +756,12 @@ void apply() {
             const std::wstring rel = native_rel(relative), source = join(g_staged, rel);
             if (!is_file(source)) continue;
             const std::wstring target = join(g_root, rel);
-            make_dirs(target.substr(0, target.find_last_of(L'\\')));
-            const std::wstring saved = join(old, rel.substr(rel.find_last_of(L'\\') + 1));
+            make_dirs(parent(target));
+            const std::wstring saved = join(old, leaf(rel));
             if (exists(target)) {
-                if (!CopyFileW(target.c_str(), saved.c_str(), FALSE)) throw Error{os_error(GetLastError(), target, saved)};
+                if (!copy_file(target, saved)) throw Error{os_error(last_error(), target, saved)};
             }
-            if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) throw Error{os_error(GetLastError(), source, target)};
+            if (!copy_file(source, target)) throw Error{os_error(last_error(), source, target)};
         }
     } catch (const Error &) {
         status(L"Update failed, putting the previous version back...");
@@ -560,9 +789,9 @@ void apply() {
             }
         }
         for (const wchar_t *relative : DEFAULTS) {
-            const std::wstring rel = native_rel(relative), saved = join(old, rel.substr(rel.find_last_of(L'\\') + 1));
-            if (is_file(saved) && !CopyFileW(saved.c_str(), join(g_root, rel).c_str(), FALSE))
-                stuck.push_back(std::wstring(relative) + L" (" + os_error(GetLastError(), saved, join(g_root, rel)) + L")");
+            const std::wstring rel = native_rel(relative), saved = join(old, leaf(rel));
+            if (is_file(saved) && !copy_file(saved, join(g_root, rel)))
+                stuck.push_back(std::wstring(relative) + L" (" + os_error(last_error(), saved, join(g_root, rel)) + L")");
         }
         if (!stuck.empty()) {
             // The next launcher start wipes update\old, so get the leftovers out of there first.
@@ -585,12 +814,11 @@ void apply() {
         } catch (const Error &e) {
             const std::wstring rescue = join(g_root, L"update-kept-" + timestamp());
             status(L"Files of yours in " + name + L" could not be returned (" + e.message + L"); you can find them in " +
-                   rescue.substr(rescue.find_last_of(L'\\') + 1) + L".");
+                   leaf(rescue) + L".");
             try {
                 // the previous package's own files there are not the player's: only the player's files are kept
                 strip_package(join(old, name), name, package);
-                if (!CreateDirectoryW(rescue.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-                    throw Error{os_error(GetLastError(), rescue)};
+                if (!create_dir(rescue) && !already_exists(last_error())) throw Error{os_error(last_error(), rescue)};
                 retry([&] { rename(join(old, name), join(rescue, name)); });
             } catch (const Error &rescue_error) {
                 // Only mention it: the update itself succeeded and must not be reported as failed.
@@ -627,28 +855,70 @@ void apply() {
     for (const std::wstring &name : entries(g_root)) {
         if (name.rfind(L"update-kept-", 0) != 0 || !is_dir(join(g_root, name)) || is_link(join(g_root, name))) continue;
         strip_package(join(g_root, name), L"", package);
-        if (entries(join(g_root, name)).empty()) RemoveDirectoryW(join(g_root, name).c_str());
+        if (entries(join(g_root, name)).empty()) remove_dir(join(g_root, name));
     }
     for (const std::wstring &p : problems) print(L"Not removed: " + p);
     for (const std::wstring &rel : kept) print(L"Kept: " + rel);
     std::string manifest;
-    for (const std::wstring &f : new_files) manifest += utf8(f) + "\r\n";
-    HANDLE h = CreateFileW(join(g_root, MANIFEST).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    DWORD put = 0;
-    if (h == INVALID_HANDLE_VALUE || !WriteFile(h, manifest.data(), (DWORD)manifest.size(), &put, nullptr))
-        write_std(STD_ERROR_HANDLE, std::wstring(L"Failed to write ") + MANIFEST + L": " + os_error(GetLastError()));
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    for (const std::wstring &f : new_files) manifest += utf8(f) + NEWLINE;
+    if (!write_text(join(g_root, MANIFEST), manifest))
+        print_error(std::wstring(L"Failed to write ") + MANIFEST + L": " + os_error(last_error()));
 }
 
+#ifdef _WIN32
 const wchar_t *const USAGE = L"usage: apply_update.exe [-h] --root ROOT [--wait-pid WAIT_PID] [--no-restart] [--quiet]";
+const wchar_t *const PROGRAM = L"apply_update.exe";
+#else
+const wchar_t *const USAGE = L"usage: apply_update [-h] --root ROOT [--wait-pid WAIT_PID] [--no-restart] [--quiet]";
+const wchar_t *const PROGRAM = L"apply_update";
+#endif
 
-}  // namespace
+// the folder of the staged package this program came with: its own folder (tools) is in it
+std::wstring staged_package() {
+#ifdef _WIN32
+    std::vector<wchar_t> self(32768);
+    GetModuleFileNameW(nullptr, self.data(), 32768);
+    std::wstring s = self.data();
+#else
+    std::wstring s = widen(port::executable_path().string());
+#endif
+    s = parent(s);   // the program's own folder, tools; its parent is the staged package
+    return parent(s);
+}
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    int argc = 0;
-    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+// starts the new launcher from the root and does not wait for it
+void restart_launcher() {
+#ifdef _WIN32
+    std::wstring starter = join(g_root, L"UCMR_Launcher.exe");
+    if (GetFileAttributesW(starter.c_str()) == INVALID_FILE_ATTRIBUTES) starter = join(g_root, L"Uncharted Launcher.exe");
+    std::wstring cmd = L"\"" + starter + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(starter.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, g_root.c_str(), &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        write_std(STD_ERROR_HANDLE, L"Failed to start " + starter + L": " + os_error(GetLastError()));
+    }
+#else
+    const std::wstring starter = join(g_root, L"UCMR_Launcher");
+    port::Spawn s;
+    s.argv = {utf8(starter)};
+    s.cwd = utf8(g_root);
+    s.out = port::Spawn::null;
+    s.own_group = true;   // it outlives this program
+    port::Child child;
+    std::string error;
+    if (!port::spawn(s, child, error)) print_error(L"Failed to start " + starter + L": " + widen(error));
+#endif
+}
+
+// the program: arguments (argv[0] first), the install, the restart; the exit code
+int run(const std::vector<std::wstring> &argv) {
+    const int argc = (int)argv.size();
     std::wstring root;
-    DWORD wait_pid = 0;
+    unsigned long wait_pid = 0;
     bool restart = true, quiet = false, have_root = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i], value;
@@ -659,35 +929,42 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             a = a.substr(0, eq);
             has_value = true;
         }
+        bool missing = false;
         auto take = [&]() -> std::wstring {
             if (has_value) return value;
             if (i + 1 < argc) return argv[++i];
-            write_std(STD_ERROR_HANDLE, std::wstring(USAGE) + L"\napply_update.exe: error: argument " + a + L": expected one argument");
-            ExitProcess(2);
+            missing = true;
+            return L"";
         };
-        if (a == L"--root") { root = take(); have_root = true; }
+        if (a == L"--root") { root = take(); have_root = !missing; }
+#ifdef _WIN32
         else if (a == L"--wait-pid") wait_pid = (DWORD)_wtoi(take().c_str());
+#else
+        else if (a == L"--wait-pid") wait_pid = (unsigned long)std::wcstoul(take().c_str(), nullptr, 10);
+#endif
         else if (a == L"--no-restart") restart = false;
         else if (a == L"--quiet") quiet = true;
         else if (a == L"-h" || a == L"--help") { print(USAGE); return 0; }
         else {
-            write_std(STD_ERROR_HANDLE, std::wstring(USAGE) + L"\napply_update.exe: error: unrecognized arguments: " + argv[i]);
+            print_error(std::wstring(USAGE) + L"\n" + PROGRAM + L": error: unrecognized arguments: " + argv[i]);
+            return 2;
+        }
+        if (missing) {
+            print_error(std::wstring(USAGE) + L"\n" + PROGRAM + L": error: argument " + a + L": expected one argument");
             return 2;
         }
     }
     if (!have_root) {
-        write_std(STD_ERROR_HANDLE, std::wstring(USAGE) + L"\napply_update.exe: error: the following arguments are required: --root");
+        print_error(std::wstring(USAGE) + L"\n" + PROGRAM + L": error: the following arguments are required: --root");
         return 2;
     }
     g_root = full_path(root);
-    {
-        std::vector<wchar_t> self(32768);
-        GetModuleFileNameW(nullptr, self.data(), 32768);
-        std::wstring s = self.data();
-        s = s.substr(0, s.find_last_of(L'\\'));   // the exe's own folder, tools; its parent is the staged package
-        g_staged = s.substr(0, s.find_last_of(L'\\'));
-    }
+    g_staged = staged_package();
+#ifdef _WIN32
     if (!quiet) open_window();
+#else
+    (void)quiet;   // no window on Linux
+#endif
     bool ok = true;
     try {
         if (wait_pid && !wait_for_exit(wait_pid, 60)) throw Error{L"The launcher did not exit in time."};
@@ -699,23 +976,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                                      L"\n\nIf the game is running, or a launcher file is open in another program, close "
                                      L"it and try once more, or get the new version from the "
                                      L"releases page.";
-        write_std(STD_ERROR_HANDLE, message);
+        print_error(message);
+#ifdef _WIN32
         if (g_window) MessageBoxW(g_window, message.c_str(), TITLE, MB_OK | MB_ICONERROR);
+#endif
     }
+#ifdef _WIN32
     if (g_window) DestroyWindow(g_window);
-    if (restart) {
-        std::wstring starter = join(g_root, L"UCMR_Launcher.exe");
-        if (GetFileAttributesW(starter.c_str()) == INVALID_FILE_ATTRIBUTES) starter = join(g_root, L"Uncharted Launcher.exe");
-        std::wstring cmd = L"\"" + starter + L"\"";
-        STARTUPINFOW si{};
-        si.cb = sizeof si;
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(starter.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, g_root.c_str(), &si, &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        } else {
-            write_std(STD_ERROR_HANDLE, L"Failed to start " + starter + L": " + os_error(GetLastError()));
-        }
-    }
+#endif
+    if (restart) restart_launcher();
     return ok ? 0 : 1;
 }
+
+}  // namespace
+
+#ifdef _WIN32
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    return run(std::vector<std::wstring>(argv, argv + argc));
+}
+#else
+int main(int argc, char **argv) {
+    std::vector<std::wstring> args;
+    for (int i = 0; i < argc; ++i) args.push_back(widen(argv[i]));
+    return run(args);
+}
+#endif

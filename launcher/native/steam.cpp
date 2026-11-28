@@ -25,6 +25,16 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wincodec.h>
+#else
+// Linux: the same logic; the few OS calls (files, Steam's folders, its process, PNG pictures) have their own bodies
+// below, marked "Linux", beside the Windows ones
+#include <cerrno>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+
+#include "png.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +50,7 @@ namespace {
 
 // ------------------------------------------------------------------------------------------------ text helpers
 
+#ifdef _WIN32
 std::wstring widen(const std::string &s) {
     if (s.empty()) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -62,6 +73,16 @@ std::string folded(const std::string &s) {
     if (!w.empty()) CharLowerBuffW(w.data(), (DWORD)w.size());
     return narrow(w);
 }
+#else   // Linux: UTF-8 <-> UTF-32 (port.h); towlower in the library's C locale folds ASCII letters (the names and
+        // options compared here are the launcher's own, which it writes the same way each time)
+std::wstring widen(const std::string &s) { return port::wide(s); }
+std::string narrow(const std::wstring &w) { return port::utf8(w); }
+std::string folded(const std::string &s) {
+    std::wstring w = widen(s);
+    for (wchar_t &c : w) c = (wchar_t)std::towlower((wint_t)c);
+    return narrow(w);
+}
+#endif
 
 std::string trimmed(const std::string &s, const char *chars = " \t\r\n") {
     size_t a = s.find_first_not_of(chars);
@@ -87,6 +108,7 @@ std::vector<std::string> split(const std::string &s, char sep) {
 
 // ------------------------------------------------------------------------------------------------ files
 
+#ifdef _WIN32
 bool read_file(const std::wstring &path, std::string &data) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -156,6 +178,90 @@ std::vector<FoundFile> list_files(const std::wstring &folder, const std::wstring
     FindClose(h);
     return out;
 }
+#else   // Linux: the same helpers on std::filesystem; a backslash in our path text is a folder separator (port::path)
+namespace fs = std::filesystem;
+
+bool read_file(const std::wstring &path, std::string &data) {
+    std::error_code ec;
+    const fs::path p = port::path(path);
+    const auto size = fs::file_size(p, ec);
+    if (ec || size >= (1ull << 30)) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    data.assign((size_t)size, '\0');
+    return data.empty() || (bool)f.read(data.data(), (std::streamsize)data.size());
+}
+
+bool write_file(const std::wstring &path, const std::string &data) {
+    std::ofstream f(port::path(path), std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(data.data(), (std::streamsize)data.size());
+    f.close();
+    return !f.fail();
+}
+
+bool is_file(const std::wstring &path) {
+    std::error_code ec;
+    return fs::exists(port::path(path), ec) && !fs::is_directory(port::path(path), ec);
+}
+
+bool is_dir(const std::wstring &path) {
+    std::error_code ec;
+    return fs::is_directory(port::path(path), ec);
+}
+
+void make_dirs(const std::wstring &path) {
+    std::error_code ec;
+    if (!path.empty()) fs::create_directories(port::path(path), ec);
+}
+
+std::wstring join(const std::wstring &a, const std::wstring &b) {
+    std::wstring tail = b;
+    for (wchar_t &c : tail)
+        if (c == L'\\') c = L'/';
+    if (a.empty()) return tail;
+    return a.back() == L'/' ? a + tail : a + L"/" + tail;
+}
+
+std::wstring last_error_text(const wchar_t *what, const std::wstring &path) {
+    return std::wstring(what) + L" " + path + L" (" + port::wide(std::strerror(errno)) + L")";
+}
+
+struct FoundFile {
+    std::wstring name;
+    fs::file_time_type written;
+};
+
+// FindFirstFileW's pattern rules: * and ? over the whole name, letters compared without case
+bool name_matches(const std::wstring &name, const std::wstring &pattern) {
+    size_t n = 0, p = 0, star = std::wstring::npos, resume = 0;
+    auto same = [](wchar_t a, wchar_t b) { return std::towlower((wint_t)a) == std::towlower((wint_t)b); };
+    while (n < name.size()) {
+        if (p < pattern.size() && (pattern[p] == L'?' || (pattern[p] != L'*' && same(pattern[p], name[n])))) { ++n; ++p; }
+        else if (p < pattern.size() && pattern[p] == L'*') { star = p++; resume = n; }
+        else if (star != std::wstring::npos) { p = star + 1; n = ++resume; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == L'*') ++p;
+    if (p == pattern.size()) return true;
+    // as with FindFirstFileW, "name.*" also finds a file called just "name"
+    if (pattern.size() >= 2 && pattern.compare(pattern.size() - 2, 2, L".*") == 0 && name.size() == pattern.size() - 2)
+        return name_matches(name, pattern.substr(0, pattern.size() - 2));
+    return false;
+}
+
+std::vector<FoundFile> list_files(const std::wstring &folder, const std::wstring &pattern, bool dirs) {
+    std::vector<FoundFile> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path(folder), ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (it->is_directory(e2) != dirs) continue;
+        const std::wstring name = port::wide(it->path().filename().string());
+        if (name_matches(name, pattern)) out.push_back({name, it->last_write_time(e2)});
+    }
+    return out;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ binary key/value
 
@@ -435,6 +541,7 @@ MergeResult merge(std::vector<Item> &top, const std::vector<Target> &targets, co
 
 // ------------------------------------------------------------------------------------------------ Steam's folders
 
+#ifdef _WIN32
 std::wstring registry_text(HKEY hive, const wchar_t *path, const wchar_t *value) {
     wchar_t buf[MAX_PATH * 2];
     DWORD size = sizeof(buf);
@@ -484,6 +591,46 @@ std::vector<std::wstring> steam_folders() {
     }
     return out;
 }
+#else   // Linux: Steam's folders in the home folder (native, Flatpak, Snap); no registry
+std::wstring full_path(const std::wstring &p) {
+    std::error_code ec;
+    fs::path a = fs::absolute(port::path(p), ec);
+    if (ec) a = port::path(p);
+    std::wstring s = port::wide(a.lexically_normal().string());
+    while (s.size() > 1 && s.back() == L'/') s.pop_back();
+    return s;
+}
+
+// the folder with symbolic links resolved (~/.steam/steam is a link to ~/.local/share/Steam)
+std::wstring real_path(const std::wstring &p) {
+    std::error_code ec;
+    const fs::path r = fs::canonical(port::path(p), ec);
+    return ec ? full_path(p) : port::wide(r.string());
+}
+
+// paths keep their case on Linux; only the shared code's spelling of the comparison
+std::wstring lower_w(std::wstring s) { return s; }
+
+std::vector<std::wstring> steam_folders() {
+    std::string home;
+    if (!port::env("HOME", home) || home.empty()) return {};
+    std::string data;
+    if (!port::env("XDG_DATA_HOME", data) || data.empty() || data[0] != '/') data = home + "/.local/share";
+    const std::vector<std::string> found = {
+        home + "/.steam/steam", home + "/.steam/root", data + "/Steam",
+        home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam",   // Flatpak
+        home + "/.var/app/com.valvesoftware.Steam/.steam/steam",
+        home + "/snap/steam/common/.local/share/Steam",                  // Snap
+    };
+    std::vector<std::wstring> out;
+    std::set<std::wstring> seen;
+    for (const std::string &f : found)
+        if (is_dir(port::wide(f)) && seen.insert(full_path(port::wide(f))).second) out.push_back(port::wide(f));
+    return out;
+}
+
+unsigned long long _strtoui64(const char *s, char **end, int base) { return std::strtoull(s, end, base); }
+#endif
 
 // pairs of (userdata folder number, persona name), taken from the text-format config/loginusers.vdf
 std::vector<std::pair<std::string, std::string>> persona_names(const std::wstring &root) {
@@ -554,6 +701,7 @@ struct Picture {
     const uint8_t *at(int x, int y) const { return &px[((size_t)y * w + x) * 4]; }
 };
 
+#ifdef _WIN32
 struct Com {
     IWICImagingFactory *factory = nullptr;
     bool owns = false;
@@ -641,6 +789,30 @@ bool save_picture(Com &com, const Picture &pic, const std::wstring &path) {
     return SUCCEEDED(frame->WritePixels((UINT)pic.h, stride, (UINT)rows.size(), rows.data())) &&
            SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
 }
+#else   // Linux: PNG in and out through png.h (the same pictures WIC gives: 8-bit RGBA in, RGB or RGBA PNG out)
+struct Com {};   // no imaging library to start
+
+bool load_picture(Com &, const std::wstring &path, Picture &pic) {
+    std::string file;
+    png::Image image;
+    if (!is_file(path) || !read_file(path, file) || !png::decode(file, image)) return false;
+    pic.w = image.w;
+    pic.h = image.h;
+    pic.px = std::move(image.rgba);
+    for (size_t i = 3; i < pic.px.size(); i += 4) pic.px[i] = 255;   // source art is treated as fully opaque
+    return true;
+}
+
+bool save_picture(Com &, const Picture &pic, const std::wstring &path) {
+    png::Image image;
+    image.w = pic.w;
+    image.h = pic.h;
+    image.rgba = pic.px;
+    // opaque images are saved as 24-bit RGB; only the logo (which has has_alpha set) is saved with transparency
+    const std::string file = png::encode(image, pic.has_alpha);
+    return !file.empty() && write_file(path, file);
+}
+#endif
 
 // Lanczos-3 kernel; resized() applies it in two separable passes on float channels, premultiplying by alpha when the
 // image carries transparency
@@ -817,6 +989,7 @@ int write_pictures(Com &com, const std::wstring &grid, const std::vector<uint32_
 
 const wchar_t *const BACKUP_END = L".uncharted-backup";
 
+#ifdef _WIN32
 std::wstring keep_backup(const std::wstring &file) {
     if (!is_file(file)) return std::wstring();
     std::time_t now = std::time(nullptr);
@@ -836,6 +1009,26 @@ std::wstring keep_backup(const std::wstring &file) {
     for (size_t i = 0; i + 5 < old.size(); ++i) DeleteFileW(join(folder, old[i].name).c_str());
     return copy;
 }
+#else   // Linux: the same backup (a new file, never over an old one) and the same five kept
+std::wstring keep_backup(const std::wstring &file) {
+    if (!is_file(file)) return std::wstring();
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+    std::wstring copy = file + L"." + port::wide(stamp) + BACKUP_END;
+    for (int n = 2; is_file(copy); ++n) copy = file + L"." + port::wide(stamp) + L"-" + std::to_wstring(n) + BACKUP_END;
+    std::error_code ec;
+    if (!fs::copy_file(port::path(file), port::path(copy), fs::copy_options::none, ec) || ec) return std::wstring();
+    size_t cut = file.find_last_of(L"\\/");
+    std::wstring folder = file.substr(0, cut), name = file.substr(cut + 1);
+    std::vector<FoundFile> old = list_files(folder, name + L".*" + BACKUP_END, false);
+    std::sort(old.begin(), old.end(), [](const FoundFile &a, const FoundFile &b) { return a.written < b.written; });
+    for (size_t i = 0; i + 5 < old.size(); ++i) fs::remove(port::path(join(folder, old[i].name)), ec);
+    return copy;
+}
+#endif
 
 struct AccountResult {
     std::wstring file, backup;
@@ -870,8 +1063,6 @@ std::vector<std::vector<std::string>> records(const char *text) {
 
 }  // namespace
 
-#endif   // _WIN32 (the Steam code above)
-
 extern "C" {
 
 UN_API int un_version(void) { return UN_VERSION; }
@@ -889,6 +1080,16 @@ UN_API int un_steam_running(void) {
     CloseHandle(snap);
     return running;
 }
+
+#else   // Linux: the Steam client's process is called "steam" (native, Flatpak and Snap alike)
+
+UN_API int un_steam_running(void) {
+    for (const port::ProcessInfo &p : port::list_processes())
+        if (p.name == "steam") return 1;
+    return 0;
+}
+
+#endif
 
 UN_API int un_steam_targets(const char *request, char *out, int cap) {
     std::string root, starter, python, script;
@@ -968,7 +1169,12 @@ UN_API int un_steam_add(const char *request, char *out, int cap) {
         std::string data;
         write_entries(top, data);
         std::wstring writing = file + L".writing";
+#ifdef _WIN32
         if (!write_file(writing, data) || !MoveFileExW(writing.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+#else
+        std::error_code moved;
+        if (!write_file(writing, data) || (fs::rename(port::path(writing), port::path(file), moved), moved)) {
+#endif
             int r = give(narrow(last_error_text(L"failed to write", file)), out, cap);
             return r < 0 ? r : UN_ERR_OS;
         }
@@ -995,37 +1201,4 @@ UN_API int un_steam_roundtrip(const char *path) {
     return write_file(file + L".roundtrip", data) ? 0 : 1;
 }
 
-#endif   // _WIN32
-
 }  // extern "C"
-
-#ifndef _WIN32   // Linux: Steam's folders (~/.steam, Flatpak) and process list come in a later phase (§13 phase 6)
-
-#include <cstring>
-
-extern "C" {
-
-UN_API int un_steam_running(void) { return 0; }
-
-UN_API int un_steam_targets(const char *request, char *out, int cap) {
-    port::not_yet("Add to Steam");
-    if (cap < 1) return -1;
-    out[0] = '\0';
-    return 0;
-}
-
-UN_API int un_steam_add(const char *request, char *out, int cap) {
-    port::not_yet("Add to Steam");
-    if (cap < 1) return -1;
-    out[0] = '\0';
-    return UN_ERR_NO_STEAM;
-}
-
-UN_API int un_steam_roundtrip(const char *path) {
-    port::not_yet("shortcuts.vdf round trip");
-    return 1;
-}
-
-}  // extern "C"
-
-#endif

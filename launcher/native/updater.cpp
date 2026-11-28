@@ -17,7 +17,9 @@
 
 #include "native.h"
 #include "json.h"
-#include "inflate.h"
+#ifdef _WIN32
+#include "inflate.h"   // the zip reader (Linux reads its tarball through zlib, whose inflate() would clash with it)
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -29,12 +31,17 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 #else
-// Linux: HTTPS through libcurl, SHA-256 from sha256.h; staging the tarball and the swap come in phase 7
-// (docs/WINDOWS-DEPENDENCIES.md §7.6, §13)
+// Linux: HTTPS through libcurl, SHA-256 from sha256.h, the tarball through zlib, the swap by tools/apply_update
+// (docs/WINDOWS-DEPENDENCIES.md §7.6)
 #include "sha256.h"
 #include <cerrno>
 #include <curl/curl.h>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <system_error>
+#include <unistd.h>
+#include <zlib.h>
 #endif
 
 #include <algorithm>
@@ -57,6 +64,9 @@ const char *const REQUIRED[] = {"UCMR_Launcher.exe", "VERSION", "launcher/native
 #else
 const char *const ASSET = "UCMR_linux.tar.gz";   // the Linux package (§7.7); it never had another name
 const char *const OLD_ASSET = ASSET;
+// what a Linux package needs before it may replace this install (the Windows list's counterparts)
+const char *const REQUIRED[] = {"UCMR_Launcher", "VERSION", "launcher/native/libuncharted_native.so", "tools/apply_update",
+                                "gow3_pc/out/gow3-probe"};
 #endif
 
 struct UpdateError { std::string message; };
@@ -895,10 +905,231 @@ void cleanup(const std::wstring &root) {
     // the whole folder (old, staged, the zip and its .part, and anything an older launcher left there)
     remove_tree(folder);
 }
-#else
+#else   // Linux: the package is UCMR_linux.tar.gz; its installer is tools/apply_update (apply.cpp, the same program)
+namespace fs = std::filesystem;
+
 void cleanup(const std::wstring &root) {   // links go, their targets are not entered (std::filesystem::remove_all)
     std::error_code ignored;
-    std::filesystem::remove_all(port::path(join(root, L"update")), ignored);
+    fs::remove_all(port::path(join(root, L"update")), ignored);
+}
+
+// The gzip stream of the download, read through zlib a piece at a time (the package is far too big to inflate in
+// memory); a file of several gzip members reads as one, as gunzip does.
+struct Gunzip {
+    std::ifstream file;
+    z_stream z{};
+    std::vector<unsigned char> in = std::vector<unsigned char>(1 << 16);
+    bool open = false, ended = false;
+    explicit Gunzip(const fs::path &p) : file(p, std::ios::binary) {
+        if (file && inflateInit2(&z, 16 + MAX_WBITS) == Z_OK) open = true;
+    }
+    ~Gunzip() {
+        if (open) inflateEnd(&z);
+    }
+    // n bytes of the unpacked stream; false when the stream ends first (or is damaged: `error` says so)
+    bool read(char *out, size_t n, std::string &error) {
+        z.next_out = (Bytef *)out;
+        z.avail_out = (uInt)n;
+        while (z.avail_out) {
+            if (ended) return false;
+            if (!z.avail_in) {
+                file.read((char *)in.data(), (std::streamsize)in.size());
+                z.next_in = in.data();
+                z.avail_in = (uInt)file.gcount();
+                if (!z.avail_in) {
+                    error = "the download is cut off";
+                    return false;
+                }
+            }
+            const int r = inflate(&z, Z_NO_FLUSH);
+            if (r == Z_STREAM_END) {
+                // another member may follow; at the end of the file there is none
+                if (!z.avail_in && file.peek() == std::char_traits<char>::eof()) ended = true;
+                else inflateReset(&z);
+            } else if (r != Z_OK) {
+                error = std::string("the download is damaged (") + (z.msg ? z.msg : "inflate failed") + ")";
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+// a tar header's number: octal text, or (GNU's way for large values) big-endian binary after a 0x80 byte
+uint64_t tar_number(const char *field, size_t size) {
+    if ((unsigned char)field[0] & 0x80) {
+        uint64_t v = 0;
+        for (size_t i = 1; i < size; ++i) v = v << 8 | (unsigned char)field[i];
+        return v;
+    }
+    uint64_t v = 0;
+    for (size_t i = 0; i < size && field[i]; ++i)
+        if (field[i] >= '0' && field[i] <= '7') v = v * 8 + (uint64_t)(field[i] - '0');
+    return v;
+}
+std::string tar_text(const char *field, size_t size) { return std::string(field, strnlen(field, size)); }
+
+// the root-relative form of a name in the package ("./" and "/" runs dropped); "" when it would leave the package
+std::string inside(const std::string &name) {
+    if (name.empty() || name[0] == '/') return "";
+    std::string out;
+    size_t at = 0;
+    while (at <= name.size()) {
+        size_t end = name.find('/', at);
+        if (end == std::string::npos) end = name.size();
+        const std::string part = name.substr(at, end - at);
+        if (part == "..") return "";
+        if (!part.empty() && part != ".") out += (out.empty() ? "" : "/") + part;
+        at = end + 1;
+    }
+    return out;
+}
+
+// Unpacks the package's tar stream into `into`: files with their permission bits, folders, hard links (as copies) and
+// symbolic links that stay inside the package; GNU long names and pax paths are followed.
+void untar(Gunzip &gz, const fs::path &into) {
+    std::string error, long_name, long_link, pax_path, pax_link;
+    auto outside = [](const std::string &name) {
+        return UpdateError{"The package contains a path that leads outside its folder: " + name};
+    };
+    auto need = [&](char *out, size_t n) {
+        if (!gz.read(out, n, error)) throw UpdateError{"The package could not be unpacked: " + (error.empty() ? "it ends early" : error)};
+    };
+    std::vector<char> chunk(1 << 20);
+    for (;;) {
+        char h[512];
+        if (!gz.read(h, sizeof h, error)) {
+            if (!error.empty()) throw UpdateError{"The package could not be unpacked: " + error};
+            break;   // the stream ended at a block boundary
+        }
+        if (std::all_of(h, h + 512, [](char c) { return c == 0; })) break;   // the end marker
+        unsigned sum = 0;
+        for (int i = 0; i < 512; ++i) sum += (i >= 148 && i < 156) ? ' ' : (unsigned char)h[i];
+        if (sum != tar_number(h + 148, 8)) throw UpdateError{"The package is damaged (a tar header's checksum is wrong)"};
+        const char type = h[156];
+        const uint64_t size = tar_number(h + 124, 12), mode = tar_number(h + 100, 8);
+        std::string name = tar_text(h, 100), link = tar_text(h + 157, 100);
+        if (std::memcmp(h + 257, "ustar\0", 6) == 0 && h[345]) name = tar_text(h + 345, 155) + "/" + name;   // POSIX prefix
+        auto body = [&]() {   // the entry's data (long names and pax records are small)
+            std::string data((size_t)size, '\0');
+            if (size) need(&data[0], (size_t)size);
+            if (size % 512) need(chunk.data(), 512 - size % 512);
+            return data;
+        };
+        if (type == 'L' || type == 'K') {
+            std::string v = body();
+            v.resize(strnlen(v.data(), v.size()));
+            (type == 'L' ? long_name : long_link) = v;
+            continue;
+        }
+        if (type == 'x' || type == 'g') {
+            const std::string records = body();
+            for (size_t at = 0; type == 'x' && at < records.size();) {   // "<length> <key>=<value>\n"
+                const size_t space = records.find(' ', at);
+                if (space == std::string::npos) break;
+                const size_t length = (size_t)std::strtoull(records.c_str() + at, nullptr, 10);
+                if (!length || at + length > records.size()) break;
+                const std::string record = records.substr(space + 1, at + length - space - 2);
+                const size_t eq = record.find('=');
+                if (eq != std::string::npos && record.compare(0, eq, "path") == 0) pax_path = record.substr(eq + 1);
+                if (eq != std::string::npos && record.compare(0, eq, "linkpath") == 0) pax_link = record.substr(eq + 1);
+                at += length;
+            }
+            continue;
+        }
+        if (!pax_path.empty()) name = pax_path;
+        else if (!long_name.empty()) name = long_name;
+        if (!pax_link.empty()) link = pax_link;
+        else if (!long_link.empty()) link = long_link;
+        long_name.clear(), long_link.clear(), pax_path.clear(), pax_link.clear();
+        const std::string rel = inside(name);
+        if (rel.empty() && inside(name + "/x") != "x") throw outside(name);   // "." (the package's own folder) is fine
+        const fs::path target = into / rel;
+        std::error_code ec;
+        if (type == '5') {
+            fs::create_directories(target, ec);
+            if (ec) throw UpdateError{os_error(ec.value()) + ": '" + target.string() + "'"};
+            if (size) body();
+            continue;
+        }
+        if (rel.empty()) throw outside(name);
+        fs::create_directories(target.parent_path(), ec);
+        if (type == '0' || type == '\0' || type == '7') {
+            std::ofstream out(target, std::ios::binary | std::ios::trunc);
+            if (!out) throw UpdateError{os_error(errno) + ": '" + target.string() + "'"};
+            for (uint64_t left = size; left;) {
+                const size_t n = (size_t)std::min<uint64_t>(left, chunk.size());
+                need(chunk.data(), n);
+                out.write(chunk.data(), (std::streamsize)n);
+                left -= n;
+            }
+            out.close();
+            if (out.fail()) throw UpdateError{os_error(errno) + ": '" + target.string() + "'"};
+            if (size % 512) need(chunk.data(), 512 - size % 512);
+            fs::permissions(target, (fs::perms)(mode & 0777), ec);
+        } else if (type == '1') {   // a hard link to an earlier entry: a copy of it
+            const std::string from = inside(link);
+            if (from.empty()) throw outside(link);
+            fs::copy_file(into / from, target, fs::copy_options::overwrite_existing, ec);
+            if (ec) throw UpdateError{os_error(ec.value()) + ": '" + target.string() + "'"};
+            if (size) body();
+        } else if (type == '2') {   // a symbolic link: only one that stays inside the package
+            const size_t slash = rel.rfind('/');
+            const std::string from = inside((slash == std::string::npos ? std::string() : rel.substr(0, slash + 1)) + link);
+            if (link.empty() || link[0] == '/' || from.empty()) throw outside(name + " -> " + link);
+            fs::create_symlink(link, target, ec);
+            if (ec) throw UpdateError{os_error(ec.value()) + ": '" + target.string() + "'"};
+            if (size) body();
+        } else {
+            throw UpdateError{"The package holds an entry of a kind it must not have (" + name + ")"};
+        }
+    }
+}
+
+// Unpacks the downloaded package into update/staged, verifies the result and returns the folder's path (the Windows
+// body's rules: a single top folder around everything, UCMR_linux/, is left out).
+std::wstring stage(const std::wstring &archive, const std::wstring &root, const std::vector<long long> &version) {
+    const fs::path update = port::path(join(root, L"update")), staged = update / "staged", unpacked = update / "unpacked";
+    std::error_code ec;
+    fs::remove_all(staged, ec);
+    fs::remove_all(unpacked, ec);
+    fs::create_directories(unpacked, ec);
+    if (ec) throw UpdateError{os_error(ec.value()) + ": '" + unpacked.string() + "'"};
+    {
+        Gunzip gz(port::path(archive));
+        if (!gz.file) throw UpdateError{os_error(errno) + ": '" + utf8(archive) + "'"};
+        if (!gz.open) throw UpdateError{"zlib could not start"};
+        untar(gz, unpacked);
+    }
+    std::vector<fs::path> top;
+    for (fs::directory_iterator it(unpacked, ec), end; !ec && it != end; it.increment(ec)) top.push_back(it->path());
+    const bool wrapped = top.size() == 1 && fs::is_directory(fs::symlink_status(top[0], ec));
+    fs::rename(wrapped ? top[0] : unpacked, staged, ec);
+    if (ec) throw UpdateError{os_error(ec.value()) + ": '" + staged.string() + "'"};
+    fs::remove_all(unpacked, ec);
+    std::string missing;
+    for (const char *path : REQUIRED)
+        if (!fs::is_regular_file(staged / path, ec)) missing += (missing.empty() ? "" : ", ") + std::string(path);
+    if (!missing.empty()) throw UpdateError{"Files are missing from the package: " + missing};
+    const std::wstring staged_text = port::wide(staged.string());
+    if (installed_version(staged_text) != version) throw UpdateError{"The VERSION in the package differs from the release's."};
+    return staged_text;
+}
+
+// Starts the installer of the staged version, its tools/apply_update (stage checks that it is there), which waits for
+// this process to end; in its own session, so it outlives the launcher. Its output goes to analysis/update-apply.log.
+void start_apply(const std::wstring &root, const std::wstring &staged) {
+    port::Spawn s;
+    s.argv = {utf8(join(join(staged, L"tools"), L"apply_update")), "--root", utf8(root), "--wait-pid", std::to_string(getpid())};
+    s.cwd = utf8(staged);
+    s.out = port::Spawn::file;
+    s.out_file = utf8(join(join(root, L"analysis"), L"update-apply.log"));
+    s.own_group = true;
+    std::error_code ec;
+    fs::create_directories(port::path(join(root, L"analysis")), ec);
+    port::Child child;
+    std::string error;
+    if (!port::spawn(s, child, error)) throw UpdateError{error};
 }
 #endif
 
@@ -952,7 +1183,6 @@ UN_API void un_update_progress(long long *done, long long *total) {
 // Extracts the downloaded zip into root\update\staged, checks it against `version` (e.g. "0.10.63") and writes the
 // folder to out. Returns 1 with the reason in out when the package is unusable.
 UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap) {
-#ifdef _WIN32
     try {
         return give(utf8(stage(port::wtext(archive, L""), port::wtext(root, L"."), version_of(version))), out, cap);
     } catch (const UpdateError &e) {
@@ -962,15 +1192,11 @@ UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root
         int status = give("out of memory", out, cap);
         return status < 0 ? status : 1;
     }
-#else   // unpacking UCMR_linux.tar.gz and swapping the folders: phase 7 (docs/WINDOWS-DEPENDENCIES.md §7.6, §13)
-    return port::not_yet_answer("launcher update (unpacking)", 1, out, cap);
-#endif
 }
 
 // Launches the staged version's installer, which then waits for this process to end. Returns 1 with the reason in
 // out if it would not start.
 UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap) {
-#ifdef _WIN32
     try {
         start_apply(port::wtext(root, L"."), port::wtext(staged, L"."));
         return give("", out, cap);
@@ -978,9 +1204,6 @@ UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *s
         int status = give(e.message, out, cap);
         return status < 0 ? status : 1;
     }
-#else   // phase 7, as above
-    return port::not_yet_answer("launcher update (installing)", 1, out, cap);
-#endif
 }
 
 // Clears out update\ after an update finished or was given up.

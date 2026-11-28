@@ -2,15 +2,22 @@ UCMR - unofficial PC port, Linux preview
 =================================================================
 Source: https://github.com/UC-Resurrected/UCMR
 
-THE GAMES DO NOT RUN ON LINUX YET.
-This package is a preview of the Linux port: the launcher window and the multiplayer imports.
-The game runtime itself has not been ported to Linux yet, so PLAY cannot start Uncharted 1, 2
-or 3 from this package. To play today, use the Windows package (UCMR_windows.zip), on Windows or
-through Proton/Wine. The Linux port goes on phase by phase (docs/WINDOWS-DEPENDENCIES.md in the
-source); later packages will run the games.
+THIS IS A PREVIEW: NO GAME HAS BEEN PLAYED ON LINUX YET.
+This package is a preview of the Linux port: the launcher window, the multiplayer imports and the
+game runtime (gow3_pc/out/gow3-probe), built for Linux. The runtime starts and passes its own tests
+on Linux, but nobody has played Uncharted 1, 2 or 3 with it on Linux yet, so PLAY may fail or the
+game may misbehave. Online and LAN multiplayer have not been tried on Linux yet (see below). To play
+today, use the Windows package (UCMR_windows.zip), on Windows or through Proton/Wine. The Linux
+port goes on phase by phase (docs/WINDOWS-DEPENDENCIES.md in the source).
 
 What you need
-- A 64-bit Linux with glibc 2.35 or newer (for example Ubuntu 22.04 or newer), X11 or Wayland.
+- A 64-bit Linux with glibc 2.35 or newer (for example Ubuntu 22.04 or newer), X11 or Wayland,
+  for the launcher and the imports. The game runtime needs glibc 2.38 or newer (for example
+  Ubuntu 24.04 or newer).
+- For the games: a graphics card with Vulkan 1.3 and a current driver (Mesa or the NVIDIA driver),
+  and a CPU with AVX (Intel "Sandy Bridge" 2011 or newer, AMD FX or newer). CPUs older than Intel
+  "Haswell" or AMD Ryzen lack some instructions the PS4's CPU has (MOVBE, BMI1, F16C, LZCNT); the
+  runtime then carries them out itself, as on Windows (a little slower).
 - The usual desktop libraries: fontconfig, freetype, libxkbcommon, libGL/libEGL, libX11/libxcb
   or libwayland-client. The less common Qt helpers (xcb-cursor, xcb-icccm, ...) ship in
   launcher-qt/lib.
@@ -33,8 +40,17 @@ What works in this preview
 - The Uncharted 2 and Uncharted 3 multiplayer imports (u2mp/bin/u2import, u3mp/bin/u3import and
   u3fix), from your own game files. They build and pass their checks on Linux, but a whole import
   has not been tested on Linux yet.
-- Not yet on Linux: starting a game, Add to Steam, desktop shortcuts, the online sign-in, the
-  launcher's own update (download the new tarball and extract it over this folder instead).
+- The game runtime: PLAY starts it, as on Windows. It builds and passes its tests on Linux; a
+  whole game has not been played with it on Linux yet.
+- Add to Steam (close Steam first; on a Steam Deck switch to desktop mode and exit Steam), the
+  desktop shortcuts, the freeze report and the memory monitor.
+- The launcher's own update: it updates itself once a release carries the Linux package; until
+  then download the new tarball and extract it over this folder.
+- Online and LAN multiplayer: the online programs (the RPCN sign-in and Uncharted 2's online link)
+  have Linux builds in a release package, and the Uncharted 3 multiplayer helper (v7.267 and
+  newer) reaches the network through the game runtime on Linux as on Windows, but no match has
+  been played on Linux yet.
+- Not on Linux: DLSS (Windows only).
 
 Good to know
 - Settings, saves and logs live in the analysis/ folder beside the launcher, as on Windows.
