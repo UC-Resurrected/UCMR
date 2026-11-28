@@ -138,7 +138,9 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
         return;
     }
 
-    const u32 scratch_base = Common::AlignUp(runtime_info.hw.cs.shared_memory_size, sizeof(u64));
+    // gow3: after the spare bytes of the LDS bounds check, when the shader has them
+    const u32 scratch_base = Common::AlignUp(runtime_info.hw.cs.shared_memory_size, sizeof(u64)) +
+                             program.info.lds_bounds_spare;
     const u32 scratch_size =
         (Common::AlignUp(num_threads, 64) / profile.subgroup_size) * sizeof(u32);
     program.info.shared_memory_scratch_size =

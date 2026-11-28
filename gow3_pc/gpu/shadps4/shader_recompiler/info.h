@@ -94,6 +94,10 @@ struct InfoPersistent {
 };
 
 struct Info : InfoPersistent {
+    /// gow3: the spare LDS bytes after the allocation that out-of-range accesses go to
+    /// (lds_bounds_pass.cpp; only used while the shader compiles, so not in InfoPersistent)
+    u32 lds_bounds_spare{};
+
     struct AttributeFlags {
         bool Get(IR::Attribute attrib, u32 comp = 0) const {
             return flags[Index(attrib)] & (1 << comp);

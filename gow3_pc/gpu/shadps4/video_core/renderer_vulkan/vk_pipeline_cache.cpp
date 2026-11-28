@@ -22,6 +22,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "gow3_settings.h"
@@ -344,6 +345,18 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         std::printf("GPU: skinning shaders' 1024-thread workgroups %s (GOW3_WORKGROUP_SPLIT)\n",
                     Shader::WorkgroupSplitOn() ? "run as 4 workgroups of 256" : "run whole");
     }
+    // gow3 28 Nov 2026: on Intel's drivers an `if` with a barrier in it is run by every thread
+    // (uniform_barrier_pass.cpp; GOW3_DIVERGENT_BARRIERS). Set before any shader is loaded: those
+    // shaders have their own cache names.
+    {
+        const auto driver = instance.GetDriverID();
+        Shader::Optimization::UniformBarrierGpu() = driver == vk::DriverId::eIntelProprietaryWindows ||
+                                                    driver == vk::DriverId::eIntelOpenSourceMESA;
+        if (Shader::Optimization::UniformBarrierGpu()) {
+            std::printf("GPU: Intel driver: barriers inside an if are reached by every thread "
+                        "(GOW3_DIVERGENT_BARRIERS)\n");
+        }
+    }
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
@@ -608,7 +621,7 @@ void PipelineCache::PublishShaders(bool wait) {
         const auto perm_hash = HashCombine(hash, build->permutation);
         Vulkan::SetObjectName(instance.GetDevice(), build->module,
                              GetShaderName(build->info.hw_stage, hash, build->permutation));
-        RegisterShaderBinary(std::move(build->binary), hash, build->permutation);
+        RegisterShaderBinary(std::move(build->binary), hash, build->permutation, build->info.hw_stage == Shader::HwStage::Compute);
         {
             std::unique_lock lock{programs_mutex};
             if (build->initial) {
@@ -938,7 +951,7 @@ void PipelineCache::Adopt(PrecompiledCompute& job) {
     }
     auto& program = job.program;
     const u64 perm_hash = HashCombine(job.hash, 0);
-    RegisterShaderBinary(std::move(job.spirv), job.hash, 0);
+    RegisterShaderBinary(std::move(job.spirv), job.hash, 0, true);
     // user_data pointed into the job's registers: refreshed by the next lookup.
     program->info.user_data = {};
     RegisterShaderMeta(program->info, program->modules[0].spec.fetch_shader_data,
@@ -1575,7 +1588,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx, info.hw_stage == Shader::HwStage::Compute);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);

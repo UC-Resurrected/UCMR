@@ -3268,19 +3268,22 @@ std::array<EffectDispatch, 32> g_effect_dispatches{};
 std::atomic<u64> g_effect_dispatch_count{0};
 
 void ReportEffectDispatches() {
+    // gow3 28 Nov 2026: one stdout write (lines from several threads came out mixed in boot.log)
     const u64 count = g_effect_dispatch_count.load();
-    std::fprintf(stderr, "Effect shader dispatches before the loss (newest last, %llu in all):\n",
-                 static_cast<unsigned long long>(count));
+    std::string text = fmt::format("Effect shader dispatches before the loss (newest last, {} in all):\n",
+                                   static_cast<unsigned long long>(count));
     for (u64 i = count > g_effect_dispatches.size() ? count - g_effect_dispatches.size() : 0;
          i < count; ++i) {
         const auto& d = g_effect_dispatches[i % g_effect_dispatches.size()];
-        std::fprintf(stderr,
-                     "  #%llu cs %08llx: %u vertices, %u groups; buffer 0 at %#llx, %u records, "
-                     "stride %u; largest count of the first 16: %u\n",
-                     static_cast<unsigned long long>(d.sequence),
-                     static_cast<unsigned long long>(d.hash), d.vertices, d.groups,
-                     static_cast<unsigned long long>(d.base), d.num_records, d.stride, d.max_count);
+        text += fmt::format("  #{} cs {:08x}: {} vertices, {} groups; buffer 0 at {:#x}, {} records, "
+                            "stride {}; largest count of the first 16: {}\n",
+                            static_cast<unsigned long long>(d.sequence),
+                            static_cast<unsigned long long>(d.hash), d.vertices, d.groups,
+                            static_cast<unsigned long long>(d.base), d.num_records, d.stride,
+                            d.max_count);
     }
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fflush(stdout);
 }
 } // namespace
 

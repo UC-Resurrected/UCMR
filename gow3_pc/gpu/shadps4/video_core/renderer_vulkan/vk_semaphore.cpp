@@ -40,7 +40,6 @@ void Semaphore::Refresh() {
         // gow3 20 Oct 2026: a device loss is often first seen here (GitHub #67); report what
         // the GPU was doing, as the waits and the submit do, before stopping.
         if (counter_result == vk::Result::eErrorDeviceLost) {
-            DumpGpuCheckpoints(instance);
             DumpDeviceFault(instance);
         }
         ASSERT_MSG(counter_result == vk::Result::eSuccess,
@@ -92,7 +91,6 @@ void Semaphore::Wait(u64 tick) {
         const auto result=instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT);
         if (result==vk::Result::eSuccess) break;
         if (result==vk::Result::eErrorDeviceLost) {
-            DumpGpuCheckpoints(instance);
             DumpDeviceFault(instance);
         }
         ASSERT_MSG(result==vk::Result::eTimeout, "GPU semaphore wait failed: {}",vk::to_string(result));

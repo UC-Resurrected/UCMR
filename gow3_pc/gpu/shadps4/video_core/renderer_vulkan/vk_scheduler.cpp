@@ -34,6 +34,21 @@ namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
+namespace {
+// gow3 28 Nov 2026: the schedulers with breadcrumbs, so that a lost device seen anywhere (a submit,
+// a semaphore wait, a failed bind) reports every one of them once (DumpDeviceFault)
+std::mutex g_crumb_schedulers_mutex;
+std::vector<const Scheduler*> g_crumb_schedulers;
+
+// a lost-device report goes out as one stdout write: lines written one by one from several threads
+// came out mixed with other output in boot.log
+void WriteReport(const std::string& text) {
+    if (text.empty()) return;
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fflush(stdout);
+}
+} // namespace
+
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore},
       count_lock_waits{threaded_recording} {
@@ -62,6 +77,10 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
 }
 
 Scheduler::~Scheduler() {
+    if (crumb_mapped) {
+        std::scoped_lock lock{g_crumb_schedulers_mutex};
+        std::erase(g_crumb_schedulers, this);
+    }
     if (recorder_thread.joinable()) {
         SyncRecording();
         recorder_thread.request_stop();
@@ -536,9 +555,14 @@ void Scheduler::CreateBreadcrumbs() {
     const auto requirements=device.getBufferMemoryRequirements(buffer);
     const auto properties=instance.GetPhysicalDevice().getMemoryProperties();
     const auto wanted=vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent;
+    // gow3 28 Nov 2026: system memory first. With resizable BAR the first host-visible type is
+    // video memory, which read 0 after the device was lost ("every checkpoint before 0 finished").
     u32 type=~0u;
-    for (u32 i=0;i<properties.memoryTypeCount;++i) {
-        if ((requirements.memoryTypeBits&(1u<<i)) && (properties.memoryTypes[i].propertyFlags&wanted)==wanted) {
+    for (int pass=0;pass<2 && type==~0u;++pass) {
+        for (u32 i=0;i<properties.memoryTypeCount;++i) {
+            const auto flags=properties.memoryTypes[i].propertyFlags;
+            if (!(requirements.memoryTypeBits&(1u<<i)) || (flags&wanted)!=wanted) continue;
+            if (pass==0 && (flags&vk::MemoryPropertyFlagBits::eDeviceLocal)) continue;
             type=i;
             break;
         }
@@ -564,6 +588,10 @@ void Scheduler::CreateBreadcrumbs() {
     crumb_memory=memory;
     crumb_mapped=static_cast<volatile u32*>(mapped);
     for (u32 i=0;i<4;++i) crumb_mapped[i]=0;
+    {
+        std::scoped_lock lock{g_crumb_schedulers_mutex};
+        g_crumb_schedulers.push_back(this);
+    }
     std::printf("GPU breadcrumbs: on (a GPU barrier after every dispatch and render pass: slower; "
                 "a lost device names the work that did not finish)\n");
     std::fflush(stdout);
@@ -589,6 +617,7 @@ std::function<void(u64)> g_describe_gpu_address;
 /// dispatches (loop counts), printed when the device is lost.
 void (*g_device_lost_report)() = nullptr;
 void DescribeBoundAddress(u64 address);
+std::string GpuCheckpointsText(const Instance& instance);
 void DumpDeviceFault(const Instance& instance) {
     // gow3 22 Nov 2026 (U3 host crash at a late join): several threads see a lost device at once
     // (frame waits, semaphore waits, submits). The first writes the report; the others wait here
@@ -604,11 +633,20 @@ void DumpDeviceFault(const Instance& instance) {
     if (g_device_lost_report) {
         g_device_lost_report();
     }
+    // gow3 28 Nov 2026: NVIDIA's checkpoints and every scheduler's breadcrumbs, from whichever
+    // place saw the loss first (before, only a failed submit reported them)
+    WriteReport(GpuCheckpointsText(instance));
+    {
+        std::scoped_lock lock{g_crumb_schedulers_mutex};
+        std::string crumbs;
+        for (const Scheduler* scheduler : g_crumb_schedulers) crumbs += scheduler->BreadcrumbText();
+        WriteReport(crumbs);
+    }
     if (!instance.HasDeviceFault()) return;
     const auto device=instance.GetDevice();
     vk::DeviceFaultCountsEXT counts{};
     if (device.getFaultInfoEXT(&counts,nullptr)!=vk::Result::eSuccess) {
-        std::fprintf(stderr,"GPU fault: no report\n");
+        WriteReport("GPU fault: no report\n");
         return;
     }
     std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
@@ -618,31 +656,34 @@ void DumpDeviceFault(const Instance& instance) {
     info.pVendorInfos=vendors.data();
     counts.vendorBinarySize=0;
     const auto result=device.getFaultInfoEXT(&counts,&info);
-    std::fprintf(stderr,"GPU fault (%s): %s\n",vk::to_string(result).c_str(),info.description);
+    std::string text=fmt::format("GPU fault ({}): {}\n",vk::to_string(result),info.description);
+    for (const auto& vendor:vendors) {
+        text+=fmt::format("GPU fault vendor: {} code={:x} data={:x}\n",vendor.description,
+                          (unsigned long long)vendor.vendorFaultCode,
+                          (unsigned long long)vendor.vendorFaultData);
+    }
+    WriteReport(text);
+    // each address with what it belongs to (those describe themselves, after their address line)
     for (const auto& address:addresses) {
-        std::fprintf(stderr,"GPU fault address: type=%s address=%016llx precision=%llx\n",
-                     vk::to_string(address.addressType).c_str(),
-                     (unsigned long long)address.reportedAddress,
-                     (unsigned long long)address.addressPrecision);
+        WriteReport(fmt::format("GPU fault address: type={} address={:016x} precision={:x}\n",
+                                vk::to_string(address.addressType),
+                                (unsigned long long)address.reportedAddress,
+                                (unsigned long long)address.addressPrecision));
         if (g_describe_gpu_address) g_describe_gpu_address(address.reportedAddress);
         DescribeBoundAddress(address.reportedAddress);
     }
-    for (const auto& vendor:vendors) {
-        std::fprintf(stderr,"GPU fault vendor: %s code=%llx data=%llx\n",vendor.description,
-                     (unsigned long long)vendor.vendorFaultCode,
-                     (unsigned long long)vendor.vendorFaultData);
-    }
 }
-void DumpGpuCheckpoints(const Instance& instance) {
-    if (!instance.HasGpuCheckpoints()) return;
+std::string GpuCheckpointsText(const Instance& instance) {
+    if (!instance.HasGpuCheckpoints()) return {};
     const auto checkpoints=instance.GetGraphicsQueue().getCheckpointDataNV();
     const u64 recorded=checkpoint_index.load();
 #ifdef _WIN32
-    std::fprintf(stderr,"GPU checkpoint records: %zu; markers recorded: %llu; image base %p\n",
-                 checkpoints.size(),(unsigned long long)recorded,static_cast<void*>(&__ImageBase));
+    std::string text=fmt::format("GPU checkpoint records: {}; markers recorded: {}; image base {}\n",
+                                 checkpoints.size(),(unsigned long long)recorded,
+                                 static_cast<const void*>(&__ImageBase));
 #else
-    std::fprintf(stderr,"GPU checkpoint records: %zu; markers recorded: %llu\n",checkpoints.size(),
-                 (unsigned long long)recorded);
+    std::string text=fmt::format("GPU checkpoint records: {}; markers recorded: {}\n",checkpoints.size(),
+                                 (unsigned long long)recorded);
 #endif
     u64 last=0;
     for (const auto& checkpoint:checkpoints) {
@@ -651,37 +692,44 @@ void DumpGpuCheckpoints(const Instance& instance) {
         if (address<reinterpret_cast<uintptr_t>(gpu_checkpoints.data()) ||
             address>=reinterpret_cast<uintptr_t>(gpu_checkpoints.data()+gpu_checkpoints.size())) continue;
         last=std::max(last,marker->sequence);
-        std::fprintf(stderr,"GPU checkpoint: stage=%s sequence=%llu operation=%s shaders=%016llx,%016llx\n",
-                     vk::to_string(checkpoint.stage).c_str(),(unsigned long long)marker->sequence,
-                     marker->operation,(unsigned long long)marker->first,(unsigned long long)marker->second);
+        text+=fmt::format("GPU checkpoint: stage={} sequence={} operation={} shaders={:016x},{:016x}\n",
+                          vk::to_string(checkpoint.stage),(unsigned long long)marker->sequence,
+                          marker->operation ? marker->operation : "?",(unsigned long long)marker->first,
+                          (unsigned long long)marker->second);
     }
     // Operations recorded after the newest marker the GPU reached; the fault is in this range.
     for (u64 sequence=last>24 ? last-24 : 0; sequence<recorded && sequence<=last+40; ++sequence) {
         const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
-        std::fprintf(stderr,"GPU pending: sequence=%llu operation=%s values=%016llx,%016llx\n",
-                     (unsigned long long)marker.sequence,marker.operation,
-                     (unsigned long long)marker.first,(unsigned long long)marker.second);
+        text+=fmt::format("GPU pending: sequence={} operation={} values={:016x},{:016x}\n",
+                          (unsigned long long)marker.sequence,marker.operation ? marker.operation : "?",
+                          (unsigned long long)marker.first,(unsigned long long)marker.second);
     }
+    return text;
 }
-void Scheduler::ReportCheckpoints() const {
-    DumpGpuCheckpoints(instance);
-    if (!crumb_mapped) return;
+void DumpGpuCheckpoints(const Instance& instance) {
+    WriteReport(GpuCheckpointsText(instance));   // the slow-wait diagnostic (one write)
+}
+std::string Scheduler::BreadcrumbText() const {
+    if (!crumb_mapped) return {};
     // gow3 5 Nov 2026 (breadcrumbs): the counter's low 32 bits, widened by the recorded count.
     const u64 recorded=checkpoint_index.load();
     u64 done=(recorded&~0xffffffffull)|crumb_mapped[0];
     if (done>recorded && done>=(1ull<<32)) done-=1ull<<32;
-    std::fprintf(stderr,"GPU breadcrumbs: every checkpoint before %llu finished, %llu recorded; "
-                 "the GPU stopped in one of these:\n",
-                 (unsigned long long)done,(unsigned long long)recorded);
+    std::string text=fmt::format("GPU breadcrumbs: every checkpoint before {} finished, {} recorded; "
+                                 "the GPU stopped in one of these:\n",
+                                 (unsigned long long)done,(unsigned long long)recorded);
     for (u64 sequence=done;sequence<recorded && sequence<done+16;++sequence) {
         if (recorded-sequence>gpu_checkpoints.size()) continue;
         const auto& marker=gpu_checkpoints[sequence%gpu_checkpoints.size()];
-        std::fprintf(stderr,"GPU breadcrumbs:   %llu %s shaders %08llx %08llx\n",
-                     (unsigned long long)marker.sequence,marker.operation ? marker.operation : "?",
-                     (unsigned long long)(marker.first&0xffffffffull),
-                     (unsigned long long)(marker.second&0xffffffffull));
+        text+=fmt::format("GPU breadcrumbs:   {} {} shaders {:08x} {:08x}\n",
+                          (unsigned long long)marker.sequence,marker.operation ? marker.operation : "?",
+                          (unsigned long long)(marker.first&0xffffffffull),
+                          (unsigned long long)(marker.second&0xffffffffull));
     }
-    std::fflush(stderr);
+    return text;
+}
+void Scheduler::ReportCheckpoints() const {
+    DumpDeviceFault(instance);   // once for every scheduler and every place that sees the loss
 }
 
 void Scheduler::Finish(std::source_location caller) {
@@ -873,7 +921,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                     static_cast<unsigned long long>(images - last_images));
         last_images = images;
     }
-    if (submit_result==vk::Result::eErrorDeviceLost) { ReportCheckpoints(); DumpDeviceFault(instance); }
+    if (submit_result==vk::Result::eErrorDeviceLost) ReportCheckpoints();
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();
