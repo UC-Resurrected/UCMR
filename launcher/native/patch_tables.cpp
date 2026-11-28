@@ -292,6 +292,23 @@ Patch convoy_sink() {
                       B("8a9080000000c0e10280e2fb08ca889080000000"), B("80e101c0e10280a080000000fb08888000000090"))});
 }
 
+// Uncharted 3 multiplayer, 28 Nov 2026: the Custom Game SETTINGS / ADVANCED SETTINGS rows are drop-down boxes (control
+// kind 13) as on PS3 (the import's menu.bin, dc-recipes). A row the current mode hides (Rounds outside round modes,
+// Difficulty outside co-op) has no label; PS3 measures such a drop-down as 0 x 0, but the PS4 kind-13 size function
+// (image 0x5ebad0) gives it the height of one empty text line, which leaves a blank line in the page. Its no-label path
+// (0x5ebb3d, also taken for an empty value range) now writes width 0 and height 0 to the result and returns through the
+// function's end (0x5ebe45). Every other kind-13 row has a label, so nothing else changes. 1.02.
+// UNCHARTED_DROPDOWN_HIDDEN_ROWS=0 turns it off.
+Patch dropdown_hidden_rows() {
+    return patch("Uncharted 3 drop-down rows: a hidden row takes no space (as PS3)",
+                 {one("55 4889e5 4157 4156 4155 4154 53 4881ece8000000 4889d3 4989f4 4889bd08ffffff 4c8d35???????? 498b06"
+                      " 488945d0 498b7c2418 488b07 ff5030 4885c0 742e 803800 7429 4989df 498b5c2418 488b03 4889df ff5038"
+                      " 4189c5 488b03 4889df 4c89fb ff5040 4139c5 0f8ec1000000 c78530ffffff01000000 c78548ffffff00000000",
+                      0x6d, B("c78530ffffff01000000 c78548ffffff00000000"),
+                      // mov rax, [rbp-0xf8] (the result); mov qword [rax], 0 (width, height); jmp to the end; nop
+                      B("488b8508ffffff 48c70000000000 e9f5020000 90"))});
+}
+
 // gow3, 5 Nov 2026, Uncharted 2: the leg IK code asserts IsFinite(deltaTransform) (character-leg-ik.cpp:391) when the
 // root delta is NaN, which happens at the train wreck in chapter 1. The assert path now sets the delta to zero for that
 // frame and resumes at the same place the finite case does. 1.02 and 1.00. UNCHARTED_LEG_IK_RESET=0 skips it.
@@ -785,6 +802,7 @@ Patches image_patches(const std::string &exe) {
                                 {one("498b4500488b48784989042449894c2408813810", 4, B("488b4878"), B("31c99090"))}));
     if (u3) {
         if (env("UNCHARTED_LIGHT_ORTHO_GUARD", "1") != "0") patches.push_back(u3_light_ortho_guard());
+        if (env("UNCHARTED_DROPDOWN_HIDDEN_ROWS", "1") != "0") patches.push_back(dropdown_hidden_rows());
         if (env("UNCHARTED_TEST_LIGHT_ORTHO_NAN", "") == "1") {
             patches.push_back(u3_test_light_ortho_nan());
             patches.push_back(u3_test_light_ortho_gate());

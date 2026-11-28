@@ -23,3 +23,18 @@ Fresh PS3 evidence identifies the original button registration at 0x27ca24, OPD 
 A second isolated run (`menu-entry-1792937587023495700`) repeated the visible button, selected it with Down at 21 seconds, and pressed Cross at 25 seconds. The native Multiplayer callback breakpoint at 0x66e500 hit, then the menu remained visible. This verifies selection and real event dispatch. Screenshot and logs are retained in `outputs/evidence/multiplayer-button-selected.png` and `multiplayer-menu-click.log`.
 
 Validation: the helper host test checks full pointer-preserving copy, untouched neighboring entries, idempotence, and rejection without mutation. Run `work/test_u3_menu_entry.exe` after compiling `outputs/tests/test_u3_menu_entry.c`. The working runtime run is `work/runtime-tests/menu-entry-1792937541524804700`: construction lookup and return breakpoints both hit; captured normal menu contains Multiplayer; runtime stayed alive until the 35-second test limit.
+
+## Custom Game option rows as PS3 drop-down boxes (28 Nov 2026)
+
+On PS3, X on a row of Custom Game > SETTINGS or ADVANCED SETTINGS opens a box under the row with the values (5
+visible, the current one highlighted, scrolling); a focused row shows no "<>". Both games' menu.bin give these rows
+control kind 6, but PS3's page builder makes kinds 6 and 13 the same drop-down class, while PS4 draws kind 6 as
+Bluepoint's inline spinner. PS4's kind 13 is still the PS3 box (Friendly Fire uses it). So:
+
+- import (dc-recipes, `dcconv/apply_recipes.cpp` `option_boxes`): every kind-6 row of PAGE_CUSTOMRULES (0x86799eee)
+  and PAGE_CUSTOMRULES2 (0xd7a415a2) in overlay-r3 menu.bin becomes kind 13 (16 rows; an unknown row stops the step);
+- helper v7.269: the Friendly Fire row is no longer turned back into kind 6 at menu load (G38 5.4 step 1 removed);
+- launcher (`patch_tables.cpp` `dropdown_hidden_rows`): a kind-13 row without a label (Rounds outside round modes,
+  Difficulty outside co-op) measures 0 x 0 as on PS3, instead of leaving a blank line.
+
+Game Type and Map are buttons to their own list pages on both PS3 and PS4 (unchanged). Not verified in the game yet.

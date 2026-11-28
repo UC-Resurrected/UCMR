@@ -242,8 +242,9 @@ pointer at +8 = the items (may be null). An item is 0x68 bytes: u32 at +8 = widg
 u32 at +0x28 = text id of the label; u32 at +0x30 = source kind; u32 at +0x34 = source number; u32 at +0x40 =
 source parameter (the tag a source sees in its descriptor).
 
-Page 0x86799eee = Custom Game > Settings. Label 0x9b7aa1a9 = its Friendly Fire row. Row style 13 is drawn by PS4
-as another control than PS3 draws; style 6 is the plain value row.
+Page 0x86799eee = Custom Game > Settings. Label 0x9b7aa1a9 = its Friendly Fire row. Row style 13 is the drop-down box
+(PS3 draws its styles 6 and 13 with that same class; PS4 draws style 6 as an inline spinner). Since v7.269 the
+import's menu.bin gives every option row of Settings and Advanced Settings style 13 (dc-recipes), as PS3 shows them.
 
 ### 3.8 The custom rules block (state block + 0x31f0, 32 bytes)
 
@@ -457,7 +458,8 @@ menu sends (indices inside the ranges of operation 6) nothing wraps.
 Nothing when eb[2] bit 9 is set or the page id (u32 at `page` + 8) is not 0x86799eee. Nothing when the item list
 pointer is null, the items pointer is null or the number of items is above 32. Otherwise:
 
-1. Every item whose row style is 13 and whose label is 0x9b7aa1a9 gets row style 6; k[3] + 1 for each.
+1. (Until v7.268: every item whose row style is 13 and whose label is 0x9b7aa1a9 got row style 6. Removed in v7.269:
+   PS3 shows that row as a drop-down box too; k[3] stays 0.)
 2. k[4] += `u3x_retag_widget(page, 0, 0x2a, 0x4c414e2a, 32)` (the Time Limit row: widget id 0, source number 0x2a).
 
 ### 5.5 `u3x_k_time_source` (tag 0x4c414e2a)
