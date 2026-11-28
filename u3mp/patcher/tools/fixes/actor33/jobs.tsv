@@ -936,9 +936,9 @@ overlay-port	vil4-break-bldng-a-multi.pak	703a315595571fa0575960d7cc077f6531c8a3
 overlay-port	vil4-break-bldng-a.pak	49b3f12c1cf4cbdb968c18fec1023a50669244147ecdd94f348219d016735bce	identical	ps4actor	f525859	goty-dlc	rover-2d-civ-hvk	own-spread-notmpl	64	{"PS4ACTOR_NO_TMPL_TEX": "1", "PS4ACTOR_SPREAD_MATS": "1"}	
 overlay-port	vil4-gateway-destruct.pak	7137c9e33dae7b375e356e90886ff4f7c3dc34eda7dd3a4d3bf6d7c584432385	identical	ps4actor	f525859	goty-dlc	rover-2d-civ-hvk	own-spread-notmpl	64	{"PS4ACTOR_NO_TMPL_TEX": "1", "PS4ACTOR_SPREAD_MATS": "1"}	
 overlay-port	wz-blowup-fiat-a.pak	6997f3ec583d7a93b9eded3a0de5fc5e8e58da3f0044591613e71951ec2a34d1	identical	ps4actor	f525859	goty-dlc	rover-2d-civ-hvk	own-spread-notmpl	64	{"PS4ACTOR_NO_TMPL_TEX": "1", "PS4ACTOR_SPREAD_MATS": "1"}	
-overlay-mp	hero-london-ring.pak	fd32c3bb06cfba9d19f78e70d5cf0a618ec013c9f30de064daf32193fbea2c58	identical	ps4actor	f525859	disc	hero-london-ring	mp-sf3	0	{}	
-overlay-mp	hero-london.pak	168e9b3f73b4ca16d6c0eec036b7c42a6fe8492d8936c487ffc1129128c7deb5	identical	ps4actor	f525859	disc	hero-london	mp-sf3	0	{}	
-overlay-mp	mp-hero-ramses-bandana.pak	f38044d6e708b2202c5c1322ff733465e799d41d97e61394a70fdfffabe53510	identical	ps4actor	f525859	dlc-patch18/mp-hero-part-lion-mask.pak	mp-hero-ramses-bandana	mp-sf0	0	{"_rename": "mp-hero-ramses-bandana"}	
+overlay-mp	hero-london-ring.pak	fd32c3bb06cfba9d19f78e70d5cf0a618ec013c9f30de064daf32193fbea2c58	retail	ps4actor	f525859	disc	hero-london-ring	mp-sf3	0	{}	
+overlay-mp	hero-london.pak	168e9b3f73b4ca16d6c0eec036b7c42a6fe8492d8936c487ffc1129128c7deb5	retail	ps4actor	f525859	disc	hero-london	mp-sf3	0	{}	
+overlay-mp	mp-hero-ramses-bandana.pak	f38044d6e708b2202c5c1322ff733465e799d41d97e61394a70fdfffabe53510	retail	ps4actor	f525859	dlc-patch18/mp-hero-part-lion-mask.pak	mp-hero-ramses-bandana	mp-sf0	0	{"_rename": "mp-hero-ramses-bandana"}	
 overlay-mp	net.pak	263fe2fc9cd7921bb2c1e06914d50352bb2e24c7e323def54d5afedbe29aaf77	identical	convert_net	f525859	pak23:	menu	-	0	{}	
 overlay-r3	pirate-armor-a-full-mp.pak	99c64d0c41702875e051fbf2afdf431815f05dcddfbcdaa0739ad5f651736b2f	identical	ps4actor	f525859	disc	pirate-armor-all	mp	64	{"PS4ACTOR_SPREAD_MATS": "1", "_skel": "pirate-torso-all"}	cb3fix
 overlay-port	pirate-armor-a-full-mp.pak	77e43731fbeb7a5ab19657b462ae6e366dd1e9534742f6dac31e09f3e886ac44	identical	ps4actor	f525859	disc	pirate-armor-all	mp	64	{"PS4ACTOR_SPREAD_MATS": "1", "_skel": "pirate-torso-all"}	

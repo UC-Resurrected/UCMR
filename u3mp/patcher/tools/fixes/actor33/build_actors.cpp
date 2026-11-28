@@ -7,9 +7,10 @@
 // template (a PS3 cut-out map on a template without a cut-out material: actor::transparency_template picks another),
 // mode, texture cap (only for textures a retail texture dictionary streams), env (json, PS4ACTOR_*), post. A file
 // already at its sha256 is left alone; a 'base' row
-// never replaces an existing file (a later step owns it); other statuses need --allow-equivalent. A build whose sha256
-// differs from an identical / base row is reported (DIFF) and not installed. Replaced files are backed up once to
-// work/backup-actor33/. Lab rows (no Lab maps on PC) and rows hidden by a higher overlay are not built.
+// never replaces an existing file (a later step owns it); a 'retail' row is not built (the retail PS4 pak of that name is
+// used: an older import's converted copy is backed up and removed); other statuses need --allow-equivalent. A build whose sha256
+// differs from an identical / base row is reported (DIFF) and not installed. Replaced files are not backed up (an older
+// import's work/backup-actor33/ is removed). Lab rows (no Lab maps on PC) and rows hidden by a higher overlay are not built.
 // Methods, all C++: ps4actor and rename (dctools/ps4actor.cpp), anim (anim.cpp), wpnmods and convert_net (ps4mats.cpp);
 // own-skeleton props with collision need the Havok tables of step actors-hk-tables (TMP/hk). PS3 sources and the
 // animstream extract come from the player's archives (dctools/psarc.cpp).
@@ -148,15 +149,6 @@ fs::path template_pak(const std::string &t, bool solo) {
     }
     prefetch_read(d / upath(t + ".pak"));
     return d / upath(t + ".pak");
-}
-
-// a real copy, never a hard link: later steps install and restore with copy2 (copy_file), which writes into the
-// existing file, so a hard-linked backup would change with it
-void backup_file(const fs::path &from, const fs::path &to, const Bytes *data = nullptr) {
-    if (fs::exists(to)) return;
-    fs::create_directories(to.parent_path());
-    if (data) write_file_replace(to, *data);
-    else copy2(from, to);
 }
 
 // mode -> ps4actor.convert keyword arguments and PS4ACTOR_* variables
@@ -448,6 +440,22 @@ int actors(const std::vector<std::string> &argv) {
             if (ovs.count(r["overlay"]) && (only.empty() || only.count(r["name"]))) rows.push_back(r);
         }
     }
+    // status 'retail': the retail PS4 pak of that name is the right one (an older recipe replaced it with a conversion);
+    // an older import's converted copy is removed, so the game loads the retail pak again
+    int retired = 0;
+    for (const Job &r : rows) {
+        if (r.at("status") != "retail") continue;
+        const fs::path dst = work / upath(r.at("overlay")) / "u3data" / "build" / "main" / "actor33" / "ps4" / upath(r.at("name"));
+        if (!fs::is_regular_file(dst)) continue;
+        if (!a.has("--apply")) {
+            std::printf("would remove %s %s (the retail pak is used)\n", r.at("overlay").c_str(), r.at("name").c_str());
+            continue;
+        }
+        fs::remove(dst);
+        retired++;
+        std::printf("removed %s %s (the retail pak is used)\n", r.at("overlay").c_str(), r.at("name").c_str());
+    }
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [](const Job &r) { return r.at("status") == "retail"; }), rows.end());
     size_t n0 = rows.size();
     rows.erase(std::remove_if(rows.begin(), rows.end(), [](const Job &r) { return r.at("source") == "labsrc"; }), rows.end());
     if (n0 != rows.size()) std::printf("%zu Lab jobs skipped (no Lab maps on PC)\n", n0 - rows.size());
@@ -562,17 +570,13 @@ int actors(const std::vector<std::string> &argv) {
             }
             const fs::path &dst = todo[i].dst;
             fs::create_directories(dst.parent_path());
-            if (fs::exists(dst)) {
-                const fs::path bk = work / "backup-actor33" / upath(r.at("overlay")) / upath(r.at("name"));
-                backup_file(dst, bk);
-            }
             write_file_replace(dst, b);
             installed++;
         }
         std::vector<Bytes>().swap(bout);
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("actor33: same %d, installed %d, built_diff %d, fail %d, skipped %d, %.0f s%s\n", same, installed, built_diff, fail, skipped, secs,
+    std::printf("actor33: same %d, installed %d, built_diff %d, fail %d, skipped %d, removed %d, %.0f s%s\n", same, installed, built_diff, fail, skipped, retired, secs,
                 a.has("--apply") ? "" : " (dry run)");
     // The PS3 actor paks, animation streams and template copies this step unpacked (about 850 MB) are only its own
     // working files (plain files it wrote, no links): a later run unpacks what it needs again from the PS3 archives in
@@ -581,6 +585,11 @@ int actors(const std::vector<std::string> &argv) {
         std::error_code ec;
         for (const char *dir : {"ps3", "stm", "tsolo", "labsrc"}) fs::remove_all(a_tmp / dir, ec);
     }
+    // older imports kept a copy of every actor pak a rebuild replaced: only an older converter's output, which any run
+    // rebuilds from the player's own PS3 / PS4 files, so nothing reads it
+    if (a.has("--apply"))
+        if (const uint64_t freed = drop_backup_folder(work / "backup-actor33"))
+            std::printf("removed the old actor pak backups (%.0f MB)\n", double(freed) / (1 << 20));
     // maintainers, after an intended converter change (never in the import): --rehash writes the sha256 of every row
     // built here into the job's jobs.tsv (column 3), so the step checks the new results from then on
     if (a.has("--rehash")) {

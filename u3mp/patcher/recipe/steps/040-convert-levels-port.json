@@ -37,8 +37,7 @@
   ]
  ],
  "writes": [
-  "work/overlay-port/u3data/build/main/pak23/ps4/*.pak",
-  "work/backup-pak23-levels/overlay-port/*.pak"
+  "work/overlay-port/u3data/build/main/pak23/ps4/*.pak"
  ],
  "must_write": false,
  "reference_check": false,

@@ -34,6 +34,9 @@ struct Args {
 // helpers of the steps that replaced Python scripts (their messages and files stay as the scripts made them)
 std::string md5_hex(const Bytes &data);
 void copy2(const fs::path &src, const fs::path &dst);   // shutil.copy2: the bytes and the modification time
+// an old backup folder <dir>/<overlay>/<file> of replaced level / actor paks: its files and folders removed, links never
+// entered; the bytes freed
+uint64_t drop_backup_folder(const fs::path &dir);
 bool game_running(bool name_contains = false);          // a process uncharted.exe (or one whose name contains it)
 std::string win_path(std::string p);                    // the form os.path.abspath gives on Windows: '/' -> '\'
 std::string pyhex(uint64_t v);                          // Python hex() / '%#x': 0x0, 0x1f

@@ -6,8 +6,8 @@
 // A plan row names the level, its method, options, the PS3 source (archive + pak) and the sha256 the result must have.
 // A file already equal to that sha256 is skipped. A row that is not 'identical' never replaces an existing file, except a
 // 'base' row whose file is neither its own result nor the finished reference (an older plan's build). An 'identical'
-// row whose build differs is reported and not installed. Replaced files are backed up once to
-// work/backup-pak23-levels/<overlay>/. Rows hidden by a higher overlay ($RECIPE_SHADOWED) are not built.
+// row whose build differs is reported and not installed. Replaced files are not backed up (an older import's
+// work/backup-pak23-levels/ is removed). Rows hidden by a higher overlay ($RECIPE_SHADOWED) are not built.
 // The PS3 sources: ps3idx.tsv (every pak23 level pak of the player's PS3 archives, in source priority) and one extract
 // per row (a GOTY disc stands in for the DLC map packs); both caches are dropped when the PS3 inputs change.
 // In C++: empty (dctools/ps4writer.cpp), ingame (dctools/ps4ingame.cpp), vischeat, windoff, hud (dctools/texcodec.cpp),
@@ -713,13 +713,6 @@ int levels(const std::vector<std::string> &argv) {
             report.items.push_back(e);
             if (apply) {
                 const fs::path dst = upath(r.at("dst"));
-                if (fs::exists(dst) && !r.count("replace")) {   // a replaced earlier build needs no backup
-                    const fs::path bk = work / "backup-pak23-levels" / upath(r.at("overlay")) / upath(r.at("name") + ".pak");
-                    if (!fs::exists(bk)) {
-                        fs::create_directories(bk.parent_path());
-                        copy2(dst, bk);
-                    }
-                }
                 fs::create_directories(dst.parent_path());
                 write_file_replace(dst, data);
                 std::printf("installed %s/%s: %s\n", r.at("overlay").c_str(), r.at("name").c_str(), tag.c_str());
@@ -799,6 +792,11 @@ int levels(const std::vector<std::string> &argv) {
         // again from the PS3 archives, so they are not left in the import folder (the retail survey res/ stays)
         fs::remove_all(g_tmp / "ps3", ec);
     }
+    // older imports kept a copy of every level pak a rebuild replaced (several GB): only an older converter's output,
+    // which any run rebuilds from the player's own PS3 / PS4 files, so nothing reads it
+    if (apply)
+        if (const uint64_t freed = drop_backup_folder(work / "backup-pak23-levels"))
+            std::printf("removed the old level pak backups (%.0f MB)\n", double(freed) / (1 << 20));
     return bad ? 1 : 0;
 }
 
