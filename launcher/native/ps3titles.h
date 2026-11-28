@@ -81,20 +81,22 @@ inline std::vector<fs::path> game_dirs(const std::vector<fs::path> &roots) {
 inline std::vector<std::pair<std::string, fs::path>> find(const std::vector<fs::path> &roots, const std::vector<std::string> &ids) {
     std::vector<std::pair<std::string, fs::path>> titles;   // (key, folder) of every subfolder, folder order
     for (const fs::path &d : game_dirs(roots)) {
-        std::vector<std::string> names;
+        std::vector<std::pair<std::string, fs::path>> names;   // (UTF-8 name, folder)
         std::error_code ec;
         for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
             std::error_code e;
-            if (it->is_directory(e)) names.push_back(utf8(it->path().filename()));
+            if (it->is_directory(e)) names.push_back({utf8(it->path().filename()), it->path()});
         }
         std::sort(names.begin(), names.end());
-        for (const std::string &n : names) titles.push_back({key(n), d / fs::path(std::u8string(n.begin(), n.end()))});
+        for (const auto &n : names) titles.push_back({key(n.first), n.second});
     }
     std::vector<std::pair<std::string, fs::path>> out;
     for (const std::string &id : ids)
-        for (const auto &[k, folder] : titles)
-            if (k == id && std::find_if(out.begin(), out.end(), [&](const auto &o) { return o.second == folder; }) == out.end())
+        for (const auto &t : titles) {
+            const fs::path &folder = t.second;
+            if (t.first == id && std::find_if(out.begin(), out.end(), [&](const std::pair<std::string, fs::path> &o) { return o.second == folder; }) == out.end())
                 out.push_back({id, folder});
+        }
     return out;
 }
 
