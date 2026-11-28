@@ -254,8 +254,11 @@ struct HwComputeRuntimeInfo {
     std::array<u32, 3> workgroup_size;
     std::array<bool, 3> tgid_enable;
 
+    // gow3 28 Nov 2026: the LDS size too, since the LDS bounds check (lds_bounds_pass.cpp) builds
+    // it into the shader: a permutation made for one size must not serve another
     bool operator==(const HwComputeRuntimeInfo& other) const noexcept {
-        return workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
+        return shared_memory_size == other.shared_memory_size &&
+               workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
     }
 };
 

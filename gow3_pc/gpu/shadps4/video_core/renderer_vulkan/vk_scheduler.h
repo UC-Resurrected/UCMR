@@ -684,6 +684,8 @@ public:
     void Flush();
     void Checkpoint(const char* operation,u64 first,u64 second=0);
     void ReportCheckpoints() const;
+    /// gow3 28 Nov 2026: this scheduler's breadcrumb lines (empty without breadcrumbs)
+    std::string BreadcrumbText() const;
 
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(std::source_location caller = std::source_location::current());

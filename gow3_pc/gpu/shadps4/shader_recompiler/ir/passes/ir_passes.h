@@ -47,6 +47,18 @@ bool MultiwaveLdsBarriers(u64 pgm_hash);
 /// (effect_loop_clamp_pass.cpp); EffectLoopClamp tells whether a shader gets it (cache names).
 void EffectLoopClampPass(IR::Program& program);
 bool EffectLoopClamp(u64 pgm_hash);
+/// gow3 28 Nov 2026: compute shaders' LDS accesses follow the PS4's bounds rule (reads past the
+/// allocation give 0, writes there are dropped; lds_bounds_pass.cpp). LdsBounds tells whether a
+/// compute shader gets it (cache names).
+void LdsBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info, const Profile& profile);
+bool LdsBounds(u64 pgm_hash);
+u32 SharedAccessBytes(IR::Opcode op);
+/// gow3 28 Nov 2026: an `if` with a workgroup barrier in it is run by every thread, with the same
+/// result (uniform_barrier_pass.cpp), on Intel's drivers. UniformBarrierGpu is set by the pipeline
+/// cache; UniformBarriers tells whether a compute shader gets it (cache names).
+void UniformBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info, const Profile& profile);
+bool UniformBarriers(u64 pgm_hash);
+bool& UniformBarrierGpu();
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);

@@ -12,6 +12,13 @@ std::string DumpASLNode(const AbstractSyntaxNode& node,
     case AbstractSyntaxNode::Type::Block:
         return fmt::format("Block: ${}", block_to_index.at(node.data.block));
     case AbstractSyntaxNode::Type::If:
+        // gow3: a constant condition (uniform_barrier_pass.cpp) prints as its value
+        if (node.data.if_node.cond.IsImmediate()) {
+            return fmt::format("If: cond = {}, body = ${}, merge = ${}",
+                               node.data.if_node.cond.U1() ? "true" : "false",
+                               block_to_index.at(node.data.if_node.body),
+                               block_to_index.at(node.data.if_node.merge));
+        }
         return fmt::format("If: cond = %{}, body = ${}, merge = ${}",
                            inst_to_index.at(node.data.if_node.cond.Inst()),
                            block_to_index.at(node.data.if_node.body),
