@@ -347,14 +347,10 @@ extern "C" U3X_FN void u3x_k04_retag(uint8_t *page, uint32_t *counters) {
     const uint32_t count = rd<uint32_t>(list, 0);
     if (!items || count > 32) return;
 
-    // the Friendly Fire row: the plain value row, as PS3 draws it
-    for (uint32_t i = 0; i < count; i++) {
-        uint8_t *item = items + i * 0x68;
-        if (rd<uint32_t>(item, 0x10) == 13 && rd<uint32_t>(item, 0x28) == 0x9b7aa1a9u) {
-            field<uint32_t>(item, 0x10) = 6;
-            counters[3]++;
-        }
-    }
+    // v7.269: the Friendly Fire row keeps its drop-down box (kind 13). PS3 draws every row of this page as a drop-down
+    // box (its kind 6 and kind 13 are the same class); the import's menu.bin now makes the other rows kind 13 as well
+    // (dc-recipes), so nothing turns Friendly Fire into PS4's inline spinner any more (counter 3 stays 0).
+    (void)items;
     // the Time Limit row asks this part's source
     counters[4] += u3x_retag_widget(page, 0, 0x2a, TAG_TIME_LIMIT, 32);
 }

@@ -44,6 +44,48 @@ struct Fail : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// Converter rule for the multiplayer menu.bin (overlay-r3), 28 Nov 2026: the Custom Game SETTINGS and ADVANCED
+// SETTINGS rows open a drop-down box, as on PS3. Both games' menu data give these rows control kind 6, but PS3's page
+// builder makes kind 6 and kind 13 the same drop-down box, while the PS4 game draws kind 6 as Bluepoint's inline
+// spinner ("<>", left / right). Kind 13 is still the drop-down box on PS4 (Friendly Fire already uses it), so every
+// kind-6 row of those two pages becomes kind 13; nothing else in the record changes (the box shows +0x60 = 5 rows).
+// A row that is not one of the known option rows stops the step instead of being changed. Returns the rows changed.
+const char *MENU_KEY = "overlay-r3/dc1/ps4/menu.bin";
+int option_boxes(Bytes &menu) {
+    constexpr uint32_t PAGES = 0x74ffceeb, PAGE = 0x80, RECORD = 0x68, SPINNER = 6, BOX = 13;
+    constexpr uint32_t BOX_PAGES[] = {0x86799eee /* PAGE_CUSTOMRULES */, 0xd7a415a2 /* PAGE_CUSTOMRULES2 */};
+    static const std::set<uint32_t> OPTION_ROWS = {   // label ids
+        0x86da827f, 0x7f532e93, 0x07774a0d, 0x9b7aa1a9, 0x59f9b620, 0x3ddcb691, 0x8d95d2ba, 0x463a4618, 0x9c4e8022,
+        0xfcac898d,                                                                         // SETTINGS (Variation: PS4)
+        0x0e5d6fcf, 0xf3ea88d6, 0xceed2298, 0xf185a544, 0x34380570, 0xaf04feeb, 0x13d4e325, 0x72ce8aea};   // ADVANCED
+    const Dc c(menu, "menu.bin");
+    const auto table = c.bysid.find(PAGES);
+    if (table == c.bysid.end()) throw Fail("menu.bin: no page table");
+    const uint64_t t = table->second.second, pages = c.ptr(t + 8);
+    const uint32_t n = c.u32(t);
+    int changed = 0, found = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        const uint64_t page = pages + uint64_t(k) * PAGE;
+        const uint32_t id = c.u32(page + 8);
+        if (std::find(std::begin(BOX_PAGES), std::end(BOX_PAGES), id) == std::end(BOX_PAGES)) continue;
+        found++;
+        const uint64_t list = c.ptr(page + 0x48), rows = c.u32(list), first = c.ptr(list + 8);
+        for (uint64_t r = 0; r < rows; r++) {
+            const uint64_t rec = first + r * RECORD;
+            const uint32_t kind = c.u32(rec + 0x10), label = c.u32(rec + 0x28);
+            const int16_t shown = int16_t(c.u32(rec + 0x60) & 0xffff), arg = int16_t(c.u32(rec + 0x5c) >> 16);
+            if (kind == BOX && OPTION_ROWS.count(label)) continue;
+            if (kind != SPINNER || !OPTION_ROWS.count(label) || c.u32(rec + 0x14) != 0 || shown != 5 || arg != 0)
+                throw Fail(fmt("menu.bin: page %08x row %llu (label %08x, kind %u) is not a known option row", id,
+                               (unsigned long long)r, label, kind));
+            wr32le(&menu[rec + 0x10], BOX);
+            changed++;
+        }
+    }
+    if (found != 2) throw Fail(fmt("menu.bin: %d of the 2 Custom Game settings pages found", found));
+    return changed;
+}
+
 // rebuild a recipe's file; accepted: other accepted versions (sha256) per source name
 Bytes apply(const json::Value &rec, std::map<std::string, std::optional<Bytes>> &sources, const std::map<std::string, std::set<std::string>> &accepted,
             const std::map<int, int> &opmap) {
@@ -223,21 +265,33 @@ int dc_recipes(const std::vector<std::string> &argv) {
         const size_t sl = key.find('/');
         const fs::path dst = upath(project + "/work/" + key.substr(0, sl) + "/u3data/build/main/" + key.substr(sl + 1));
         const std::string want = rec.get("sha256")->s;
-        if (fs::exists(dst) && sha_file(dst) == want) {
+        const bool menu = key == MENU_KEY;   // the recipe's bytes plus the option-box rule: compared with dst below
+        if (!menu && fs::exists(dst) && sha_file(dst) == want) {
             count("already");
             continue;
         }
         Bytes out;
+        bool reference = false;
         try {
             std::map<std::string, std::optional<Bytes>> s;
             for (const auto &[n, h] : rec.get("sources")->fields) s[n] = src(n);
             out = apply(rec, s, accepted, opmap);
+            reference = sha256_hex(out) == want;
+            if (menu) std::printf("menu.bin: %d Custom Game option rows open a drop-down box\n", option_boxes(out));
         } catch (const Fail &ex) {
             count("failed");
             std::printf("FAILED %s %s\n", key.c_str(), ex.what());
             continue;
+        } catch (const Stop &ex) {
+            count("failed");
+            std::printf("FAILED %s %s\n", key.c_str(), ex.what());
+            continue;
         }
-        if (sha256_hex(out) != want) {   // built from another accepted net18.bin: the reference structure with the server's newer values
+        if (menu && fs::exists(dst) && read_file(dst) == out) {
+            count("already");
+            continue;
+        }
+        if (!reference) {   // built from another accepted net18.bin: the reference structure with the server's newer values
             if (fs::exists(dst) && read_file(dst) == out) {
                 count("already");
                 continue;
